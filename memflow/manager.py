@@ -1,5 +1,5 @@
 """
-MemFlowManager — core orchestrator for Phase 1.
+MemFlowManager — core orchestrator for MemFlow.
 
 Public API:
   add(messages, procedure, user_id)  — store a procedure
@@ -15,7 +15,7 @@ import threading
 
 from memflow.llm import BaseLLM, LLMFactory
 from memflow.models import Procedure, SearchResult
-from memflow.prompts import CHAT_SYSTEM_PROMPT, EXTRACTION_PROMPT
+from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
 from memflow.store import BaseStore, EmulatedStore
 
 PROCEDURAL_KEYWORDS = [
@@ -89,7 +89,12 @@ class MemFlowManager:
         if not self._is_likely_procedural(combined):
             return {"results": [], "skipped": "no procedural keywords detected"}
 
-        # LLM extraction
+        # Stage 2: LLM classification
+        memory_type = self._classify_memory_type(combined)
+        if memory_type != "procedural":
+            return {"results": [], "skipped": f"classified as {memory_type}"}
+
+        # Stage 3: LLM extraction
         extraction_messages = [
             {"role": "system", "content": EXTRACTION_PROMPT},
             *msg_list,
@@ -185,6 +190,19 @@ class MemFlowManager:
             daemon=True,
         )
         thread.start()
+
+    def _classify_memory_type(self, content: str) -> str:
+        """Stage 2: LLM classification — returns procedural/semantic/episodic/none."""
+        messages = [
+            {"role": "system", "content": CLASSIFICATION_PROMPT},
+            {"role": "user", "content": content},
+        ]
+        try:
+            response = self.llm.generate(messages)
+            data = _parse_json(response)
+            return data.get("type", "procedural")
+        except Exception:
+            return "procedural"  # fall back to procedural on error
 
     @staticmethod
     def _is_likely_procedural(text: str) -> bool:

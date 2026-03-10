@@ -1,5 +1,5 @@
 """
-Prompt templates for MemFlow Phase 1.
+Prompt templates for MemFlow.
 """
 
 EXTRACTION_PROMPT = """\
@@ -20,6 +20,18 @@ IMPORTANT:
 - Use single-line strings. Do NOT use triple quotes or newlines inside the JSON.
 - Title format: "How to ..." (matches user query style)
 - Keep content CONCISE: one sentence per step.
+"""
+
+CLASSIFICATION_PROMPT = """\
+Classify the following content into exactly one memory type.
+
+Memory types:
+- procedural: ordered steps, workflows, "how to do X", SOPs
+- semantic:   facts, definitions, "what X is", current state
+- episodic:   past events with time context, "what happened when"
+- none:       conversational filler, greetings, not worth storing
+
+Respond ONLY with a JSON object: {"type": "procedural|semantic|episodic|none"}
 """
 
 CHAT_SYSTEM_PROMPT = """\
