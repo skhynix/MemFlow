@@ -9,11 +9,9 @@ Public API:
 
 from __future__ import annotations
 
-import json
-import re
 import threading
 
-from memflow.llm import BaseLLM, LLMFactory
+from memflow.llm import BaseLLM, LLMFactory, parse_json
 from memflow.models import Procedure, SearchResult
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
@@ -145,7 +143,7 @@ class MemFlowManager:
         ]
         try:
             response = self.llm.generate(extraction_messages)
-            data = _parse_json(response)
+            data = parse_json(response)
         except Exception as e:
             return {"results": [], "error": str(e)}
 
@@ -242,7 +240,7 @@ class MemFlowManager:
         ]
         try:
             response = self.llm.generate(messages)
-            data = _parse_json(response)
+            data = parse_json(response)
             return data.get("type", "procedural")
         except Exception:
             return "procedural"  # fall back to procedural on error
@@ -253,22 +251,3 @@ class MemFlowManager:
         return any(kw in text_lower for kw in PROCEDURAL_KEYWORDS)
 
 
-def _parse_json(text: str) -> dict:
-    """Extract a JSON object from LLM output, stripping markdown fences and triple quotes."""
-    # Remove markdown code fences
-    text = re.sub(r"```(?:json)?\s*", "", text).strip().rstrip("`").strip()
-    # Replace triple quotes with single quotes
-    text = re.sub(r'"""\s*', '"', text)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        # Try to find JSON object by matching braces
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            json_str = text[start:end + 1]
-            try:
-                return json.loads(json_str)
-            except json.JSONDecodeError:
-                pass
-    return {}

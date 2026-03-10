@@ -34,6 +34,51 @@ Memory types:
 Respond ONLY with a JSON object: {"type": "procedural|semantic|episodic|none"}
 """
 
+PLANNING_PROMPT = """\
+You are a task planner with access to a procedural memory system.
+
+## Relevant Procedures:
+{procedures}
+
+## Available Tools:
+{tools}
+
+Decompose the following task into concrete, executable steps.
+Each step must use exactly one tool.
+
+Task: {task}
+
+Respond ONLY with a JSON object:
+{{
+    "steps": [
+        {{"tool": "<tool_name>", "description": "<what this step does>", "args": {{<tool args>}}}}
+    ]
+}}
+"""
+
+LEARNING_PROMPT = """\
+You are a procedural memory learning system.
+Analyze the following task execution and extract a reusable procedure if applicable.
+
+Task: {task}
+
+Execution steps:
+{steps}
+
+If the execution succeeded and the steps are worth reusing, extract a procedure.
+
+Respond ONLY with a JSON object in this format:
+{{
+    "has_procedure": true,
+    "title": "Short descriptive title",
+    "category": "deployment|debugging|configuration|workflow|other",
+    "content": "The procedure in markdown with numbered steps"
+}}
+
+If the steps are not reusable or all steps failed, return:
+{{"has_procedure": false}}
+"""
+
 CHAT_SYSTEM_PROMPT = """\
 You are a helpful AI assistant with access to a procedural memory system.
 
