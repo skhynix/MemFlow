@@ -16,7 +16,7 @@ import threading
 from memflow.llm import BaseLLM, LLMFactory
 from memflow.models import Procedure, SearchResult
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
-from memflow.store import BaseStore, EmulatedStore, FileStore
+from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
 
 PROCEDURAL_KEYWORDS = [
     "step", "how to", "first", "then", "finally",
@@ -26,21 +26,31 @@ PROCEDURAL_KEYWORDS = [
 
 
 class MemFlowManager:
-    def __init__(self, llm: BaseLLM, store: BaseStore | None = None) -> None:
+    def __init__(
+        self,
+        llm: BaseLLM,
+        store: BaseStore | None = None,
+        bypass: MemMachineBypass | None = None,
+    ) -> None:
         self.llm = llm
         self.store = store or EmulatedStore()
+        self._bypass = bypass  # routes semantic/episodic content to MemMachine
 
     @classmethod
     def from_env(cls) -> "MemFlowManager":
         """Create a manager configured from environment variables.
 
         Environment variables:
-          LLM_PROVIDER      — ollama | openai-compatible (default: ollama)
-          LLM_MODEL         — model name (provider default if unset)
-          LLM_API_BASE      — LLM server URL (default: http://localhost:11434)
-          LLM_API_KEY       — API key for authenticated endpoints
-          MEMFLOW_BACKEND   — emulated | file | memmachine (default: emulated)
-          MEMFLOW_DATA_DIR  — data directory for file backend (default: ./memflow_data)
+          LLM_PROVIDER         — ollama | openai-compatible (default: ollama)
+          LLM_MODEL            — model name (provider default if unset)
+          LLM_API_BASE         — LLM server URL (default: http://localhost:11434)
+          LLM_API_KEY          — API key for authenticated endpoints
+          MEMFLOW_BACKEND      — emulated | file | memmachine (default: emulated)
+          MEMFLOW_DATA_DIR     — data directory for file backend (default: ./memflow_data)
+          MEMMACHINE_BASE_URL  — MemMachine server URL (default: http://localhost:8080)
+          MEMMACHINE_ORG_ID    — MemMachine org ID (default: default)
+          MEMMACHINE_PROJECT   — MemMachine project ID (default: memflow)
+          MEMMACHINE_API_KEY   — MemMachine API key (optional)
         """
         import os
         provider = os.getenv("LLM_PROVIDER", "ollama")
@@ -50,13 +60,28 @@ class MemFlowManager:
         llm = LLMFactory.create(provider, model=model, api_base=api_base, api_key=api_key)
 
         backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+        mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
+        mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
+        mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
+        mm_key = os.getenv("MEMMACHINE_API_KEY")
+
+        store: BaseStore
+        bypass: MemMachineBypass | None = None
+
         if backend == "file":
             data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
-            store: BaseStore = FileStore(data_dir=data_dir)
+            store = FileStore(data_dir=data_dir)
+        elif backend == "memmachine":
+            store = MemMachineStore(
+                base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
+            )
+            bypass = MemMachineBypass(
+                base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
+            )
         else:
             store = EmulatedStore()
 
-        return cls(llm=llm, store=store)
+        return cls(llm=llm, store=store, bypass=bypass)
 
     # ------------------------------------------------------------------
     # add
@@ -101,8 +126,16 @@ class MemFlowManager:
 
         # Stage 2: LLM classification
         memory_type = self._classify_memory_type(combined)
-        if memory_type != "procedural":
+        if memory_type in ("semantic", "episodic"):
+            if self._bypass is not None:
+                try:
+                    self._bypass.add(combined, memory_type, user_id)
+                except Exception:
+                    pass  # bypass failures are non-critical
+                return {"results": [], "routed_to": "bypass", "type": memory_type}
             return {"results": [], "skipped": f"classified as {memory_type}"}
+        if memory_type == "none":
+            return {"results": [], "skipped": "classified as none"}
 
         # Stage 3: LLM extraction
         extraction_messages = [
