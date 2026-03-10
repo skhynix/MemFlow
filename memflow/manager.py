@@ -5,14 +5,20 @@ Public API:
   add(messages, procedure, user_id)  — store a procedure
   search(query, user_id, top_k)      — retrieve procedures
   chat(query, user_id)               — respond using procedure context
+  plan(task, user_id)                — decompose task into executable steps
+  run(task, user_id, tools)          — plan + execute + learn
 """
 
 from __future__ import annotations
 
 import threading
+from typing import Callable
 
+from memflow.executor import ToolRegistry
+from memflow.learner import Learner
 from memflow.llm import BaseLLM, LLMFactory, parse_json
-from memflow.models import Procedure, SearchResult
+from memflow.models import JobResult, Procedure, RunResult, SearchResult, TaskPlan
+from memflow.planner import LLMPlanner
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
 
@@ -33,6 +39,10 @@ class MemFlowManager:
         self.llm = llm
         self.store = store or EmulatedStore()
         self._bypass = bypass  # routes semantic/episodic content to MemMachine
+        # Phase 3 components — lazily initialised on first use
+        self._planner: LLMPlanner | None = None
+        self._executor: ToolRegistry | None = None
+        self._learner: Learner | None = None
 
     @classmethod
     def from_env(cls) -> "MemFlowManager":
@@ -216,6 +226,78 @@ class MemFlowManager:
             )
 
         return response
+
+    # ------------------------------------------------------------------
+    # plan
+    # ------------------------------------------------------------------
+
+    def plan(
+        self,
+        task: str,
+        user_id: str | None = None,
+    ) -> TaskPlan:
+        """Decompose a task into executable steps.
+
+        Relevant procedures are retrieved first and injected into the planning
+        prompt so the LLM can reuse existing SOPs (Retrieve → Planner back-edge).
+        """
+        results = self.search(task, user_id=user_id)
+        context = "\n\n---\n\n".join(
+            f"### {r.procedure.title}\n{r.procedure.content}"
+            for r in results
+        ) if results else ""
+
+        if self._planner is None:
+            self._planner = LLMPlanner(self.llm)
+        return self._planner.plan(task, context=context)
+
+    # ------------------------------------------------------------------
+    # run
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        task: str,
+        user_id: str | None = None,
+        tools: dict[str, Callable[..., str]] | None = None,
+    ) -> RunResult:
+        """Plan, execute, and learn from a task.
+
+        Steps:
+          1. Retrieve relevant procedures (context for planning).
+          2. Plan: LLM decomposes the task into Jobs.
+          3. Execute: run each Job with the registered tools.
+          4. Learn: extract a reusable Procedure from successful steps
+             and store it automatically (Learn → Retrieve back-edge).
+
+        Args:
+            task:    High-level task description.
+            user_id: User scope for retrieval and storage.
+            tools:   Extra tools to register {name: callable}.
+                     Each callable receives Job.args as keyword arguments
+                     and must return a string.
+        """
+        task_plan = self.plan(task, user_id=user_id)
+
+        if self._executor is None:
+            self._executor = ToolRegistry(llm=self.llm)
+        if tools:
+            for name, fn in tools.items():
+                self._executor.register(name, fn)
+
+        job_results: list[JobResult] = [
+            self._executor.execute(job) for job in task_plan.jobs
+        ]
+
+        if self._learner is None:
+            self._learner = Learner(self.llm)
+        learned = self._learner.extract(
+            task, job_results, user_id=user_id or "default"
+        )
+        if learned is not None:
+            self.store.add(learned)
+
+        return RunResult(plan=task_plan, job_results=job_results, learned=learned)
 
     # ------------------------------------------------------------------
     # internal helpers
