@@ -16,7 +16,7 @@ import threading
 from memflow.llm import BaseLLM, LLMFactory
 from memflow.models import Procedure, SearchResult
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
-from memflow.store import BaseStore, EmulatedStore
+from memflow.store import BaseStore, EmulatedStore, FileStore
 
 PROCEDURAL_KEYWORDS = [
     "step", "how to", "first", "then", "finally",
@@ -35,10 +35,12 @@ class MemFlowManager:
         """Create a manager configured from environment variables.
 
         Environment variables:
-          LLM_PROVIDER   — openai | anthropic | ollama (default: ollama)
-          LLM_MODEL      — model name (provider default if unset)
-          LLM_API_BASE   — base URL for Ollama (default: http://localhost:11434)
-          LLM_API_KEY    — API key for OpenAI / Anthropic
+          LLM_PROVIDER      — ollama | openai-compatible (default: ollama)
+          LLM_MODEL         — model name (provider default if unset)
+          LLM_API_BASE      — LLM server URL (default: http://localhost:11434)
+          LLM_API_KEY       — API key for authenticated endpoints
+          MEMFLOW_BACKEND   — emulated | file | memmachine (default: emulated)
+          MEMFLOW_DATA_DIR  — data directory for file backend (default: ./memflow_data)
         """
         import os
         provider = os.getenv("LLM_PROVIDER", "ollama")
@@ -46,7 +48,15 @@ class MemFlowManager:
         api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
         api_key = os.getenv("LLM_API_KEY")
         llm = LLMFactory.create(provider, model=model, api_base=api_base, api_key=api_key)
-        return cls(llm=llm)
+
+        backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+        if backend == "file":
+            data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
+            store: BaseStore = FileStore(data_dir=data_dir)
+        else:
+            store = EmulatedStore()
+
+        return cls(llm=llm, store=store)
 
     # ------------------------------------------------------------------
     # add

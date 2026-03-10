@@ -1,13 +1,18 @@
 """
-Vector store abstraction for MemFlow.
+Storage backends for MemFlow.
 
-Phase 1: EmulatedStore (in-memory, word-overlap search)
-Phase 2: FileStore (.md files), MemMachineStore (production)
+EmulatedStore  — in-memory dict, word-overlap search (testing / demos)
+FileStore      — Markdown files on disk, word-overlap search (local dev)
+MemMachineStore — MemMachine VectorDB, semantic search (production)
 """
 
 from __future__ import annotations
 
+import json
+import threading
 from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import Any
 
 from memflow.models import Procedure, SearchResult
 
@@ -88,6 +93,138 @@ class EmulatedStore(BaseStore):
 
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         procs = list(self._store.values())
+        if user_id:
+            procs = [p for p in procs if p.user_id == user_id]
+        return procs
+
+
+class FileStore(BaseStore):
+    """
+    File-based store persisting each procedure as a Markdown file.
+
+    File format — frontmatter (key: value) followed by titled content:
+
+        ---
+        id: <uuid>
+        user_id: <user>
+        category: <category>
+        tags: ["tag1", "tag2"]
+        created_at: <iso-timestamp>
+        ---
+        # <title>
+
+        <content>
+
+    Persists across process restarts. Suitable for local development.
+    """
+
+    def __init__(self, data_dir: str = "./memflow_data") -> None:
+        self._dir = Path(data_dir)
+        self._dir.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, id: str) -> Path:
+        return self._dir / f"{id}.md"
+
+    def _serialize(self, procedure: Procedure) -> str:
+        return (
+            "---\n"
+            f"id: {procedure.id}\n"
+            f"user_id: {procedure.user_id}\n"
+            f"category: {procedure.category}\n"
+            f"tags: {json.dumps(procedure.tags, ensure_ascii=False)}\n"
+            f"created_at: {procedure.created_at}\n"
+            "---\n"
+            f"# {procedure.title}\n"
+            "\n"
+            f"{procedure.content}\n"
+        )
+
+    def _deserialize(self, text: str) -> Procedure | None:
+        if not text.startswith("---"):
+            return None
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+
+        meta: dict[str, str] = {}
+        for line in parts[1].strip().splitlines():
+            if ": " in line:
+                k, v = line.split(": ", 1)
+                meta[k.strip()] = v.strip()
+
+        body = parts[2].strip()
+        lines = body.splitlines()
+        title = ""
+        content_start = 0
+        for i, line in enumerate(lines):
+            if line.startswith("# "):
+                title = line[2:].strip()
+                content_start = i + 1
+                break
+
+        while content_start < len(lines) and not lines[content_start].strip():
+            content_start += 1
+        content = "\n".join(lines[content_start:])
+
+        try:
+            tags = json.loads(meta.get("tags", "[]"))
+        except Exception:
+            tags = []
+
+        return Procedure(
+            id=meta.get("id", ""),
+            title=title,
+            content=content,
+            user_id=meta.get("user_id", "default"),
+            category=meta.get("category", "general"),
+            tags=tags,
+            created_at=meta.get("created_at", ""),
+        )
+
+    def _load_all(self) -> list[Procedure]:
+        procs = []
+        for path in sorted(self._dir.glob("*.md")):
+            proc = self._deserialize(path.read_text(encoding="utf-8"))
+            if proc and proc.id:
+                procs.append(proc)
+        return procs
+
+    def add(self, procedure: Procedure) -> None:
+        self._path(procedure.id).write_text(
+            self._serialize(procedure), encoding="utf-8"
+        )
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        user_id: str | None = None,
+    ) -> list[SearchResult]:
+        results = []
+        for proc in self._load_all():
+            if user_id and proc.user_id != user_id:
+                continue
+            score = _text_score(proc.title + " " + proc.content, query)
+            if score > 0:
+                results.append(SearchResult(procedure=proc, score=score))
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:top_k]
+
+    def get(self, id: str) -> Procedure | None:
+        path = self._path(id)
+        if not path.exists():
+            return None
+        return self._deserialize(path.read_text(encoding="utf-8"))
+
+    def delete(self, id: str) -> bool:
+        path = self._path(id)
+        if path.exists():
+            path.unlink()
+            return True
+        return False
+
+    def list_all(self, user_id: str | None = None) -> list[Procedure]:
+        procs = self._load_all()
         if user_id:
             procs = [p for p in procs if p.user_id == user_id]
         return procs

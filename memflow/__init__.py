@@ -5,7 +5,7 @@ MemFlow — Procedural Memory layer for AI agents.
 from memflow.llm import BaseLLM, LLMFactory, OllamaLLM, OpenAICompatibleLLM
 from memflow.manager import MemFlowManager
 from memflow.models import Procedure, SearchResult
-from memflow.store import BaseStore, EmulatedStore
+from memflow.store import BaseStore, EmulatedStore, FileStore
 
 __all__ = [
     "MemFlowManager",
@@ -17,4 +17,5 @@ __all__ = [
     "OpenAICompatibleLLM",
     "BaseStore",
     "EmulatedStore",
+    "FileStore",
 ]
