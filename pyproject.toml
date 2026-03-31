@@ -1,0 +1,18 @@
+[project]
+name = "memflow"
+version = "0.1.0"
+description = "Procedural Memory layer for AI agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+]
+
+[project.optional-dependencies]
+ollama = ["ollama>=0.6.1"]
+openai = ["openai>=2.30.0"]
+memmachine = ["memmachine-client>=0.3.0"]
+dev = ["pytest>=8.0.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
