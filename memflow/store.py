@@ -380,6 +380,17 @@ class MemMachineStore(BaseStore):
             "created_at": procedure.created_at,
         })
 
+    def _extract_episodes(self, raw: Any) -> list[Any]:
+        """Extract episodes from SearchResult (both long-term and short-term)."""
+        episodes = []
+        if raw is None or raw.content is None or raw.content.episodic_memory is None:
+            return episodes
+        if raw.content.episodic_memory.long_term_memory is not None:
+            episodes.extend(raw.content.episodic_memory.long_term_memory.episodes)
+        if raw.content.episodic_memory.short_term_memory is not None:
+            episodes.extend(raw.content.episodic_memory.short_term_memory.episodes)
+        return episodes
+
     def _parse_item(self, item: Any) -> tuple[Procedure | None, str]:
         """Parse a MemMachine search result → (Procedure | None, episode_id)."""
         if isinstance(item, dict):
@@ -438,11 +449,9 @@ class MemMachineStore(BaseStore):
     ) -> list[SearchResult]:
         raw = self._get_memory().search(query=query, limit=top_k * 3)
         results = []
-        for item in raw or []:
-            score = float(
-                item.get("score", 1.0) if isinstance(item, dict)
-                else getattr(item, "score", 1.0)
-            )
+
+        for item in self._extract_episodes(raw):
+            score = float(item.score) if item.score is not None else 0.0
             proc, ep_id = self._parse_item(item)
             if proc is None:
                 continue
@@ -475,7 +484,8 @@ class MemMachineStore(BaseStore):
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         raw = self._get_memory().search(query="", limit=10_000)
         procs = []
-        for item in raw or []:
+
+        for item in self._extract_episodes(raw):
             proc, ep_id = self._parse_item(item)
             if proc is None:
                 continue
