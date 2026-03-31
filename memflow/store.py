@@ -238,7 +238,7 @@ class MemMachineBypass:
     the content here so MemMachine can store it in the appropriate backend
     (VectorDB for semantic, GraphDB for episodic).
 
-    Requires the `memmachine` Python package and a running MemMachine server.
+    Requires the `memmachine-client` Python package and a running MemMachine server.
     Connection is deferred to first use (lazy initialization).
     """
 
@@ -261,7 +261,7 @@ class MemMachineBypass:
             return self._memory
         with self._lock:
             if self._memory is None:
-                import memmachine
+                import memmachine_client as memmachine
                 kwargs: dict[str, Any] = {"base_url": self._base_url}
                 if self._api_key:
                     kwargs["api_key"] = self._api_key
@@ -290,7 +290,7 @@ class MemMachineStore(BaseStore):
     a side-effect of add() and search() to allow O(1) delete without a full scan.
     On a cache-miss in delete(), list_all() is called once to hydrate the index.
 
-    Requires the `memmachine` Python package and a running MemMachine server.
+    Requires the `memmachine-client` Python package and a running MemMachine server.
     Connection is deferred to first use (lazy initialization).
     """
 
@@ -316,7 +316,7 @@ class MemMachineStore(BaseStore):
             return self._memory
         with self._lock:
             if self._memory is None:
-                import memmachine
+                import memmachine_client as memmachine
                 kwargs: dict[str, Any] = {"base_url": self._base_url}
                 if self._api_key:
                     kwargs["api_key"] = self._api_key
