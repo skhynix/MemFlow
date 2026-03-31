@@ -11,11 +11,13 @@ dependencies = [
     "psycopg2-binary>=2.9",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
 [project.optional-dependencies]
 ollama = ["ollama>=0.6.1"]
 memmachine = ["memmachine-client>=0.3.0"]
 openai = ["openai>=2.30.0"]
-dev = ["pytest>=8.0.0"]
 
 [build-system]
 requires = ["hatchling"]

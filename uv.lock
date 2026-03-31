@@ -391,9 +391,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
 memmachine = [
     { name = "memmachine-client" },
 ]
@@ -404,6 +401,11 @@ openai = [
     { name = "openai" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
@@ -412,10 +414,12 @@ requires-dist = [
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.30.0" },
     { name = "pgvector", specifier = ">=0.3" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
 ]
-provides-extras = ["ollama", "memmachine", "openai", "dev"]
+provides-extras = ["ollama", "memmachine", "openai"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "memmachine-client"
