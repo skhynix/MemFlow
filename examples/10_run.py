@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-09. Run — plan, execute, and learn from a task automatically.
+10. Run — plan, execute, and learn from a task automatically.
 
 run(task) is the full Phase 3 pipeline:
   1. plan()   — retrieve context + LLM decomposition into Jobs
@@ -15,7 +15,7 @@ After run() completes, the learned procedure is retrieved via search() to
 demonstrate the Learn → Retrieve back-edge closing the loop.
 
 Run:
-  ./examples/09_run.py
+  ./examples/10_run.py
 """
 
 import sys

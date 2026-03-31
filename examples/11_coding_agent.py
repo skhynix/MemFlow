@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-10. Coding Agent — write scripts, run them, and learn the workflow.
+11. Coding Agent — write scripts, run them, and learn the workflow.
 
 A minimal coding agent that:
   1. Plans tasks using two domain-specific tools (write_file, run_script).
@@ -21,7 +21,7 @@ Run 2  Warm start — SOP from Run 1 is in the store.
        The planner reuses the stored workflow — plan is noticeably more direct.
 
 Run:
-  ./examples/10_coding_agent.py
+  ./examples/11_coding_agent.py
 """
 
 import subprocess
