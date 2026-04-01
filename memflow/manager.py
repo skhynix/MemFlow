@@ -6,6 +6,7 @@ Public API:
   search(query, user_id, top_k)      — retrieve procedures
   chat(query, user_id)               — respond using procedure context
   plan(task, user_id)                — decompose task into executable steps
+  execute(plan, tools)               — execute a task plan
   run(task, user_id, tools)          — plan + execute + learn
 """
 
@@ -252,6 +253,37 @@ class MemFlowManager:
         return self._planner.plan(task, context=context)
 
     # ------------------------------------------------------------------
+    # execute
+    # ------------------------------------------------------------------
+
+    def execute(
+        self,
+        plan: TaskPlan,
+        tools: dict[str, Callable[..., str]] | None = None,
+    ) -> list[JobResult]:
+        """Execute a task plan.
+
+        Args:
+            plan:  TaskPlan object containing jobs to execute.
+            tools: Extra tools to register {name: callable}.
+                   Each callable receives Job.args as keyword arguments
+                   and must return a string.
+
+        Returns:
+            List of JobResult objects from executing each job.
+        """
+        if self._executor is None:
+            self._executor = ToolRegistry(llm=self.llm)
+        if tools:
+            for name, fn in tools.items():
+                self._executor.register(name, fn)
+
+        job_results: list[JobResult] = [
+            self._executor.execute(job) for job in plan.jobs
+        ]
+        return job_results
+
+    # ------------------------------------------------------------------
     # run
     # ------------------------------------------------------------------
 
@@ -278,16 +310,7 @@ class MemFlowManager:
                      and must return a string.
         """
         task_plan = self.plan(task, user_id=user_id)
-
-        if self._executor is None:
-            self._executor = ToolRegistry(llm=self.llm)
-        if tools:
-            for name, fn in tools.items():
-                self._executor.register(name, fn)
-
-        job_results: list[JobResult] = [
-            self._executor.execute(job) for job in task_plan.jobs
-        ]
+        job_results = self.execute(task_plan, tools=tools)
 
         if self._learner is None:
             self._learner = Learner(self.llm)
