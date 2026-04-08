@@ -22,7 +22,7 @@ import urllib.request
 from typing import Callable
 
 from memflow.llm import BaseLLM
-from memflow.models import Job, JobResult
+from memflow.models import Job, JobResult, Step, StepResult
 
 
 class ToolRegistry:
@@ -42,7 +42,7 @@ class ToolRegistry:
     def available_tools(self) -> list[str]:
         return list(self._tools)
 
-    def execute(self, job: Job) -> JobResult:
+    def execute_job(self, job: Job) -> JobResult:
         """Execute a single Job and return a JobResult."""
         fn = self._tools.get(job.tool)
         if fn is None:
@@ -57,6 +57,39 @@ class ToolRegistry:
             return JobResult(job=job, success=True, output=str(output))
         except Exception as e:
             return JobResult(job=job, success=False, output="", error=str(e))
+
+    def execute_step(self, step: Step) -> StepResult:
+        """Execute a single Step and return a StepResult.
+
+        Note: PLAN type steps are not yet implemented. Currently only TOOL type
+        steps are supported. PLAN type support is planned for future extension
+        to enable hierarchical task decomposition.
+        """
+        if step.type == "plan":
+            # TODO: Implement PLAN type step handling for hierarchical decomposition.
+            # Currently returns failure as PLAN steps should be expanded by the
+            # planner before execution. See design doc for future implementation.
+            return StepResult(
+                step_id=step.id,
+                success=False,
+                error="PLAN type steps are not yet implemented (TODO: expand to sub-steps)",
+                retryable=False,
+            )
+
+        fn = self._tools.get(step.tool_name)
+        if fn is None:
+            return StepResult(
+                step_id=step.id,
+                success=False,
+                output="",
+                error=f"Unknown tool {step.tool_name!r}. Available: {self.available_tools()}",
+                retryable=False,
+            )
+        try:
+            output = fn(**step.args)
+            return StepResult(step_id=step.id, success=True, output=str(output))
+        except Exception as e:
+            return StepResult(step_id=step.id, success=False, output="", error=str(e), retryable=True)
 
 
 # ---------------------------------------------------------------------------

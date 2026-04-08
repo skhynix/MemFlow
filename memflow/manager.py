@@ -13,14 +13,15 @@ Public API:
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Callable
 
 from memflow.executor import ToolRegistry
 from memflow.learner import Learner
 from memflow.llm import BaseLLM, LLMFactory, parse_json
-from memflow.models import JobResult, Procedure, RunResult, SearchResult, TaskPlan
+from memflow.models import JobResult, Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult, StepType
 from memflow.planner import LLMPlanner
-from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT
+from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
 
 PROCEDURAL_KEYWORDS = [
@@ -30,16 +31,85 @@ PROCEDURAL_KEYWORDS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Guard structures for execution control
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GlobalGuard:
+    """Guard at run() level - controls overall execution.
+
+    Design document specification:
+    - max_attempts: maximum replan attempts
+    - cycle detection: detect same goal+failure repetition via hash
+    """
+    max_attempts: int = 5
+    goal_fingerprints: dict = None
+
+    def __post_init__(self):
+        if self.goal_fingerprints is None:
+            self.goal_fingerprints = {}
+
+    def is_cycle_detected(self, goal: str, failure: str) -> bool:
+        """Detect if same goal+failure is repeating."""
+        key = (goal, failure)
+        if key in self.goal_fingerprints:
+            return True
+        self.goal_fingerprints[key] = True
+        return False
+
+    def can_attempt(self, attempt: int) -> bool:
+        return attempt < self.max_attempts
+
+
+@dataclass
+class PlanGuard:
+    """Guard at plan() level - controls recursion depth.
+
+    Design document specification:
+    - max_depth: maximum vertical recursion depth for plan decomposition
+    """
+    max_depth: int = 3
+    current_depth: int = 0
+
+    def can_recurse(self) -> bool:
+        return self.current_depth < self.max_depth
+
+    def enter(self):
+        self.current_depth += 1
+
+    def exit(self):
+        self.current_depth -= 1
+
+
+@dataclass
+class ToolGuard:
+    """Guard at tool call level - controls retry count.
+
+    Design document specification:
+    - max_retry: maximum retry for transient failures (network timeout, etc.)
+    - retry is for same method, replan is for different approach
+    """
+    max_retry: int = 3
+
+    def should_retry(self, attempt: int) -> bool:
+        return attempt < self.max_retry
+
+
 class MemFlowManager:
     def __init__(
         self,
         llm: BaseLLM,
         store: BaseStore | None = None,
         bypass: MemMachineBypass | None = None,
+        max_steps_per_iteration: int | None = None,
+        max_plan_iterations: int | None = None,
     ) -> None:
         self.llm = llm
         self.store = store or EmulatedStore()
         self._bypass = bypass  # routes semantic/episodic content to MemMachine
+        self._max_steps_per_iteration = max_steps_per_iteration
+        self._max_plan_iterations = max_plan_iterations
         # Phase 3 components — lazily initialised on first use
         self._planner: LLMPlanner | None = None
         self._executor: ToolRegistry | None = None
@@ -171,6 +241,209 @@ class MemFlowManager:
         return {"results": [{"id": proc.id, "title": proc.title, "event": "ADD"}]}
 
     # ------------------------------------------------------------------
+    # chat - Primary user interface
+    # ------------------------------------------------------------------
+
+    def chat(
+        self,
+        message: str,
+        user_id: str | None = None,
+        history: list[dict] | None = None,
+        allow_execute: bool = False,
+    ) -> dict:
+        """
+        Primary user interface for MemFlow.
+
+        Classifies user intent and routes to appropriate handler:
+        - SEARCH: Retrieve and respond with relevant procedures
+        - ADD: Extract and store procedural knowledge
+        - EXECUTE: Run the task (requires allow_execute=True)
+        - CONVERSATION: Respond naturally without memory operations
+
+        Args:
+            message:       User's message
+            user_id:       User scope for memory operations
+            history:       Previous conversation messages for context
+            allow_execute: If True, EXECUTE intent will run the task.
+                          If False, asks for confirmation first.
+
+        Returns:
+            dict with response and metadata:
+            - response: str - The response text
+            - intents: list[str] - All detected intents
+            - primary_intent: str - Main intent for response formatting
+            - handler_results: dict - Results from each intent handler
+            - requires_confirmation: bool - (optional) True when EXECUTE needs confirmation
+        """
+        # Combine current message with history for context
+        if history:
+            context_messages = history[-5:]  # Last 5 messages for context
+            full_context = "\n".join(
+                f"{m.get('role', 'user')}: {m.get('content', '')}"
+                for m in context_messages
+            ) + f"\nuser: {message}"
+        else:
+            full_context = message
+
+        # Classify intents (may return multiple)
+        intents_data = self._classify_intents(full_context)
+        intents = intents_data.get("intents", ["CONVERSATION"])
+        primary_intent = intents_data.get("primary", intents[0] if intents else "CONVERSATION")
+
+        # Check EXECUTE confirmation before processing
+        if "EXECUTE" in intents and not allow_execute:
+            # Ask for confirmation before executing
+            return {
+                "response": f"I can help you with: {message}\n\nThis will execute a task. Would you like me to proceed? (confirm to execute)",
+                "intents": intents,
+                "primary_intent": primary_intent,
+                "requires_confirmation": True,
+            }
+
+        # Process intents in order
+        responses = []
+        handler_results = {}
+
+        handlers = {
+            "SEARCH": self._handle_search,
+            "ADD": self._handle_add,
+            "EXECUTE": self._handle_execute,
+            "CONVERSATION": self._handle_conversation,
+        }
+
+        for intent in intents:
+            handler = handlers.get(intent, self._handle_conversation)
+            result = handler(message, user_id, history)
+            responses.append(result.get("response", ""))
+            handler_results[intent] = result
+
+        # Combine responses
+        combined_response = "\n\n".join(responses) if len(responses) > 1 else responses[0]
+
+        return {
+            "response": combined_response,
+            "intents": intents,
+            "primary_intent": primary_intent,
+            "handler_results": handler_results,
+        }
+
+    def _classify_intents(self, context: str) -> dict:
+        """Classify user intents using LLM. Returns multiple intents if applicable."""
+        messages = [
+            {"role": "system", "content": INTENT_CLASSIFICATION_PROMPT},
+            {"role": "user", "content": context},
+        ]
+        try:
+            response = self.llm.generate(messages)
+            data = parse_json(response)
+            intents = data.get("intents", [])
+            primary = data.get("primary", "CONVERSATION")
+
+            # Validate intents
+            valid_intents = []
+            for intent in intents:
+                if intent in ("SEARCH", "ADD", "EXECUTE", "CONVERSATION"):
+                    valid_intents.append(intent)
+
+            if not valid_intents:
+                return {"intents": ["CONVERSATION"], "primary": "CONVERSATION"}
+
+            # If CONVERSATION is mixed with others, remove it (others take priority)
+            if len(valid_intents) > 1 and "CONVERSATION" in valid_intents:
+                valid_intents.remove("CONVERSATION")
+
+            return {"intents": valid_intents, "primary": primary}
+        except Exception:
+            return {"intents": ["CONVERSATION"], "primary": "CONVERSATION"}
+
+    def _handle_search(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+        """Handle SEARCH intent - retrieve and respond."""
+        results = self.search(message, user_id=user_id, top_k=3)
+
+        if results:
+            procedures_text = "\n\n".join(
+                f"**{r.procedure.title}** (Category: {r.procedure.category})\n{r.procedure.content}"
+                for r in results
+            )
+            response = f"Found {len(results)} relevant procedure(s):\n\n{procedures_text}"
+        else:
+            response = "I couldn't find any relevant procedures for that. Let me help with what I know..."
+            # Still provide LLM response
+            chat_response = self._generate_chat_response(message, [])
+            response += f"\n\n{chat_response}"
+
+        return {"response": response, "intent": "SEARCH", "results": results}
+
+    def _handle_add(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+        """Handle ADD intent - extract and store procedure."""
+        # Use existing extraction logic
+        result = self._extract_and_store(message, user_id or "default")
+        if result.get("results"):
+            return {
+                "response": f"Saved: {result['results'][0].get('title', 'Procedure')}",
+                "intent": "ADD",
+                "data": result,
+            }
+        elif result.get("skipped"):
+            return {
+                "response": f"I couldn't extract a procedure from that. Reason: {result['skipped']}",
+                "intent": "ADD",
+                "data": result,
+            }
+        return {"response": "I couldn't extract a procedure. Please provide clearer step-by-step instructions.", "intent": "ADD"}
+
+    def _handle_execute(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+        """Handle EXECUTE intent - run the task."""
+        try:
+            result = self.run(message, user_id=user_id, multi_stage=True)
+            # Format execution result
+            success_count = sum(1 for r in result.step_results if r.success)
+            total = len(result.step_results)
+
+            steps_output = []
+            for i, r in enumerate(result.step_results):
+                status = "✓" if r.success else "✗"
+                step = result.plan.steps[i] if i < len(result.plan.steps) else None
+                desc = step.goal if step else "Unknown step"
+                steps_output.append(f"{status} {desc}")
+                if r.output:
+                    steps_output.append(f"    Output: {r.output[:100]}")
+
+            response = f"Executed {total} step(s), {success_count} succeeded:\n\n" + "\n".join(steps_output)
+
+            if result.learned:
+                response += f"\n\nLearned: {result.learned.title}"
+
+            return {"response": response, "intent": "EXECUTE", "data": {"result": result}}
+        except Exception as e:
+            return {"response": f"Execution failed: {str(e)}", "intent": "EXECUTE", "error": str(e)}
+
+    def _handle_conversation(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+        """Handle CONVERSATION intent - respond naturally."""
+        # Search for relevant context
+        results = self.search(message, user_id=user_id, top_k=2)
+        procedures_text = "\n\n".join(
+            f"### {r.procedure.title}\n{r.procedure.content}"
+            for r in results
+        ) if results else "No relevant procedures found."
+
+        response = self._generate_chat_response(message, results)
+        return {"response": response, "intent": "CONVERSATION"}
+
+    def _generate_chat_response(self, message: str, search_results: list) -> str:
+        """Generate a natural language response using LLM."""
+        procedures_text = "\n\n".join(
+            f"### {r.procedure.title}\n{r.procedure.content}"
+            for r in search_results
+        ) if search_results else "No relevant procedures found."
+
+        messages = [
+            {"role": "system", "content": CHAT_SYSTEM_PROMPT.format(procedures=procedures_text)},
+            {"role": "user", "content": message},
+        ]
+        return self.llm.generate(messages)
+
+    # ------------------------------------------------------------------
     # search
     # ------------------------------------------------------------------
 
@@ -184,51 +457,6 @@ class MemFlowManager:
         return self.store.search(query, top_k=top_k, user_id=user_id)
 
     # ------------------------------------------------------------------
-    # chat
-    # ------------------------------------------------------------------
-
-    def chat(
-        self,
-        query: str,
-        user_id: str | None = None,
-        enable_auto_learn: bool = True,
-    ) -> str:
-        """Generate a response using retrieved procedures as context.
-
-        If enable_auto_learn is True (default), procedures are extracted
-        from the Q&A in a background thread and stored automatically.
-        """
-        results = self.search(query, user_id=user_id)
-
-        if results:
-            procedures_text = "\n\n---\n\n".join(
-                f"### {r.procedure.title}\n{r.procedure.content}"
-                for r in results
-            )
-        else:
-            procedures_text = "No relevant procedures found."
-
-        messages = [
-            {"role": "system", "content": CHAT_SYSTEM_PROMPT.format(
-                procedures=procedures_text,
-            )},
-            {"role": "user", "content": query},
-        ]
-
-        response = self.llm.generate(messages)
-
-        if enable_auto_learn:
-            self._auto_learn_async(
-                messages=[
-                    {"role": "user", "content": query},
-                    {"role": "assistant", "content": response},
-                ],
-                user_id=user_id or "default",
-            )
-
-        return response
-
-    # ------------------------------------------------------------------
     # plan
     # ------------------------------------------------------------------
 
@@ -236,11 +464,24 @@ class MemFlowManager:
         self,
         task: str,
         user_id: str | None = None,
+        multi_stage: bool = False,
+        executed_results: list[JobResult] | None = None,
+        max_depth: int | None = None,
     ) -> TaskPlan:
         """Decompose a task into executable steps.
 
         Relevant procedures are retrieved first and injected into the planning
         prompt so the LLM can reuse existing SOPs (Retrieve → Planner back-edge).
+
+        Args:
+            task:             High-level task description.
+            user_id:          User scope for retrieval.
+            multi_stage:      If True, plan only a few steps for iterative execution.
+            executed_results: Results from previously executed jobs (for replanning).
+            max_depth:        Maximum recursion depth for plan decomposition.
+
+        Returns:
+            TaskPlan with jobs to execute.
         """
         results = self.search(task, user_id=user_id)
         context = "\n\n---\n\n".join(
@@ -249,8 +490,22 @@ class MemFlowManager:
         ) if results else ""
 
         if self._planner is None:
-            self._planner = LLMPlanner(self.llm)
-        return self._planner.plan(task, context=context)
+            self._planner = LLMPlanner(
+                llm=self.llm,
+                max_steps_per_iteration=self._max_steps_per_iteration or 1,
+                max_iterations=self._max_plan_iterations or 5,
+            )
+
+        # PlanGuard for max_depth control
+        plan_guard = PlanGuard(max_depth=max_depth or 3)
+
+        return self._planner.plan(
+            task,
+            context=context,
+            multi_stage=multi_stage,
+            executed_results=executed_results,
+            plan_guard=plan_guard,
+        )
 
     # ------------------------------------------------------------------
     # execute
@@ -260,17 +515,17 @@ class MemFlowManager:
         self,
         plan: TaskPlan,
         tools: dict[str, Callable[..., str]] | None = None,
-    ) -> list[JobResult]:
+    ) -> list[StepResult]:
         """Execute a task plan.
 
         Args:
-            plan:  TaskPlan object containing jobs to execute.
+            plan:  TaskPlan object containing steps to execute.
             tools: Extra tools to register {name: callable}.
-                   Each callable receives Job.args as keyword arguments
+                   Each callable receives Step.args as keyword arguments
                    and must return a string.
 
         Returns:
-            List of JobResult objects from executing each job.
+            List of StepResult objects from executing each step.
         """
         if self._executor is None:
             self._executor = ToolRegistry(llm=self.llm)
@@ -278,10 +533,10 @@ class MemFlowManager:
             for name, fn in tools.items():
                 self._executor.register(name, fn)
 
-        job_results: list[JobResult] = [
-            self._executor.execute(job) for job in plan.jobs
+        step_results: list[StepResult] = [
+            self._executor.execute_step(step) for step in plan.steps
         ]
-        return job_results
+        return step_results
 
     # ------------------------------------------------------------------
     # run
@@ -292,8 +547,13 @@ class MemFlowManager:
         task: str,
         user_id: str | None = None,
         tools: dict[str, Callable[..., str]] | None = None,
+        multi_stage: bool = True,
     ) -> RunResult:
         """Plan, execute, and learn from a task.
+
+        This is the unified entry point for task execution. Use multi_stage=True
+        (default) for adaptive planning that learns from execution results, or
+        multi_stage=False for simple single-shot planning.
 
         Steps:
           1. Retrieve relevant procedures (context for planning).
@@ -303,24 +563,220 @@ class MemFlowManager:
              and store it automatically (Learn → Retrieve back-edge).
 
         Args:
-            task:    High-level task description.
-            user_id: User scope for retrieval and storage.
-            tools:   Extra tools to register {name: callable}.
-                     Each callable receives Job.args as keyword arguments
-                     and must return a string.
+            task:       High-level task description.
+            user_id:    User scope for retrieval and storage.
+            tools:      Extra tools to register {name: callable}.
+                        Each callable receives Job.args as keyword arguments
+                        and must return a string.
+            multi_stage: If True, use Reflect-and-Refine loop (plan a few steps,
+                        execute, replan). If False, single-shot plan then execute.
+
+        Returns:
+            RunResult with plan, job results, and learned procedure.
         """
+        if multi_stage:
+            return self._run_with_partial_replan(task, user_id=user_id, tools=tools)
+        else:
+            return self._run_single_shot(task, user_id=user_id, tools=tools)
+
+    def _run_single_shot(
+        self,
+        task: str,
+        user_id: str | None = None,
+        tools: dict[str, Callable[..., str]] | None = None,
+    ) -> RunResult:
+        """Single-shot execution: plan once, execute, learn (internal)."""
         task_plan = self.plan(task, user_id=user_id)
-        job_results = self.execute(task_plan, tools=tools)
+        step_results = self.execute(task_plan, tools=tools)
 
         if self._learner is None:
             self._learner = Learner(self.llm)
+
+        # Convert StepResult to JobResult for learner (legacy compatibility)
+        from memflow.models import Job, JobResult
+        job_results = []
+        for i, sr in enumerate(step_results):
+            if i < len(task_plan.steps):
+                step = task_plan.steps[i]
+                job = Job(id=sr.step_id, tool=step.tool_name or "llm",
+                         description=step.goal, args=step.args)
+                job_results.append(JobResult(job=job, success=sr.success,
+                                            output=sr.output, error=sr.error))
+
         learned = self._learner.extract(
             task, job_results, user_id=user_id or "default"
         )
         if learned is not None:
             self.store.add(learned)
 
-        return RunResult(plan=task_plan, job_results=job_results, learned=learned)
+        return RunResult(plan=task_plan, step_results=step_results, learned=learned)
+
+    # ------------------------------------------------------------------
+    # run_with_partial_replan - Design document compliant execution
+    # ------------------------------------------------------------------
+
+    def _run_with_partial_replan(
+        self,
+        task: str,
+        user_id: str | None = None,
+        tools: dict[str, Callable[..., str]] | None = None,
+    ) -> RunResult:
+        """
+        Execute task with partial replan for failed steps only.
+
+        Design document implementation:
+        - Replan only the failed step's goal, not global goal
+        - Keep successful steps, replace only failed ones
+        - GlobalGuard prevents infinite loops via cycle detection
+
+        Steps:
+          1. Initial plan for the full task
+          2. Execute step by step
+          3. On failure: replan only that step with its goal
+          4. On success: mark step as done, continue to next
+          5. Repeat until all steps done or max attempts reached
+        """
+        # Retrieve context
+        results = self.search(task, user_id=user_id)
+        context = "\n\n---\n\n".join(
+            f"### {r.procedure.title}\n{r.procedure.content}"
+            for r in results
+        ) if results else ""
+
+        # Initialize components
+        if self._planner is None:
+            self._planner = LLMPlanner(self.llm)
+        if self._executor is None:
+            self._executor = ToolRegistry(llm=self.llm)
+        if tools:
+            for name, fn in tools.items():
+                self._executor.register(name, fn)
+
+        # Guards - instance level for cycle detection across replan calls
+        if not hasattr(self, '_global_guard'):
+            self._global_guard = GlobalGuard(max_attempts=5)
+        global_guard = self._global_guard
+        attempt = 0
+
+        # Initial plan
+        plan = self._planner.plan(task, context=context, multi_stage=False)
+        all_step_results: list[StepResult] = []
+
+        # Execute with partial replan
+        step_index = 0
+        while step_index < len(plan.steps):
+            step = plan.steps[step_index]
+
+            # Skip already completed steps
+            if step.status == 'done':
+                step_index += 1
+                continue
+
+            # Execute current step
+            step_result = self._execute_step_with_guard(step, tools)
+            all_step_results.append(step_result)
+
+            if step_result.success:
+                step.status = 'done'
+                step.result = step_result
+                step_index += 1
+            else:
+                # Step failed - replan only this step
+                attempt += 1
+                if not global_guard.can_attempt(attempt):
+                    step.status = 'failed'
+                    step.result = step_result
+                    break  # Max attempts reached
+
+                # Check for cycle (same goal + same failure)
+                if global_guard.is_cycle_detected(step.goal, step_result.error):
+                    step.status = 'failed'
+                    step.result = step_result
+                    break  # Cycle detected
+
+                # Replan with failed step's goal (not global goal!)
+                # Pass the failure context for alternative approach
+                replan_context = f"Previous attempt failed: {step_result.error}"
+                new_plan = self._planner.plan(
+                    step.goal,  # Only this step's goal, not global task
+                    context=f"{context}\n\n{replan_context}",
+                    multi_stage=False,
+                )
+
+                if new_plan.steps:
+                    # Replace failed step with new subplan
+                    # Insert new steps at current position
+                    plan.steps = (
+                        plan.steps[:step_index] +
+                        new_plan.steps +
+                        plan.steps[step_index + 1:]
+                    )
+                    # Don't increment step_index - process new first step
+                else:
+                    # LLM couldn't find alternative - mark as failed
+                    step.status = 'failed'
+                    step.result = step_result
+                    step_index += 1
+
+        # Mark remaining steps as not executed
+        for i in range(step_index, len(plan.steps)):
+            if plan.steps[i].status == 'pending':
+                plan.steps[i].status = 'failed'
+
+        # Learn from successful execution
+        learned = None
+        successful_results = [r for r in all_step_results if r.success]
+        if successful_results:
+            if self._learner is None:
+                self._learner = Learner(self.llm)
+
+            # Convert to JobResult for learner
+            # Use step_id based mapping to handle replan step index changes
+            from memflow.models import Job, JobResult
+            step_by_id = {s.id: s for s in plan.steps}
+            job_results = []
+            for sr in all_step_results:
+                step = step_by_id.get(sr.step_id)
+                if step is not None:
+                    job = Job(id=sr.step_id, tool=step.tool_name or "llm",
+                             description=step.goal, args=step.args)
+                    job_results.append(JobResult(job=job, success=sr.success,
+                                                 output=sr.output, error=sr.error))
+
+            learned = self._learner.extract(task, job_results, user_id=user_id or "default")
+            if learned is not None:
+                self.store.add(learned)
+
+        return RunResult(
+            plan=plan,
+            step_results=all_step_results,
+            learned=learned,
+        )
+
+    def _execute_step_with_guard(self, step: Step, tools: dict | None = None) -> StepResult:
+        """Execute a single step with ToolGuard retry logic."""
+        tool_guard = ToolGuard(max_retry=3)
+        attempt = 0
+
+        while tool_guard.should_retry(attempt):
+            result = self._executor.execute_step(step)
+
+            if result.success:
+                return result
+
+            if not result.retryable:
+                return result  # Non-retryable error
+
+            attempt += 1
+
+        # All retries exhausted
+        return StepResult(
+            step_id=step.id,
+            success=False,
+            output="",
+            error=f"Failed after {attempt} retries",
+            retryable=False,
+        )
 
     # ------------------------------------------------------------------
     # internal helpers
@@ -349,6 +805,143 @@ class MemFlowManager:
             return data.get("type", "procedural")
         except Exception:
             return "procedural"  # fall back to procedural on error
+
+    def _validate_step_output(self, result: StepResult) -> bool:
+        """
+        Validate that a step result has meaningful output.
+        Returns False if output is empty or meaningless.
+
+        Special handling for file operations - if the command creates a file,
+        verify the file exists even if output is empty.
+        """
+        if not result.success:
+            return True  # Don't validate failed steps
+
+        output = result.output.strip() if result.output else ""
+
+        # For now, delegate to legacy _validate_output by creating a temporary JobResult
+        # This is a transitional implementation
+        from memflow.models import Job
+        temp_job = Job(id=result.step_id, tool="bash", description="", args={"command": ""})
+        temp_result = JobResult(job=temp_job, success=result.success, output=result.output, error=result.error)
+        return self._validate_output(temp_result)
+
+    def _validate_output(self, result: JobResult) -> bool:
+        """
+        Validate that a job result has meaningful output.
+        Returns False if output is empty or meaningless.
+
+        Special handling for file operations - if the command creates a file,
+        verify the file exists even if output is empty.
+        """
+        if not result.success:
+            return True  # Don't validate failed jobs
+
+        output = result.output.strip() if result.output else ""
+        command = result.job.args.get("command", "") if result.job.args else ""
+
+        # Empty output - check if it's a file/directory operation that succeeded
+        if not output:
+            if command:
+                import os
+                import re
+
+                # Directory creation commands (mkdir) - verify directory exists
+                if command.strip().startswith('mkdir '):
+                    parts = command.split()
+                    # Handle mkdir -p dirname or mkdir dirname
+                    dirnames = [p for p in parts if p != 'mkdir' and p != '-p']
+                    for dirname in dirnames:
+                        if os.path.isdir(dirname):
+                            return True
+
+                # Extract filename from common patterns
+                filename_match = re.search(r'>\s*(\S+)', command)
+                if filename_match:
+                    filename = filename_match.group(1)
+                    if os.path.exists(filename):
+                        # Verify file has content
+                        if os.path.getsize(filename) > 0:
+                            return True  # File was created with content
+
+                # Touch command
+                if command.strip().startswith('touch '):
+                    parts = command.split()
+                    if len(parts) > 1:
+                        filename = parts[-1]
+                        if os.path.exists(filename):
+                            return True
+
+            return False  # No output and no file/directory created
+
+        # Single character or very short output might be meaningless
+        if len(output) < 2:
+            return False
+
+        # Common meaningless outputs
+        meaningless_patterns = ["$", "%", "#", ">", "", " ", "\n"]
+        if output in meaningless_patterns:
+            return False
+
+        return True
+
+    def _is_task_complete(self, task: str, results: list[StepResult] | list[JobResult]) -> bool:
+        """
+        Use LLM to verify if the task has been actually completed.
+        Be conservative - only return True if clearly complete.
+        """
+        # First, check for obvious success patterns
+        successful_outputs = [r.output for r in results if r.success and r.output]
+
+        # For tasks with "and", check if multiple distinct things were accomplished
+        if " and " in task.lower():
+            parts = [p.strip() for p in task.lower().split(" and ")]
+            # Need at least one successful output per part
+            if len(parts) > len(successful_outputs):
+                return False  # Not enough outputs to cover all parts
+
+        # Summarize what was accomplished
+        summary_parts = []
+        for r in results:
+            # Handle both StepResult and JobResult
+            if hasattr(r, 'job') and r.job:
+                desc = r.job.description
+            elif hasattr(r, 'step_id'):
+                desc = f"Step {r.step_id[:8]}"
+            else:
+                desc = "Unknown"
+
+            if r.success and r.output:
+                summary_parts.append(f"- {desc}: {r.output[:200]}")
+            elif not r.success:
+                summary_parts.append(f"- {desc}: FAILED ({r.error[:100]})")
+
+        summary = "\n".join(summary_parts) if summary_parts else "No results yet."
+
+        # Ask LLM to verify task completion with stricter criteria
+        verification_prompt = f"""
+Task: {task}
+
+Execution Summary:
+{summary}
+
+Has the task been completed successfully?
+Criteria:
+1. ALL parts of the task must be done (check for "and", commas, multiple requirements)
+2. Steps must produce meaningful output (not empty, not errors)
+3. File operations must have created actual files
+4. If the same output appears multiple times, count it only ONCE
+5. If ANY part is incomplete or failed, answer NO
+
+Respond ONLY with "YES" or "NO".
+"""
+        messages = [{"role": "user", "content": verification_prompt}]
+        try:
+            response = self.llm.generate(messages).strip().upper()
+            return "YES" in response
+        except Exception:
+            # On error, assume task is not complete (conservative)
+            return False
 
     @staticmethod
     def _is_likely_procedural(text: str) -> bool:
