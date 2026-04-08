@@ -126,7 +126,7 @@ questions = [
 
 for label, q in questions:
     print(f"  {label:8s}  Q: {q}")
-    answer = manager.chat(q, user_id="alice")
+    answer = manager.chat(q, user_id="alice")["response"]
     print(f"             A: {answer[:200]}{'...' if len(answer) > 200 else ''}\n")
 
 time.sleep(2)
