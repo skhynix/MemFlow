@@ -2,21 +2,19 @@
 """
 05. Memory Classification — LLM routes content to the right memory type.
 
-Phase 2 adds a Stage 2 LLM classifier between the keyword heuristic (Stage 1)
-and the extraction step (Stage 3).  The classifier identifies the memory type
-and decides what to do with the content:
+2-stage pipeline (classification + extraction):
 
-  Stage 1  Keyword heuristic — fast, no LLM call
-           No keywords found → skip immediately (saves LLM cost)
-
-  Stage 2  LLM classification — accurate
+  Stage 1  LLM classification — identifies memory type
            procedural → extract and store in procedure store
-           semantic   → skip (or forward to MemMachine bypass if configured)
-           episodic   → skip (or forward to MemMachine bypass if configured)
+           semantic   → discard (or forward to MemMachine bypass if configured)
+           episodic   → discard (or forward to MemMachine bypass if configured)
            none       → discard
 
-This example feeds four inputs — one of each type — through the pipeline and
-shows which stage filtered each one and why.
+  Stage 2  LLM extraction — extracts structured procedure from content
+
+This example feeds four inputs — one of each type (procedural, semantic,
+episodic, none) — through the pipeline and shows how each one is classified
+and handled.
 
 Run:
   ./examples/05_classification.py
@@ -34,7 +32,7 @@ llm = LLMFactory.create("ollama", model="llama3.2")
 manager = MemFlowManager(llm=llm)
 
 # ---------------------------------------------------------------------------
-# Four inputs covering all four memory types (and one Stage-1 block)
+# Four inputs covering all memory types (including 'none' for conversational filler)
 # ---------------------------------------------------------------------------
 
 inputs = [
@@ -57,16 +55,16 @@ inputs = [
         "database connection was not configured correctly.",
     ),
     (
-        "filler (no keywords)",
+        "none",
         "Thanks so much! That was really helpful. Chat with you later.",
     ),
 ]
 
 print("=" * 68)
-print("  3-Stage Classification Pipeline")
+print("  2-Stage Pipeline (Classification + Extraction)")
 print("=" * 68)
-print(f"  {'Type':<22}  {'Stage 1':<14}  {'Stage 2':<12}  Action")
-print(f"  {'-'*22}  {'-'*14}  {'-'*12}  {'-'*20}")
+print(f"  {'Type':<22}  {'Stage 1':<12}  Action")
+print(f"  {'-'*22}  {'-'*12}  {'-'*30}")
 
 for label, content in inputs:
     result = manager.add(messages=content, user_id="demo")
@@ -75,25 +73,18 @@ for label, content in inputs:
     routed = result.get("routed_to", "")
     stored = result.get("results", [])
 
-    if "no procedural keywords" in skipped:
-        stage1 = "BLOCKED"
-        stage2 = "—"
-        action = "discarded (Stage 1)"
-    elif stored:
-        stage1 = "passed"
-        stage2 = "procedural"
+    if stored:
+        stage1 = "procedural"
         titles = [r["title"] for r in stored]
         action = f"stored → {titles[0][:30]}"
     elif routed:
-        stage1 = "passed"
-        stage2 = result.get("type", "?")
+        stage1 = result.get("type", "?")
         action = f"→ bypass ({result['type']})"
     else:
-        stage1 = "passed"
-        stage2 = skipped.replace("classified as ", "") if skipped else "?"
-        action = f"discarded (Stage 2)"
+        stage1 = skipped.replace("classified as ", "") if skipped else "?"
+        action = "discarded"
 
-    print(f"  {label:<22}  {stage1:<14}  {stage2:<12}  {action}")
+    print(f"  {label:<22}  {stage1:<12}  {action}")
 
 print()
 print(f"Procedures stored: {len(manager.store.list_all())}")

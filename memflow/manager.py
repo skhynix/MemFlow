@@ -26,12 +26,6 @@ from memflow.planner import LLMPlanner
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore, MemFlowStore
 
-PROCEDURAL_KEYWORDS = [
-    "step", "how to", "first", "then", "finally",
-    "deploy", "install", "configure", "setup", "build",
-    "run", "execute", "process", "workflow", "procedure",
-]
-
 
 def _load_env_file(env_path: str | None = None) -> None:
     """
@@ -275,11 +269,7 @@ class MemFlowManager:
             combined = " ".join(m.get("content", "") for m in messages)
             msg_list = messages
 
-        # Stage 1: keyword heuristic
-        if not self._is_likely_procedural(combined):
-            return {"results": [], "skipped": "no procedural keywords detected"}
-
-        # Stage 2: LLM classification
+        # Stage 1: LLM classification (memory type routing)
         memory_type = self._classify_memory_type(combined)
         if memory_type in ("semantic", "episodic"):
             if self._bypass is not None:
@@ -292,7 +282,7 @@ class MemFlowManager:
         if memory_type == "none":
             return {"results": [], "skipped": "classified as none"}
 
-        # Stage 3: LLM extraction
+        # Stage 2: LLM extraction (procedure extraction)
         extraction_messages = [
             {"role": "system", "content": EXTRACTION_PROMPT},
             *msg_list,
@@ -841,9 +831,7 @@ class MemFlowManager:
     # ------------------------------------------------------------------
 
     def _auto_learn_async(self, messages: list[dict], user_id: str) -> None:
-        combined = " ".join(m.get("content", "") for m in messages)
-        if not self._is_likely_procedural(combined):
-            return
+        # Keyword filter removed - always attempt extraction for async learning
         thread = threading.Thread(
             target=self._extract_and_store,
             args=(messages, user_id),
@@ -852,7 +840,7 @@ class MemFlowManager:
         thread.start()
 
     def _classify_memory_type(self, content: str) -> str:
-        """Stage 2: LLM classification — returns procedural/semantic/episodic/none."""
+        """Stage 1: LLM classification — returns procedural/semantic/episodic/none."""
         messages = [
             {"role": "system", "content": CLASSIFICATION_PROMPT},
             {"role": "user", "content": content},
@@ -862,7 +850,7 @@ class MemFlowManager:
             data = parse_json(response)
             return data.get("type", "procedural")
         except Exception:
-            return "procedural"  # fall back to procedural on error
+            return "none"  # fall back to none on error (safe default)
 
     def _validate_step_output(self, step: Step) -> bool:
         """
@@ -984,7 +972,3 @@ Respond ONLY with "YES" or "NO".
             # On error, assume task is not complete (conservative)
             return False
 
-    @staticmethod
-    def _is_likely_procedural(text: str) -> bool:
-        text_lower = text.lower()
-        return any(kw in text_lower for kw in PROCEDURAL_KEYWORDS)
