@@ -50,3 +50,10 @@ tags
 
 # Docker volumes
 postgres_data/
+
+# Benchmark results
+benchmark/results/
+results/
+
+# Cloned external repositories
+benchmark/proced_mem_bench/Proced_mem_bench/
