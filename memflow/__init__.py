@@ -6,7 +6,7 @@ from memflow.executor import ToolRegistry
 from memflow.learner import Learner
 from memflow.llm import BaseLLM, LLMFactory, OllamaLLM, OpenAICompatibleLLM
 from memflow.manager import MemFlowManager
-from memflow.models import Job, JobResult, Procedure, RunResult, SearchResult, TaskPlan
+from memflow.models import Procedure, RunResult, SearchResult, Step, StepResult, StepType, TaskPlan
 from memflow.planner import LLMPlanner
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, MemFlowStore
 
@@ -16,9 +16,10 @@ __all__ = [
     # Models
     "Procedure",
     "SearchResult",
-    "Job",
+    "Step",
+    "StepResult",
+    "StepType",
     "TaskPlan",
-    "JobResult",
     "RunResult",
     # LLM
     "LLMFactory",

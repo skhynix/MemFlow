@@ -1,8 +1,8 @@
 """
 Tool executor for MemFlow Phase 3.
 
-ToolRegistry holds callable tools and executes Jobs one at a time,
-returning a JobResult for each.
+ToolRegistry holds callable tools and executes steps one at a time,
+returning a StepResult for each.
 
 Built-in tools
 --------------
@@ -11,7 +11,7 @@ Built-in tools
   http  — makes an HTTP request via urllib (no extra dependencies)
 
 Custom tools can be registered with ToolRegistry.register(name, fn).
-Each tool function receives the Job.args dict as keyword arguments and
+Each tool function receives the Step.args dict as keyword arguments and
 must return a string.
 """
 
@@ -22,11 +22,11 @@ import urllib.request
 from typing import Callable
 
 from memflow.llm import BaseLLM
-from memflow.models import Job, JobResult, Step, StepResult
+from memflow.models import Step, StepResult
 
 
 class ToolRegistry:
-    """Registry of named tools that execute Jobs."""
+    """Registry of named tools that execute steps."""
 
     def __init__(self, llm: BaseLLM | None = None) -> None:
         self._tools: dict[str, Callable[..., str]] = {}
@@ -41,22 +41,6 @@ class ToolRegistry:
 
     def available_tools(self) -> list[str]:
         return list(self._tools)
-
-    def execute_job(self, job: Job) -> JobResult:
-        """Execute a single Job and return a JobResult."""
-        fn = self._tools.get(job.tool)
-        if fn is None:
-            return JobResult(
-                job=job,
-                success=False,
-                output="",
-                error=f"Unknown tool {job.tool!r}. Available: {self.available_tools()}",
-            )
-        try:
-            output = fn(**job.args)
-            return JobResult(job=job, success=True, output=str(output))
-        except Exception as e:
-            return JobResult(job=job, success=False, output="", error=str(e))
 
     def execute_step(self, step: Step) -> StepResult:
         """Execute a single Step and return a StepResult.
