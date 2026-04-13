@@ -21,7 +21,7 @@ from typing import Callable
 from memflow.executor import ToolRegistry
 from memflow.learner import Learner
 from memflow.llm import BaseLLM, LLMFactory, parse_json
-from memflow.models import JobResult, Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult, StepType
+from memflow.models import Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult
 from memflow.planner import LLMPlanner
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
 from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore, MemFlowStore
@@ -541,7 +541,7 @@ class MemFlowManager:
         task: str,
         user_id: str | None = None,
         multi_stage: bool = False,
-        executed_results: list[JobResult] | None = None,
+        executed_steps: list[Step] | None = None,
         max_depth: int | None = None,
     ) -> TaskPlan:
         """Decompose a task into executable steps.
@@ -553,11 +553,11 @@ class MemFlowManager:
             task:             High-level task description.
             user_id:          User scope for retrieval.
             multi_stage:      If True, plan only a few steps for iterative execution.
-            executed_results: Results from previously executed jobs (for replanning).
+            executed_steps:   Previously executed steps with attached results.
             max_depth:        Maximum recursion depth for plan decomposition.
 
         Returns:
-            TaskPlan with jobs to execute.
+            TaskPlan with steps to execute.
         """
         results = self.search(task, user_id=user_id)
         context = "\n\n---\n\n".join(
@@ -579,7 +579,7 @@ class MemFlowManager:
             task,
             context=context,
             multi_stage=multi_stage,
-            executed_results=executed_results,
+            executed_steps=executed_steps,
             plan_guard=plan_guard,
         )
 
@@ -609,9 +609,11 @@ class MemFlowManager:
             for name, fn in tools.items():
                 self._executor.register(name, fn)
 
-        step_results: list[StepResult] = [
-            self._executor.execute_step(step) for step in plan.steps
-        ]
+        step_results: list[StepResult] = []
+        for step in plan.steps:
+            result = self._executor.execute_step(step)
+            self._attach_step_result(step, result)
+            step_results.append(result)
         return step_results
 
     # ------------------------------------------------------------------
@@ -633,8 +635,8 @@ class MemFlowManager:
 
         Steps:
           1. Retrieve relevant procedures (context for planning).
-          2. Plan: LLM decomposes the task into Jobs.
-          3. Execute: run each Job with the registered tools.
+          2. Plan: LLM decomposes the task into steps.
+          3. Execute: run each step with the registered tools.
           4. Learn: extract a reusable Procedure from successful steps
              and store it automatically (Learn → Retrieve back-edge).
 
@@ -642,13 +644,13 @@ class MemFlowManager:
             task:       High-level task description.
             user_id:    User scope for retrieval and storage.
             tools:      Extra tools to register {name: callable}.
-                        Each callable receives Job.args as keyword arguments
+                        Each callable receives Step.args as keyword arguments
                         and must return a string.
             multi_stage: If True, use Reflect-and-Refine loop (plan a few steps,
                         execute, replan). If False, single-shot plan then execute.
 
         Returns:
-            RunResult with plan, job results, and learned procedure.
+            RunResult with plan, step results, and learned procedure.
         """
         if multi_stage:
             return self._run_with_partial_replan(task, user_id=user_id, tools=tools)
@@ -668,19 +670,8 @@ class MemFlowManager:
         if self._learner is None:
             self._learner = Learner(self.llm)
 
-        # Convert StepResult to JobResult for learner (legacy compatibility)
-        from memflow.models import Job, JobResult
-        job_results = []
-        for i, sr in enumerate(step_results):
-            if i < len(task_plan.steps):
-                step = task_plan.steps[i]
-                job = Job(id=sr.step_id, tool=step.tool_name or "llm",
-                         description=step.goal, args=step.args)
-                job_results.append(JobResult(job=job, success=sr.success,
-                                            output=sr.output, error=sr.error))
-
         learned = self._learner.extract(
-            task, job_results, user_id=user_id or "default"
+            task, task_plan.steps, user_id=user_id or "default"
         )
         if learned is not None:
             self.store.add(learned)
@@ -737,6 +728,7 @@ class MemFlowManager:
         # Initial plan
         plan = self._planner.plan(task, context=context, multi_stage=False)
         all_step_results: list[StepResult] = []
+        executed_steps: list[Step] = []
 
         # Execute with partial replan
         step_index = 0
@@ -750,24 +742,20 @@ class MemFlowManager:
 
             # Execute current step
             step_result = self._execute_step_with_guard(step, tools)
+            self._attach_step_result(step, step_result)
             all_step_results.append(step_result)
+            executed_steps.append(step)
 
             if step_result.success:
-                step.status = 'done'
-                step.result = step_result
                 step_index += 1
             else:
                 # Step failed - replan only this step
                 attempt += 1
                 if not global_guard.can_attempt(attempt):
-                    step.status = 'failed'
-                    step.result = step_result
                     break  # Max attempts reached
 
                 # Check for cycle (same goal + same failure)
                 if global_guard.is_cycle_detected(step.goal, step_result.error):
-                    step.status = 'failed'
-                    step.result = step_result
                     break  # Cycle detected
 
                 # Replan with failed step's goal (not global goal!)
@@ -789,9 +777,7 @@ class MemFlowManager:
                     )
                     # Don't increment step_index - process new first step
                 else:
-                    # LLM couldn't find alternative - mark as failed
-                    step.status = 'failed'
-                    step.result = step_result
+                    # LLM couldn't find an alternative.
                     step_index += 1
 
         # Mark remaining steps as not executed
@@ -801,25 +787,16 @@ class MemFlowManager:
 
         # Learn from successful execution
         learned = None
-        successful_results = [r for r in all_step_results if r.success]
-        if successful_results:
+        successful_steps = [
+            step for step in executed_steps if step.result and step.result.success
+        ]
+        if successful_steps:
             if self._learner is None:
                 self._learner = Learner(self.llm)
 
-            # Convert to JobResult for learner
-            # Use step_id based mapping to handle replan step index changes
-            from memflow.models import Job, JobResult
-            step_by_id = {s.id: s for s in plan.steps}
-            job_results = []
-            for sr in all_step_results:
-                step = step_by_id.get(sr.step_id)
-                if step is not None:
-                    job = Job(id=sr.step_id, tool=step.tool_name or "llm",
-                             description=step.goal, args=step.args)
-                    job_results.append(JobResult(job=job, success=sr.success,
-                                                 output=sr.output, error=sr.error))
-
-            learned = self._learner.extract(task, job_results, user_id=user_id or "default")
+            learned = self._learner.extract(
+                task, executed_steps, user_id=user_id or "default"
+            )
             if learned is not None:
                 self.store.add(learned)
 
@@ -854,6 +831,11 @@ class MemFlowManager:
             retryable=False,
         )
 
+    @staticmethod
+    def _attach_step_result(step: Step, result: StepResult) -> None:
+        step.result = result
+        step.status = "done" if result.success else "failed"
+
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
@@ -882,7 +864,7 @@ class MemFlowManager:
         except Exception:
             return "procedural"  # fall back to procedural on error
 
-    def _validate_step_output(self, result: StepResult) -> bool:
+    def _validate_step_output(self, step: Step) -> bool:
         """
         Validate that a step result has meaningful output.
         Returns False if output is empty or meaningless.
@@ -890,31 +872,14 @@ class MemFlowManager:
         Special handling for file operations - if the command creates a file,
         verify the file exists even if output is empty.
         """
-        if not result.success:
+        if step.result is None:
+            return False
+
+        if not step.result.success:
             return True  # Don't validate failed steps
 
-        output = result.output.strip() if result.output else ""
-
-        # For now, delegate to legacy _validate_output by creating a temporary JobResult
-        # This is a transitional implementation
-        from memflow.models import Job
-        temp_job = Job(id=result.step_id, tool="bash", description="", args={"command": ""})
-        temp_result = JobResult(job=temp_job, success=result.success, output=result.output, error=result.error)
-        return self._validate_output(temp_result)
-
-    def _validate_output(self, result: JobResult) -> bool:
-        """
-        Validate that a job result has meaningful output.
-        Returns False if output is empty or meaningless.
-
-        Special handling for file operations - if the command creates a file,
-        verify the file exists even if output is empty.
-        """
-        if not result.success:
-            return True  # Don't validate failed jobs
-
-        output = result.output.strip() if result.output else ""
-        command = result.job.args.get("command", "") if result.job.args else ""
+        output = step.result.output.strip() if step.result.output else ""
+        command = step.args.get("command", "") if step.args else ""
 
         # Empty output - check if it's a file/directory operation that succeeded
         if not output:
@@ -961,13 +926,17 @@ class MemFlowManager:
 
         return True
 
-    def _is_task_complete(self, task: str, results: list[StepResult] | list[JobResult]) -> bool:
+    def _is_task_complete(self, task: str, steps: list[Step]) -> bool:
         """
         Use LLM to verify if the task has been actually completed.
         Be conservative - only return True if clearly complete.
         """
         # First, check for obvious success patterns
-        successful_outputs = [r.output for r in results if r.success and r.output]
+        successful_outputs = [
+            step.result.output
+            for step in steps
+            if step.result and step.result.success and step.result.output
+        ]
 
         # For tasks with "and", check if multiple distinct things were accomplished
         if " and " in task.lower():
@@ -978,19 +947,15 @@ class MemFlowManager:
 
         # Summarize what was accomplished
         summary_parts = []
-        for r in results:
-            # Handle both StepResult and JobResult
-            if hasattr(r, 'job') and r.job:
-                desc = r.job.description
-            elif hasattr(r, 'step_id'):
-                desc = f"Step {r.step_id[:8]}"
-            else:
-                desc = "Unknown"
+        for step in steps:
+            if step.result is None:
+                continue
 
-            if r.success and r.output:
-                summary_parts.append(f"- {desc}: {r.output[:200]}")
-            elif not r.success:
-                summary_parts.append(f"- {desc}: FAILED ({r.error[:100]})")
+            desc = step.goal or f"Step {step.id[:8]}"
+            if step.result.success and step.result.output:
+                summary_parts.append(f"- {desc}: {step.result.output[:200]}")
+            elif not step.result.success:
+                summary_parts.append(f"- {desc}: FAILED ({step.result.error[:100]})")
 
         summary = "\n".join(summary_parts) if summary_parts else "No results yet."
 

@@ -1,7 +1,7 @@
 """
 Task planner for MemFlow Phase 3.
 
-LLMPlanner decomposes a high-level task into a list of executable Jobs,
+LLMPlanner decomposes a high-level task into a list of executable Steps,
 optionally using retrieved procedures as planning context
 (Retrieve → Planner back-edge).
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 import uuid
 
 from memflow.llm import BaseLLM, parse_json
-from memflow.models import Job, JobResult, TaskPlan, Step, StepType, StepResult
+from memflow.models import TaskPlan, Step, StepType
 from memflow.prompts import PLANNING_PROMPT, REPLAN_PROMPT
 
 # Default tool descriptions shown to the planner LLM.
@@ -44,7 +44,7 @@ DEFAULT_TOOLS = [
 
 class LLMPlanner:
     """
-    Decomposes tasks into executable job plans using an LLM.
+    Decomposes tasks into executable step plans using an LLM.
 
     The planner receives relevant procedures as context so it can reuse
     existing SOPs rather than reinventing steps from scratch.
@@ -80,7 +80,7 @@ class LLMPlanner:
         task: str,
         context: str = "",
         multi_stage: bool = False,
-        executed_results: list[JobResult] | None = None,
+        executed_steps: list[Step] | None = None,
         plan_guard: "PlanGuard | None" = None,
     ) -> TaskPlan:
         """Decompose task into a TaskPlan.
@@ -89,18 +89,18 @@ class LLMPlanner:
             task:             High-level task description.
             context:          Relevant procedure text retrieved from the store.
             multi_stage:      If True, plan only a few steps for iterative execution.
-            executed_results: Results from previously executed jobs (for replanning).
+            executed_steps:   Previously executed steps with attached results.
             plan_guard:       Guard for controlling recursion depth.
 
         Returns:
-            TaskPlan with jobs to execute.
+            TaskPlan with steps to execute.
         """
         # Set plan guard
         self._plan_guard = plan_guard
 
-        if multi_stage and executed_results:
+        if multi_stage and executed_steps:
             # Replanning with execution history
-            return self._replan(task, context, executed_results)
+            return self._replan(task, context, executed_steps)
         elif multi_stage:
             # Initial multi-stage planning (limited steps)
             return self._plan_limited(task, context)
@@ -213,7 +213,7 @@ class LLMPlanner:
         self,
         task: str,
         context: str,
-        executed_results: list[JobResult],
+        executed_steps: list[Step],
     ) -> TaskPlan:
         """Replan based on execution results (Reflect → Replan)."""
         # Check PlanGuard for recursion depth
@@ -227,11 +227,13 @@ class LLMPlanner:
         try:
             # Summarize what has been done
             history = []
-            for result in executed_results:
-                status = "SUCCESS" if result.success else "FAILED"
+            for step in executed_steps:
+                if step.result is None:
+                    continue
+                status = "SUCCESS" if step.result.success else "FAILED"
                 history.append(
-                    f"[{status}] {result.job.description}\n"
-                    f"  Output: {result.output or result.error}"
+                    f"[{status}] {step.goal}\n"
+                    f"  Output: {step.result.output or step.result.error}"
                 )
             history_text = "\n\n".join(history)
 
