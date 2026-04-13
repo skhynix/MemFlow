@@ -9,7 +9,7 @@ Scenarios:
   A. Cold start — no procedures stored, planner works from scratch.
   B. Warm start — a relevant SOP is in the store, planner reuses it.
 
-After planning, each Job is executed manually using the ToolRegistry.
+After planning, each step is executed manually using the ToolRegistry.
 No AutoLearn step is performed — this is for incremental testing.
 
 Run:
@@ -41,41 +41,40 @@ def show_plan(label: str) -> None:
         print(f"  Context used: yes ({len(task_plan.context)} chars)")
     else:
         print("  Context used: none (cold start)")
-    print(f"  Jobs ({len(task_plan.jobs)}):")
-    for i, job in enumerate(task_plan.jobs, 1):
-        print(f"    {i}. [{job.tool}] {job.description}")
-        for k, v in job.args.items():
+    print(f"  Steps ({len(task_plan.steps)}):")
+    for i, step in enumerate(task_plan.steps, 1):
+        print(f"    {i}. [{step.tool_name or 'llm'}] {step.goal}")
+        for k, v in step.args.items():
             preview = str(v)[:70] + "..." if len(str(v)) > 70 else str(v)
             print(f"         {k}: {preview}")
     return task_plan
 
 
 def execute_plan(task_plan) -> list:
-    """Execute each Job in the plan and display results."""
+    """Execute each step in the plan and display results."""
     print(f"\n{'='*60}")
-    print("  Executing Jobs")
+    print("  Executing Steps")
     print(f"{'='*60}")
 
-    if not task_plan.jobs:
-        print("  No jobs to execute (empty plan).")
+    if not task_plan.steps:
+        print("  No steps to execute (empty plan).")
         return []
 
-    # Use manager.execute() to run all jobs
-    job_results = manager.execute(task_plan)
+    step_results = manager.execute(task_plan)
 
     results = []
-    for i, (job, job_result) in enumerate(zip(task_plan.jobs, job_results), 1):
-        print(f"\n  [{i}/{len(task_plan.jobs)}] Executing: {job.description}")
-        if job_result.success:
+    for i, (step, step_result) in enumerate(zip(task_plan.steps, step_results), 1):
+        print(f"\n  [{i}/{len(task_plan.steps)}] Executing: {step.goal}")
+        if step_result.success:
             status = "OK"
-            output_preview = job_result.output.replace("\n", " ")[:100]
+            output_preview = step_result.output.replace("\n", " ")[:100]
             print(f"       → {status}: {output_preview}")
-            results.append({"job": job, "success": True, "output": job_result.output})
+            results.append({"step": step, "success": True, "output": step_result.output})
         else:
             status = "ERR"
-            error_preview = job_result.error[:100]
+            error_preview = step_result.error[:100]
             print(f"       → {status}: {error_preview}")
-            results.append({"job": job, "success": False, "error": job_result.error})
+            results.append({"step": step, "success": False, "error": step_result.error})
     return results
 
 

@@ -4,7 +4,7 @@
 
 plan(task) is the first half of the Phase 3 pipeline:
   1. Retrieve relevant procedures from the store (context for the planner).
-  2. Call the LLM with PLANNING_PROMPT to decompose the task into Jobs.
+  2. Call the LLM with PLANNING_PROMPT to decompose the task into steps.
   3. Return a TaskPlan — no execution yet.
 
 This example shows two scenarios side by side:
@@ -41,10 +41,10 @@ def show_plan(label: str) -> None:
         print(f"  Context used: yes ({len(task_plan.context)} chars)")
     else:
         print("  Context used: none (cold start)")
-    print(f"  Jobs ({len(task_plan.jobs)}):")
-    for i, job in enumerate(task_plan.jobs, 1):
-        print(f"    {i}. [{job.tool}] {job.description}")
-        for k, v in job.args.items():
+    print(f"  Steps ({len(task_plan.steps)}):")
+    for i, step in enumerate(task_plan.steps, 1):
+        print(f"    {i}. [{step.tool_name or 'llm'}] {step.goal}")
+        for k, v in step.args.items():
             preview = str(v)[:70] + "..." if len(str(v)) > 70 else str(v)
             print(f"         {k}: {preview}")
 

@@ -105,15 +105,18 @@ def show_run(label: str, task: str, result) -> None:
     else:
         print("  Stored SOP used: no (cold start)\n")
 
-    print(f"  Plan ({len(result.plan.jobs)} steps):")
-    for i, job in enumerate(result.plan.jobs, 1):
-        print(f"    {i}. [{job.tool}] {job.description}")
+    print(f"  Plan ({len(result.plan.steps)} steps):")
+    for i, step in enumerate(result.plan.steps, 1):
+        print(f"    {i}. [{step.tool_name or 'llm'}] {step.goal}")
 
-    ok = sum(1 for r in result.job_results if r.success)
-    print(f"\n  Execution ({ok}/{len(result.job_results)} succeeded):")
-    for r in result.job_results:
+    ok = sum(1 for r in result.step_results if r.success)
+    print(f"\n  Execution ({ok}/{len(result.step_results)} succeeded):")
+    step_by_id = {step.id: step for step in result.plan.steps}
+    for r in result.step_results:
         mark = "OK " if r.success else "ERR"
-        print(f"    [{mark}] {r.job.description}")
+        step = step_by_id.get(r.step_id)
+        description = step.goal if step else f"Step {r.step_id[:8]}"
+        print(f"    [{mark}] {description}")
         if r.success and r.output:
             for line in r.output.splitlines()[:4]:
                 print(f"           {line}")

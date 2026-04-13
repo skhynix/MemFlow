@@ -3,8 +3,8 @@
 10. Run — plan, execute, and learn from a task automatically.
 
 run(task) is the full Phase 3 pipeline:
-  1. plan()   — retrieve context + LLM decomposition into Jobs
-  2. execute  — run each Job through built-in tools (llm / bash)
+  1. plan()   — retrieve context + LLM decomposition into steps
+  2. execute  — run each step through built-in tools (llm / bash)
   3. learn    — extract a reusable SOP from successful steps and store it
 
 Built-in tools used in this example:
@@ -43,10 +43,10 @@ result = manager.run(TASK)
 # ---------------------------------------------------------------------------
 
 print(f"{'='*60}")
-print(f"  Plan ({len(result.plan.jobs)} jobs)")
+print(f"  Plan ({len(result.plan.steps)} steps)")
 print(f"{'='*60}")
-for i, job in enumerate(result.plan.jobs, 1):
-    print(f"  {i}. [{job.tool}] {job.description}")
+for i, step in enumerate(result.plan.steps, 1):
+    print(f"  {i}. [{step.tool_name or 'llm'}] {step.goal}")
 
 # ---------------------------------------------------------------------------
 # Show execution results
@@ -55,12 +55,15 @@ for i, job in enumerate(result.plan.jobs, 1):
 print(f"\n{'='*60}")
 print("  Execution Results")
 print(f"{'='*60}")
-success_count = sum(1 for r in result.job_results if r.success)
-print(f"  {success_count}/{len(result.job_results)} jobs succeeded\n")
+success_count = sum(1 for r in result.step_results if r.success)
+print(f"  {success_count}/{len(result.step_results)} steps succeeded\n")
 
-for r in result.job_results:
+step_by_id = {step.id: step for step in result.plan.steps}
+for r in result.step_results:
     status = "OK " if r.success else "ERR"
-    print(f"  [{status}] {r.job.description}")
+    step = step_by_id.get(r.step_id)
+    description = step.goal if step else f"Step {r.step_id[:8]}"
+    print(f"  [{status}] {description}")
     if r.success and r.output:
         preview = r.output.replace("\n", " ")[:120]
         print(f"       → {preview}")

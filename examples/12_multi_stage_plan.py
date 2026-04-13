@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import MemFlowManager
 from memflow.llm import LLMFactory
-from memflow.planner import LLMPlanner
 from utils import Colors, print_header, print_labeled_text, print_success
 
 # NOTE: This example might not be executed as expected.
@@ -57,7 +56,7 @@ def run(task, manager, max_iterations=8):
     This wrapper demonstrates the Reflect-and-Refine loop by showing
     each planning cycle separately. Uses only public APIs.
     """
-    all_plans = []
+    executed_steps = []
     all_results = []
     iteration = 0
 
@@ -66,17 +65,8 @@ def run(task, manager, max_iterations=8):
         print_labeled_text(f"  Iteration {iteration}/{max_iterations}:", "", Colors.CYAN)
 
         # Plan next step(s) using public plan() API with multi_stage=True
-        if all_results:
-            # Replanning with execution history - convert StepResult to JobResult
-            from memflow.models import Job, JobResult
-            executed_results = []
-            for i, sr in enumerate(all_results):
-                # Find the step from the last plan
-                if i < len(all_plans[-1].steps):
-                    step = all_plans[-1].steps[i]
-                    job = Job(id=sr.step_id, tool=step.tool_name or "llm", description=step.goal, args=step.args)
-                    executed_results.append(JobResult(job=job, success=sr.success, output=sr.output, error=sr.error))
-            plan = manager.plan(task, multi_stage=True, executed_results=executed_results)
+        if executed_steps:
+            plan = manager.plan(task, multi_stage=True, executed_steps=executed_steps)
         else:
             # Initial planning
             plan = manager.plan(task, multi_stage=True)
@@ -85,12 +75,12 @@ def run(task, manager, max_iterations=8):
             print_success(f"    Task complete (no more steps)\n")
             break
 
-        all_plans.append(plan)
         for step in plan.steps:
             print(f"    [{step.tool_name or 'llm'}] {step.goal}")
 
         # Execute using public execute() API
         results = manager.execute(plan)
+        executed_steps.extend(plan.steps)
         all_results.extend(results)
 
         for r in results:
@@ -100,7 +90,7 @@ def run(task, manager, max_iterations=8):
                 print(f"        {Colors.RED}Error: {r.error[:50]}{Colors.RESET}")
 
         # Check completion
-        if manager._is_task_complete(task, all_results):
+        if manager._is_task_complete(task, executed_steps):
             print_success(f"    Task verified complete\n")
             break
         print()
@@ -109,21 +99,13 @@ def run(task, manager, max_iterations=8):
     if manager._learner is None:
         from memflow.learner import Learner
         manager._learner = Learner(manager.llm)
-    # Convert StepResult to JobResult for learner
-    from memflow.models import Job, JobResult
-    job_results = []
-    for i, sr in enumerate(all_results):
-        step = plan.steps[i] if i < len(plan.steps) else None
-        if step:
-            job = Job(id=sr.step_id, tool=step.tool_name or "llm", description=step.goal, args=step.args)
-            job_results.append(JobResult(job=job, success=sr.success, output=sr.output, error=sr.error))
 
-    learned = manager._learner.extract(task, job_results, user_id="default")
+    learned = manager._learner.extract(task, executed_steps, user_id="default")
     if learned:
         manager.store.add(learned)
 
     from memflow.models import TaskPlan, RunResult
-    merged = TaskPlan(task=task, steps=[s for p in all_plans for s in p.steps], context="")
+    merged = TaskPlan(task=task, steps=executed_steps, context="")
     return RunResult(plan=merged, step_results=all_results, learned=learned)
 
 # ---------------------------------------------------------------------------
