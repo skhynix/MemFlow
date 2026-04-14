@@ -45,5 +45,8 @@ Thumbs.db
 # Project specific
 tags
 
-# coding agents
+# Coding agents
 .claude/
+
+# Docker volumes
+postgres_data/
