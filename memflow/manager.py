@@ -12,8 +12,10 @@ Public API:
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from memflow.executor import ToolRegistry
@@ -29,6 +31,38 @@ PROCEDURAL_KEYWORDS = [
     "deploy", "install", "configure", "setup", "build",
     "run", "execute", "process", "workflow", "procedure",
 ]
+
+
+def _load_env_file(env_path: str | None = None) -> None:
+    """
+    Load environment variables from .env file.
+
+    Simple parser without external dependencies.
+    Only sets variables that are not already set (priority: env > .env > default).
+
+    Args:
+        env_path: Path to .env file. If None, searches in current directory.
+    """
+    if env_path is None:
+        env_path = ".env"
+
+    path = Path(env_path)
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        # Skip empty lines and comments
+        if not line or line.startswith("#"):
+            continue
+        # Parse KEY=VALUE
+        if "=" in line:
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            # Only set if not already in environment (env has priority)
+            if key and key not in os.environ:
+                os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +131,75 @@ class ToolGuard:
 
 
 class MemFlowManager:
+    """
+    Core orchestrator for MemFlow operations.
+
+    Coordinates LLM, storage, and Phase 3 components (planner, executor, learner).
+    Supports automatic bypass routing for non-procedural memories.
+
+    Environment variables (read when use_env=True):
+        Priorities: explicit env var > .env file > fallback defaults
+
+        LLM_PROVIDER             — LLM provider: ollama | openai-compatible
+        LLM_MODEL                — Model name
+        LLM_API_BASE             — LLM server URL
+        LLM_API_KEY              — API key for authenticated endpoints
+        MEMFLOW_BACKEND          — Storage backend: emulated | file | memmachine
+        MEMFLOW_DATA_DIR         — Data directory for FileStore
+        MEMMACHINE_BASE_URL      — MemMachine server URL
+        MEMMACHINE_ORG_ID        — MemMachine organization ID
+        MEMMACHINE_PROJECT       — MemMachine project ID
+        MEMMACHINE_API_KEY       — MemMachine API key (optional)
+
+    Note:
+        When use_env=True, automatically loads .env file from current directory
+        if it exists. Values in .env are used only if not already set as
+        environment variables.
+    """
+
     def __init__(
         self,
-        llm: BaseLLM,
+        llm: BaseLLM | None = None,
         store: BaseStore | None = None,
         bypass: MemMachineBypass | None = None,
         max_steps_per_iteration: int | None = None,
         max_plan_iterations: int | None = None,
+        use_env: bool = True,
     ) -> None:
+        if use_env:
+            # Load .env file if it exists (only sets vars not already in environment)
+            _load_env_file()
+
+            # LLM Configuration - fallback defaults only (no hardcoding of internal IPs)
+            llm_provider = os.getenv("LLM_PROVIDER", "ollama")
+            llm_model = os.getenv("LLM_MODEL")
+            llm_api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
+            llm_api_key = os.getenv("LLM_API_KEY")
+            llm = LLMFactory.create(llm_provider, model=llm_model, api_base=llm_api_base, api_key=llm_api_key)
+
+            # Storage Backend
+            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+            data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
+
+            # MemMachine Configuration
+            mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
+            mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
+            mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
+            mm_key = os.getenv("MEMMACHINE_API_KEY")
+
+            if store is None:
+                if backend == "file":
+                    store = FileStore(data_dir=data_dir)
+                elif backend in ("memmachine"):
+                    store = MemMachineStore(
+                        base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
+                    )
+                    bypass = MemMachineBypass(
+                        base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key,
+                    )
+                else:
+                    store = EmulatedStore()
+
         self.llm = llm
         self.store = store or EmulatedStore()
         self._bypass = bypass  # routes semantic/episodic content to MemMachine
@@ -114,53 +209,6 @@ class MemFlowManager:
         self._planner: LLMPlanner | None = None
         self._executor: ToolRegistry | None = None
         self._learner: Learner | None = None
-
-    @classmethod
-    def from_env(cls) -> "MemFlowManager":
-        """Create a manager configured from environment variables.
-
-        Environment variables:
-          LLM_PROVIDER         — ollama | openai-compatible (default: ollama)
-          LLM_MODEL            — model name (provider default if unset)
-          LLM_API_BASE         — LLM server URL (default: http://localhost:11434)
-          LLM_API_KEY          — API key for authenticated endpoints
-          MEMFLOW_BACKEND      — emulated | file | memmachine (default: emulated)
-          MEMFLOW_DATA_DIR     — data directory for file backend (default: ./memflow_data)
-          MEMMACHINE_BASE_URL  — MemMachine server URL (default: http://localhost:8080)
-          MEMMACHINE_ORG_ID    — MemMachine org ID (default: default)
-          MEMMACHINE_PROJECT   — MemMachine project ID (default: memflow)
-          MEMMACHINE_API_KEY   — MemMachine API key (optional)
-        """
-        import os
-        provider = os.getenv("LLM_PROVIDER", "ollama")
-        model = os.getenv("LLM_MODEL")
-        api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
-        api_key = os.getenv("LLM_API_KEY")
-        llm = LLMFactory.create(provider, model=model, api_base=api_base, api_key=api_key)
-
-        backend = os.getenv("MEMFLOW_BACKEND", "emulated")
-        mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
-        mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
-        mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
-        mm_key = os.getenv("MEMMACHINE_API_KEY")
-
-        store: BaseStore
-        bypass: MemMachineBypass | None = None
-
-        if backend == "file":
-            data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
-            store = FileStore(data_dir=data_dir)
-        elif backend == "memmachine":
-            store = MemMachineStore(
-                base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
-            )
-            bypass = MemMachineBypass(
-                base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
-            )
-        else:
-            store = EmulatedStore()
-
-        return cls(llm=llm, store=store, bypass=bypass)
 
     # ------------------------------------------------------------------
     # add
@@ -947,5 +995,3 @@ Respond ONLY with "YES" or "NO".
     def _is_likely_procedural(text: str) -> bool:
         text_lower = text.lower()
         return any(kw in text_lower for kw in PROCEDURAL_KEYWORDS)
-
-
