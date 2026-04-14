@@ -8,7 +8,7 @@ from memflow.llm import BaseLLM, LLMFactory, OllamaLLM, OpenAICompatibleLLM
 from memflow.manager import MemFlowManager
 from memflow.models import Job, JobResult, Procedure, RunResult, SearchResult, TaskPlan
 from memflow.planner import LLMPlanner
-from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
+from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, MemFlowStore
 
 __all__ = [
     # Core
@@ -31,6 +31,7 @@ __all__ = [
     "FileStore",
     "MemMachineStore",
     "MemMachineBypass",
+    "MemFlowStore",
     # Phase 3 components
     "LLMPlanner",
     "ToolRegistry",

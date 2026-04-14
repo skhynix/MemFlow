@@ -5,12 +5,16 @@ description = "Procedural Memory layer for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "httpx>=0.27",
+    "sqlalchemy>=2.0",
+    "pgvector>=0.3",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.optional-dependencies]
 ollama = ["ollama>=0.6.1"]
-openai = ["openai>=2.30.0"]
 memmachine = ["memmachine-client>=0.3.0"]
+openai = ["openai>=2.30.0"]
 dev = ["pytest>=8.0.0"]
 
 [build-system]

@@ -24,7 +24,7 @@ from memflow.llm import BaseLLM, LLMFactory, parse_json
 from memflow.models import JobResult, Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult, StepType
 from memflow.planner import LLMPlanner
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
-from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore
+from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore, MemFlowStore
 
 PROCEDURAL_KEYWORDS = [
     "step", "how to", "first", "then", "finally",
@@ -144,8 +144,13 @@ class MemFlowManager:
         LLM_MODEL                — Model name
         LLM_API_BASE             — LLM server URL
         LLM_API_KEY              — API key for authenticated endpoints
-        MEMFLOW_BACKEND          — Storage backend: emulated | file | memmachine
+        MEMFLOW_BACKEND          — Storage backend: emulated | file | memmachine | memflow
         MEMFLOW_DATA_DIR         — Data directory for FileStore
+        MEMFLOW_BASE_URL         — PostgreSQL URL for MemFlowStore
+        MEMFLOW_EMBEDDING_MODEL  — Embedding model
+        MEMFLOW_EMBEDDING_API_BASE — Embedding API base URL
+        MEMFLOW_EMBEDDING_API_KEY  — Embedding API key
+        MEMFLOW_EMBEDDING_DIMENSIONS — Embedding dimensions
         MEMMACHINE_BASE_URL      — MemMachine server URL
         MEMMACHINE_ORG_ID        — MemMachine organization ID
         MEMMACHINE_PROJECT       — MemMachine project ID
@@ -187,18 +192,41 @@ class MemFlowManager:
             mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
             mm_key = os.getenv("MEMMACHINE_API_KEY")
 
+            # MemFlow Store Configuration
+            mf_url = os.getenv("MEMFLOW_BASE_URL", "postgresql://memflow:memflow_password@localhost:5433/memflow")
+            mf_emb = os.getenv("MEMFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+            mf_emb_api_base = os.getenv("MEMFLOW_EMBEDDING_API_BASE")  # No default - must be set
+            mf_emb_api_key = os.getenv("MEMFLOW_EMBEDDING_API_KEY", "EMPTY")
+            mf_emb_dim = os.getenv("MEMFLOW_EMBEDDING_DIMENSIONS", "2560")
+
             if store is None:
                 if backend == "file":
                     store = FileStore(data_dir=data_dir)
-                elif backend in ("memmachine"):
+                elif backend == "memmachine":
                     store = MemMachineStore(
                         base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
                     )
-                    bypass = MemMachineBypass(
-                        base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key,
+                elif backend == "memflow":
+                    store = MemFlowStore(
+                        base_url=mf_url,
+                        emb_model=mf_emb,
+                        emb_api_base=mf_emb_api_base,
+                        emb_api_key=mf_emb_api_key,
+                        emb_dim=int(mf_emb_dim),
                     )
                 else:
                     store = EmulatedStore()
+
+            if bypass is None and backend in ("memmachine", "memflow"):
+                bypass_kwargs = {
+                    "base_url": mm_url,
+                    "org_id": mm_org,
+                    "project_id": mm_proj,
+                    "api_key": mm_key,
+                }
+                if backend == "memflow":
+                    bypass_kwargs["memflow_store"] = store
+                bypass = MemMachineBypass(**bypass_kwargs)
 
         self.llm = llm
         self.store = store or EmulatedStore()
