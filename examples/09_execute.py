@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 09. Execute — plan a task, then execute step by step (without auto-learn).
 

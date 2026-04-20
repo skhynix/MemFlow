@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 08. Plan — decompose a task into steps using stored procedures as context.
 

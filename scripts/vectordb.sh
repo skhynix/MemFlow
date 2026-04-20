@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Usage:
 #   Option 1: Run script

@@ -1,3 +1,6 @@
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """ANSI color utilities for terminal output."""
 
 

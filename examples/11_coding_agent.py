@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 11. Coding Agent — write scripts, run them, and learn the workflow.
 

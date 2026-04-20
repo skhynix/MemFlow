@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 13. Agentic Loop Example — MemFlow Plan/Execute/Learn.
 
@@ -183,5 +186,4 @@ if result.learned:
 print(f"\n{Colors.CYAN}Step Details:{Colors.RESET}")
 for i, (step, r) in enumerate(zip(result.plan.steps, result.step_results), 1):
     print_step(i, f"[{step.tool_name or 'llm'}] {step.goal}", r.success, r.output if r.success else None, r.error if not r.success else None)
-
 

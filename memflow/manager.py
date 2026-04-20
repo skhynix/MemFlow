@@ -1,3 +1,6 @@
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 MemFlowManager — core orchestrator for MemFlow.
 
@@ -971,4 +974,3 @@ Respond ONLY with "YES" or "NO".
         except Exception:
             # On error, assume task is not complete (conservative)
             return False
-

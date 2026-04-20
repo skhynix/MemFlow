@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 14. Multi-Intent Chat Demo — Handle multiple intents in a single message.
 
@@ -72,6 +75,7 @@ print(f"{Colors.CYAN}Response:{Colors.RESET}")
 for line in result['response'].split('\n'):
     print(f"    {line}")
 
+
 # ---------------------------------------------------------------------------
 # Test 3: Multi-Intent (SEARCH + EXECUTE with confirmation)
 # ---------------------------------------------------------------------------
@@ -111,4 +115,3 @@ if 'handler_results' in result and 'EXECUTE' in result['handler_results']:
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
 for line in result['response'].split('\n'):
     print(f"    {line}")
-
