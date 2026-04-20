@@ -1,3 +1,6 @@
+# Copyright 2026 SK hynix Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared fixtures for unit tests."""
 
 import os
