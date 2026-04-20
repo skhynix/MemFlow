@@ -16,7 +16,7 @@ After planning, each step is executed manually using the ToolRegistry.
 No AutoLearn step is performed — this is for incremental testing.
 
 Run:
-  ./examples/09_execute.py
+  uv run ./examples/09_execute.py
 """
 
 import sys

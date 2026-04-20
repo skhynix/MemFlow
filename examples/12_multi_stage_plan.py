@@ -12,7 +12,7 @@ This example demonstrates multi-stage planning:
   - Learn reusable procedure for future
 
 Run:
-  ./examples/12_multi_stage_plan.py
+  uv run ./examples/12_multi_stage_plan.py
 """
 
 import sys

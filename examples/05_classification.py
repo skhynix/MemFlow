@@ -20,7 +20,7 @@ episodic, none) — through the pipeline and shows how each one is classified
 and handled.
 
 Run:
-  ./examples/05_classification.py
+  uv run ./examples/05_classification.py
 """
 
 import sys

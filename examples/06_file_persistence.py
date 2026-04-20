@@ -20,7 +20,7 @@ This example runs two independent sessions against the same data directory:
 The data directory is cleaned up at the end of the example.
 
 Run:
-  ./examples/06_file_persistence.py
+  uv run ./examples/06_file_persistence.py
 """
 
 import sys

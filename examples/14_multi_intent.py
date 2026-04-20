@@ -11,7 +11,7 @@ This example demonstrates the multi-intent classification feature:
   - Each intent handler is called sequentially
 
 Run:
-  ./examples/14_multi_intent.py
+  uv run ./examples/14_multi_intent.py
 """
 
 import sys

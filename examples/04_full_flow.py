@@ -12,7 +12,7 @@ Brings everything together:
   4. Chat: answer questions grounded in stored procedures.
 
 Run:
-  ./examples/04_full_flow.py
+  uv run ./examples/04_full_flow.py
 """
 
 import sys

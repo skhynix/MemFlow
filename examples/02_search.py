@@ -10,7 +10,7 @@ Stores two procedures and shows how search behaves:
   - Indirect query: same intent but different words.
 
 Run:
-  ./examples/02_search.py
+  uv run ./examples/02_search.py
 """
 
 import sys

@@ -24,7 +24,7 @@ Run 2  Warm start — SOP from Run 1 is in the store.
        The planner reuses the stored workflow — plan is noticeably more direct.
 
 Run:
-  ./examples/11_coding_agent.py
+  uv run ./examples/11_coding_agent.py
 """
 
 import subprocess

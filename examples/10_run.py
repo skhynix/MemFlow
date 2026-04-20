@@ -18,7 +18,7 @@ After run() completes, the learned procedure is retrieved via search() to
 demonstrate the Learn → Retrieve back-edge closing the loop.
 
 Run:
-  ./examples/10_run.py
+  uv run ./examples/10_run.py
 """
 
 import sys

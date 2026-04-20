@@ -18,11 +18,11 @@ Requirements:
   - OPENAI_API_KEY or another embedding provider configured in MemMachine
 
 Run:
-  MEMFLOW_BACKEND=memmachine ./examples/07_memmachine.py
+  uv run --env MEMFLOW_BACKEND=memmachine ./examples/07_memmachine.py
 
   Or with a custom server:
-  MEMFLOW_BACKEND=memmachine \\
-    MEMMACHINE_BASE_URL=http://myserver:8080 \\
+  uv run --env MEMFLOW_BACKEND=memmachine \\
+    --env MEMMACHINE_BASE_URL=http://myserver:8080 \\
     ./examples/07_memmachine.py
 """
 

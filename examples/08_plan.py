@@ -17,7 +17,7 @@ This example shows two scenarios side by side:
 Comparing the two plans makes the Retrieve → Planner back-edge visible.
 
 Run:
-  ./examples/08_plan.py
+  uv run ./examples/08_plan.py
 """
 
 import sys

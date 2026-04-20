@@ -10,7 +10,7 @@ The simplest possible MemFlow example:
   2. Ask a question and get an answer grounded in that procedure.
 
 Run:
-  ./examples/01_quickstart.py
+  uv run ./examples/01_quickstart.py
 """
 
 import sys

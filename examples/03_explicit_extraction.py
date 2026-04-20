@@ -12,7 +12,7 @@ and stores it as a Procedure.
   Path 2: Explicit Extraction — pass conversation text, LLM extracts.
 
 Run:
-  ./examples/03_explicit_extraction.py
+  uv run ./examples/03_explicit_extraction.py
 """
 
 import sys

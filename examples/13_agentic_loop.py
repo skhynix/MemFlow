@@ -12,7 +12,7 @@ This example demonstrates the full agentic loop with chat() API:
   4. Automatic learning from successful execution
 
 Run:
-  ./examples/13_agentic_loop.py
+  uv run ./examples/13_agentic_loop.py
 """
 
 import sys
