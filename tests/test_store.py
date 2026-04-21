@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from memflow.models import Procedure
-from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass
+from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, MemFlowStore
 
 
 class TestEmulatedStore:
@@ -334,6 +334,35 @@ class TestMemMachineStore:
         assert len(procs) == 2
         assert procs[0].title == "Proc 1"
         assert procs[1].title == "Proc 2"
+
+
+class TestMemFlowStore:
+    """Tests for PostgreSQL + pgvector store."""
+
+    def test_register_vector_called_on_init(self):
+        """Verify register_vector() is called in _init_db."""
+        with patch('memflow.store.register_vector') as mock_register, \
+             patch('memflow.store.create_engine') as mock_create_engine:
+            # Setup mock engine and connection
+            mock_engine = MagicMock()
+            mock_conn = MagicMock()
+            mock_raw_conn = MagicMock()
+
+            # Setup context manager
+            mock_engine.connect.return_value.__enter__.return_value = mock_conn
+            mock_conn.connection.dbapi_connection = mock_raw_conn
+
+            mock_create_engine.return_value = mock_engine
+
+            # Initialize MemFlowStore (register_vector should be called)
+            with patch.dict('os.environ', {
+                'MEMFLOW_EMBEDDING_API_BASE': 'http://test-api',
+                'MEMFLOW_EMBEDDING_DIMENSIONS': '2560'
+            }):
+                store = MemFlowStore(base_url="postgresql://test:5432/testdb")
+
+            # Verify register_vector was called with raw_conn
+            mock_register.assert_called_once_with(mock_raw_conn)
 
 
 class TestMemMachineBypass:
