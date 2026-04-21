@@ -9,6 +9,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "pgvector>=0.3",
     "psycopg2-binary>=2.9",
+    "python-dotenv>=1.0.0",
 ]
 
 [dependency-groups]

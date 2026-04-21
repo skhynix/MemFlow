@@ -32,14 +32,20 @@ from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass,
 
 def _load_env_file(env_path: str | None = None) -> None:
     """
-    Load environment variables from .env file.
+    Load environment variables from .env file using python-dotenv.
 
-    Simple parser without external dependencies.
-    Only sets variables that are not already set (priority: env > .env > default).
+    python-dotenv handles:
+    - Inline comments (# after value)
+    - Quoted values with # inside (e.g., "value#hash")
+    - Escape sequences and multiline values
+
+    Only sets variables that are not already set (priority: env > .env).
 
     Args:
         env_path: Path to .env file. If None, searches in current directory.
     """
+    from dotenv import load_dotenv
+
     if env_path is None:
         env_path = ".env"
 
@@ -47,19 +53,8 @@ def _load_env_file(env_path: str | None = None) -> None:
     if not path.exists():
         return
 
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        # Skip empty lines and comments
-        if not line or line.startswith("#"):
-            continue
-        # Parse KEY=VALUE
-        if "=" in line:
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            # Only set if not already in environment (env has priority)
-            if key and key not in os.environ:
-                os.environ[key] = value
+    # override=False keeps existing environment variables (env has priority)
+    load_dotenv(dotenv_path=path, override=False)
 
 
 # ---------------------------------------------------------------------------
