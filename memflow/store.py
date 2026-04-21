@@ -27,6 +27,10 @@ from memflow.models import Procedure, SearchResult
 
 from sqlalchemy import create_engine, text
 
+# Register pgvector for proper vector type handling
+import psycopg2
+from pgvector.psycopg2 import register_vector
+
 
 def _text_score(text: str, query: str) -> float:
     """Word-overlap relevance score in [0, 1]."""
@@ -564,7 +568,16 @@ class MemFlowStore(BaseStore):
         try:
             engine = create_engine(self._base_url)
             with engine.connect() as conn:
+                # First, create the vector extension
                 conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                conn.commit()
+
+            # Register pgvector for proper vector type handling
+            # This must be done AFTER extension creation and on a fresh connection
+            with engine.connect() as conn:
+                raw_conn = conn.connection.dbapi_connection
+                if raw_conn is not None:
+                    register_vector(raw_conn)
 
                 # Create table with emb column
                 conn.execute(text(f"""
