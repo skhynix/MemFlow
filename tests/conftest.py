@@ -38,16 +38,29 @@ def fake_llm():
 
 @pytest.fixture
 def clean_env():
-    """Clear relevant environment variables before test."""
+    """Clear relevant environment variables before test and prevent .env file loading.
+
+    This fixture:
+    1. Saves original environment variables
+    2. Clears relevant env vars
+    3. Patches _load_env_file to prevent .env file loading during tests
+    4. Restores original environment variables after test
+    """
     vars_to_clear = [
         'LLM_PROVIDER', 'LLM_MODEL', 'LLM_API_BASE', 'LLM_API_KEY',
         'MEMFLOW_BACKEND', 'MEMFLOW_DATA_DIR',
-        'MEMMACHINE_BASE_URL', 'MEMMACHINE_ORG_ID', 'MEMMACHINE_PROJECT', 'MEMMACHINE_API_KEY'
+        'MEMMACHINE_BASE_URL', 'MEMMACHINE_ORG_ID', 'MEMMACHINE_PROJECT', 'MEMMACHINE_API_KEY',
+        'MEMFLOW_BASE_URL', 'MEMFLOW_EMBEDDING_MODEL', 'MEMFLOW_EMBEDDING_API_BASE',
+        'MEMFLOW_EMBEDDING_API_KEY', 'MEMFLOW_EMBEDDING_DIMENSIONS',
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:
         os.environ.pop(k, None)
-    yield
+
+    # Patch _load_env_file to prevent .env file loading
+    with patch("memflow.manager._load_env_file"):
+        yield
+
     for k, v in original.items():
         if v is not None:
             os.environ[k] = v

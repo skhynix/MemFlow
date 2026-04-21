@@ -4,11 +4,13 @@
 """Unit tests for MemFlowManager."""
 
 import os
+import tempfile
+from pathlib import Path
 
 import pytest
 from unittest.mock import MagicMock, patch
 
-from memflow.manager import MemFlowManager
+from memflow.manager import MemFlowManager, _load_env_file
 from memflow.models import Procedure, Step, TaskPlan, StepResult, RunResult, StepType
 from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass
 
@@ -512,3 +514,103 @@ class TestMemFlowManagerUtils:
         # chat() returns a dict with response key
         assert isinstance(result, dict)
         assert "response" in result
+
+
+class TestLoadEnvFile:
+    """Tests for _load_env_file() function including inline comment handling."""
+
+    def test_inline_comment_stripped(self):
+        """Test that inline comments are stripped from values."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "TEST_VAR=http://example.com # This is a comment\n",
+                encoding="utf-8"
+            )
+
+            # Clear env var before test
+            os.environ.pop("TEST_VAR", None)
+
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("TEST_VAR") == "http://example.com"
+
+    def test_quoted_value_preserves_hash(self):
+        """Test that quoted values preserve # character."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                'QUOTED_HASH="value#with#hash"\n',
+                encoding="utf-8"
+            )
+
+            os.environ.pop("QUOTED_HASH", None)
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("QUOTED_HASH") == "value#with#hash"
+
+    def test_single_quoted_value_preserves_hash(self):
+        """Test that single-quoted values preserve # character."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "SINGLE_QUOTED_HASH='another#value'\n",
+                encoding="utf-8"
+            )
+
+            os.environ.pop("SINGLE_QUOTED_HASH", None)
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("SINGLE_QUOTED_HASH") == "another#value"
+
+    def test_url_with_inline_comment(self):
+        """Test that URL with inline comment is properly stripped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "MEMFLOW_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
+                encoding="utf-8"
+            )
+
+            os.environ.pop("MEMFLOW_EMBEDDING_API_BASE", None)
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("MEMFLOW_EMBEDDING_API_BASE") == "http://10.78.59.136:8001/v1"
+
+    def test_full_line_comment_ignored(self):
+        """Test that full line comments are ignored."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "# This is a comment\n"
+                "VALID_VAR=value\n"
+                "# Another comment\n",
+                encoding="utf-8"
+            )
+
+            os.environ.pop("VALID_VAR", None)
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("VALID_VAR") == "value"
+
+    def test_value_with_space_before_comment(self):
+        """Test that value with space before comment is stripped."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text(
+                "TEST_VAR=test_value   # comment after spaces\n",
+                encoding="utf-8"
+            )
+
+            os.environ.pop("TEST_VAR", None)
+            _load_env_file(str(env_file))
+
+            assert os.environ.get("TEST_VAR") == "test_value"
+
+    def test_nonexistent_file_no_error(self):
+        """Test that nonexistent .env file does not raise error."""
+        # Should not raise any exception
+        _load_env_file("/nonexistent/path/.env")
+
+        # No exception means test passed
+        assert True
