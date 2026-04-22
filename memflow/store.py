@@ -4,10 +4,10 @@
 """
 Storage backends for MemFlow.
 
-EmulatedStore  — in-memory dict, word-overlap search (testing / demos)
-FileStore      — Markdown files on disk, word-overlap search (local dev)
-MemMachineStore — MemMachine VectorDB, semantic search (production)
-MemFlowStore     — PostgreSQL + pgvector VectorDB, cosine similarity search (production)
+EmulatedStore     — in-memory dict, word-overlap search (testing / demos)
+FileStore         — Markdown files on disk, word-overlap search (local dev)
+MemMachineStore   — MemMachine VectorDB, semantic search (production)
+PgVectorStore     — PostgreSQL + pgvector VectorDB, cosine similarity search (production)
 """
 
 from __future__ import annotations
@@ -133,8 +133,8 @@ class FileStore(BaseStore):
     Persists across process restarts. Suitable for local development.
     """
 
-    def __init__(self, data_dir: str = "./memflow_data") -> None:
-        self._dir = Path(data_dir)
+    def __init__(self, file_dir: str = "./file_data") -> None:
+        self._dir = Path(file_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, id: str) -> Path:
@@ -263,13 +263,13 @@ class MemMachineBypass:
         org_id: str = "default",
         project_id: str = "memflow",
         api_key: str | None = None,
-        memflow_store: "MemFlowStore | None" = None,
+        pgvector_store: "PgVectorStore | None" = None,
     ) -> None:
         self._base_url = base_url
         self._org_id = org_id
         self._project_id = project_id
         self._api_key = api_key
-        self._memflow_store = memflow_store  # for procedural memory
+        self._pgvector_store = pgvector_store  # for procedural memory
         self._memory: Any = None
         self._lock = threading.Lock()
 
@@ -292,8 +292,8 @@ class MemMachineBypass:
     def add(self, content: str, memory_type: str, user_id: str) -> None:
         """Store content in MemMachine tagged with the given memory type."""
         if memory_type == "procedural":
-            # Route procedural memory to MemFlowStore
-            if self._memflow_store is not None:
+            # Route procedural memory to PgVectorStore
+            if self._pgvector_store is not None:
                 proc = Procedure(
                     id=str(uuid.uuid4()),
                     title=f"Procedural: {user_id}",
@@ -301,7 +301,7 @@ class MemMachineBypass:
                     user_id=user_id,
                     category="procedural",
                 )
-                self._memflow_store.add(proc)
+                self._pgvector_store.add(proc)
         else:
             # Route episodic/semantic to MemMachine
             meta = {"mm_type": memory_type, "user_id": user_id}
@@ -487,11 +487,11 @@ class MemMachineStore(BaseStore):
         return procs
 
 
-class MemFlowStore(BaseStore):
+class PgVectorStore(BaseStore):
     """
     PostgreSQL + pgvector backed store for procedural memory.
 
-    MemFlow's own VectorDB implementation, inspired by MemMachine's semantic memory.
+    PgVector's own VectorDB implementation, inspired by MemMachine's semantic memory.
     Procedures are stored with embeddings for semantic search using cosine similarity.
 
     Embeddings are computed via OpenAI-compatible API with hash-based fallback.
@@ -500,7 +500,7 @@ class MemFlowStore(BaseStore):
         pgvector's ivfflat and hnsw indexes both support up to 2000 dimensions.
         For embeddings with dim > 2000 (e.g., Qwen3-Embedding-4B at 2560 dim),
         no index is created and sequential scan is used instead.
-        To use index, set MEMFLOW_EMBEDDING_DIMENSIONS <= 2000 or use a lower-dim model.
+        To use index, set PGVECTOR_EMBEDDING_DIMENSIONS <= 2000 or use a lower-dim model.
 
     Schema:
         CREATE TABLE IF NOT EXISTS procedures (
@@ -517,16 +517,16 @@ class MemFlowStore(BaseStore):
             ON procedures USING ivfflat (emb vector_cosine_ops);  -- only if dim <= 2000
 
     Environment variables:
-        MEMFLOW_BASE_URL             — PostgreSQL URL
-        MEMFLOW_EMBEDDING_MODEL      — Embedding model
-        MEMFLOW_EMBEDDING_API_BASE   — API base URL (required)
-        MEMFLOW_EMBEDDING_API_KEY    — API key
-        MEMFLOW_EMBEDDING_DIMENSIONS — Embedding dimensions
+        PGVECTOR_BASE_URL              — PostgreSQL URL
+        PGVECTOR_EMBEDDING_MODEL       — Embedding model
+        PGVECTOR_EMBEDDING_API_BASE    — API base URL (required)
+        PGVECTOR_EMBEDDING_API_KEY     — API key
+        PGVECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
 
     Note:
-        MEMFLOW_EMBEDDING_API_BASE must be set via environment variable or
+        PGVECTOR_EMBEDDING_API_BASE must be set via environment variable or
         passed explicitly. No hardcoded default - use .env file or set
-        MEMFLOW_EMBEDDING_API_BASE before instantiating.
+        PGVECTOR_EMBEDDING_API_BASE before instantiating.
     """
 
     def __init__(
@@ -539,20 +539,20 @@ class MemFlowStore(BaseStore):
     ) -> None:
         # Load from environment if not provided
         if base_url is None:
-            base_url = os.getenv("MEMFLOW_BASE_URL", "postgresql://memflow:memflow_password@localhost:5433/memflow")
+            base_url = os.getenv("PGVECTOR_BASE_URL", "postgresql://pgvector:pgvector_password@localhost:5433/pgvector")
         if emb_model is None:
-            emb_model = os.getenv("MEMFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+            emb_model = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
         if emb_api_base is None:
-            emb_api_base = os.getenv("MEMFLOW_EMBEDDING_API_BASE")
+            emb_api_base = os.getenv("PGVECTOR_EMBEDDING_API_BASE")
             if emb_api_base is None:
                 raise ValueError(
-                    "MEMFLOW_EMBEDDING_API_BASE must be set. "
+                    "PGVECTOR_EMBEDDING_API_BASE must be set. "
                     "Add to .env file or set environment variable."
                 )
         if emb_api_key is None:
-            emb_api_key = os.getenv("MEMFLOW_EMBEDDING_API_KEY", "EMPTY")
+            emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
         if emb_dim is None:
-            emb_dim = int(os.getenv("MEMFLOW_EMBEDDING_DIMENSIONS", "2560"))
+            emb_dim = int(os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560"))
         self._base_url = base_url
         self._emb_model = emb_model
         self._emb_api_base = emb_api_base
@@ -612,7 +612,7 @@ class MemFlowStore(BaseStore):
 
             self._engine = engine
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize MemFlowStore database: {e}") from e
+            raise RuntimeError(f"Failed to initialize PgVectorStore database: {e}") from e
 
     def _get_emb_config(self) -> dict:
         """Get embedding API configuration."""

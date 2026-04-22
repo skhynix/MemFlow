@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from memflow.models import Procedure
-from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, MemFlowStore
+from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
 
 
 class TestEmulatedStore:
@@ -106,7 +106,7 @@ class TestFileStore:
 
     def test_add_and_persist(self, temp_dir):
         """Test that procedures persist to disk."""
-        store = FileStore(data_dir=temp_dir)
+        store = FileStore(file_dir=temp_dir)
         proc = Procedure(title="How to deploy", content="1. Run deploy.sh", tags=["deploy"])
         store.add(proc)
 
@@ -120,7 +120,7 @@ class TestFileStore:
 
     def test_deserialize_file_format(self, temp_dir):
         """Test parsing the markdown file format."""
-        store = FileStore(data_dir=temp_dir)
+        store = FileStore(file_dir=temp_dir)
         proc = Procedure(
             title="Test Procedure",
             content="1. First step\n2. Second step",
@@ -142,19 +142,19 @@ class TestFileStore:
 
     def test_list_all_loads_from_disk(self, temp_dir):
         """Test that list_all loads procedures from disk."""
-        store = FileStore(data_dir=temp_dir)
+        store = FileStore(file_dir=temp_dir)
         store.add(Procedure(title="Proc 1", content="1. Step"))
         store.add(Procedure(title="Proc 2", content="1. Step"))
 
         # Create new store instance pointing to same directory
-        store2 = FileStore(data_dir=temp_dir)
+        store2 = FileStore(file_dir=temp_dir)
         all_procs = store2.list_all()
 
         assert len(all_procs) == 2
 
     def test_search_filters_by_user_id(self, temp_dir):
         """Test search respects user_id filter."""
-        store = FileStore(data_dir=temp_dir)
+        store = FileStore(file_dir=temp_dir)
         store.add(Procedure(title="User1 deploy", content="1. Deploy", user_id="user1"))
         store.add(Procedure(title="User2 deploy", content="1. Deploy", user_id="user2"))
 
@@ -164,7 +164,7 @@ class TestFileStore:
 
     def test_delete_removes_file(self, temp_dir):
         """Test that delete removes the file."""
-        store = FileStore(data_dir=temp_dir)
+        store = FileStore(file_dir=temp_dir)
         proc = Procedure(title="Test", content="1. Step")
         store.add(proc)
 
@@ -336,7 +336,7 @@ class TestMemMachineStore:
         assert procs[1].title == "Proc 2"
 
 
-class TestMemFlowStore:
+class TestPgVectorStore:
     """Tests for PostgreSQL + pgvector store."""
 
     def test_register_vector_called_on_init(self):
@@ -354,12 +354,12 @@ class TestMemFlowStore:
 
             mock_create_engine.return_value = mock_engine
 
-            # Initialize MemFlowStore (register_vector should be called)
+            # Initialize PgVectorStore (register_vector should be called)
             with patch.dict('os.environ', {
-                'MEMFLOW_EMBEDDING_API_BASE': 'http://test-api',
-                'MEMFLOW_EMBEDDING_DIMENSIONS': '2560'
+                'PGVECTOR_EMBEDDING_API_BASE': 'http://test-api',
+                'PGVECTOR_EMBEDDING_DIMENSIONS': '2560'
             }):
-                store = MemFlowStore(base_url="postgresql://test:5432/testdb")
+                store = PgVectorStore(base_url="postgresql://test:5432/testdb")
 
             # Verify register_vector was called with raw_conn
             mock_register.assert_called_once_with(mock_raw_conn)

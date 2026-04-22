@@ -34,8 +34,8 @@ uv run --env MEMFLOW_BACKEND=file ./examples/06_file_persistence.py
 # MemMachine (production VectorDB)
 uv run --env MEMFLOW_BACKEND=memmachine ./examples/07_memmachine.py
 
-# MemFlowStore (PostgreSQL + pgvector)
-uv run --env MEMFLOW_BACKEND=memflow ./examples/10_run.py
+# PgVectorStore (PostgreSQL + pgvector)
+uv run --env MEMFLOW_BACKEND=pgvector ./examples/10_run.py
 ```
 
 ### Using `.env` file
@@ -45,7 +45,7 @@ Create a `.env` file in the project root for persistent configuration:
 ```bash
 # .env file
 MEMFLOW_BACKEND=file
-MEMFLOW_DATA_DIR=./memories
+MEMFLOW_FILE_DIR=./file_data
 
 LLM_PROVIDER=ollama
 LLM_MODEL=llama3.2

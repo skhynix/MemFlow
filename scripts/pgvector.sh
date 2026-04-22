@@ -5,17 +5,17 @@
 # Usage:
 #   Option 1: Run script
 #     $ cd scripts
-#     $ ./vectordb.sh
+#     $ ./pgvector.sh
 #
 #   Option 2: Run manually
 #     $ cd scripts
-#     $ docker compose -f docker-compose.vectordb.yml down -v  # Clean start
+#     $ docker compose -f docker-compose.pgvector.yml down -v  # Clean start
 #     $ mkdir -p ../postgres_data
-#     $ docker compose -f docker-compose.vectordb.yml up -d
+#     $ docker compose -f docker-compose.pgvector.yml up -d
 #
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMPOSE_FILE="$SCRIPT_DIR/docker-compose.vectordb.yml"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.pgvector.yml"
 DATA_DIR="$SCRIPT_DIR/../postgres_data"
 
 echo "Stopping and removing containers with volumes..."

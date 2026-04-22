@@ -1,5 +1,5 @@
 services:
-  # PostgreSQL with pgvector extension for procedural memory storage
+  # PostgreSQL with pgvector extension for PgVectorStore backend
   postgres:
     image: pgvector/pgvector:pg16
     container_name: ${POSTGRES_NAME:-memflow-postgres}
@@ -7,14 +7,14 @@ services:
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-memflow}
-      POSTGRES_USER: ${POSTGRES_USER:-memflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memflow_password}
+      POSTGRES_DB: ${POSTGRES_DB:-pgvector}
+      POSTGRES_USER: ${POSTGRES_USER:-pgvector}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgvector_password}
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     volumes:
-      - ../postgres_data:/var/lib/postgresql/data
+      - ./postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memflow} -d ${POSTGRES_DB:-memflow}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pgvector} -d ${POSTGRES_DB:-pgvector}"]
       interval: 10s
       timeout: 5s
       retries: 5

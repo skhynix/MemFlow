@@ -33,17 +33,17 @@ from memflow import FileStore, MemFlowManager, Procedure
 from memflow.llm import LLMFactory
 
 llm = LLMFactory.create("ollama", model="llama3.2")
-data_dir = tempfile.mkdtemp(prefix="memflow_demo_")
+file_dir = tempfile.mkdtemp(prefix="memflow_demo_")
 
 try:
     # -----------------------------------------------------------------------
     # Session 1 — store procedures
     # -----------------------------------------------------------------------
 
-    print(f"Data directory: {data_dir}\n")
+    print(f"Data directory: {file_dir}\n")
     print("=== Session 1 — store three procedures ===")
 
-    session1 = MemFlowManager(llm=llm, store=FileStore(data_dir=data_dir))
+    session1 = MemFlowManager(llm=llm, store=FileStore(file_dir=file_dir))
 
     procedures = [
         Procedure(
@@ -82,7 +82,7 @@ try:
         session1.add(procedure=proc)
         print(f"  [Stored] {proc.title}")
 
-    files = sorted(Path(data_dir).glob("*.md"))
+    files = sorted(Path(file_dir).glob("*.md"))
     print(f"\n  Files written to disk: {len(files)}")
     for f in files:
         print(f"    {f.name}")
@@ -97,7 +97,7 @@ try:
 
     print("=== Session 2 — new manager, same directory ===")
 
-    session2 = MemFlowManager(llm=llm, store=FileStore(data_dir=data_dir))
+    session2 = MemFlowManager(llm=llm, store=FileStore(file_dir=file_dir))
 
     all_procs = session2.store.list_all()
     print(f"\n  list_all() found {len(all_procs)} procedure(s):")
@@ -118,5 +118,5 @@ try:
         print(f"     {hit}")
 
 finally:
-    # shutil.rmtree(data_dir)
-    print(f"\nData directory preserved for inspection: {data_dir}")
+    # shutil.rmtree(file_dir)
+    print(f"\nData directory preserved for inspection: {file_dir}")

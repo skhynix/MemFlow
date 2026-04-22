@@ -27,7 +27,7 @@ from memflow.llm import BaseLLM, LLMFactory, parse_json
 from memflow.models import Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult
 from memflow.planner import LLMPlanner
 from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
-from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineBypass, MemMachineStore, MemFlowStore
+from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
 
 
 def _load_env_file(env_path: str | None = None) -> None:
@@ -132,21 +132,21 @@ class MemFlowManager:
     Environment variables (read when use_env=True):
         Priorities: explicit env var > .env file > fallback defaults
 
-        LLM_PROVIDER             — LLM provider: ollama | openai-compatible
-        LLM_MODEL                — Model name
-        LLM_API_BASE             — LLM server URL
-        LLM_API_KEY              — API key for authenticated endpoints
-        MEMFLOW_BACKEND          — Storage backend: emulated | file | memmachine | memflow
-        MEMFLOW_DATA_DIR         — Data directory for FileStore
-        MEMFLOW_BASE_URL         — PostgreSQL URL for MemFlowStore
-        MEMFLOW_EMBEDDING_MODEL  — Embedding model
-        MEMFLOW_EMBEDDING_API_BASE — Embedding API base URL
-        MEMFLOW_EMBEDDING_API_KEY  — Embedding API key
-        MEMFLOW_EMBEDDING_DIMENSIONS — Embedding dimensions
-        MEMMACHINE_BASE_URL      — MemMachine server URL
-        MEMMACHINE_ORG_ID        — MemMachine organization ID
-        MEMMACHINE_PROJECT       — MemMachine project ID
-        MEMMACHINE_API_KEY       — MemMachine API key (optional)
+        LLM_PROVIDER              — LLM provider: ollama | openai-compatible
+        LLM_MODEL                 — Model name
+        LLM_API_BASE              — LLM server URL
+        LLM_API_KEY               — API key for authenticated endpoints
+        MEMFLOW_BACKEND           — Storage backend: emulated | file | memmachine | pgvector
+        MEMFLOW_FILE_DIR          — File directory for FileStore
+        PGVECTOR_BASE_URL         — PostgreSQL URL for PgVectorStore
+        PGVECTOR_EMBEDDING_MODEL  — Embedding model
+        PGVECTOR_EMBEDDING_API_BASE — Embedding API base URL
+        PGVECTOR_EMBEDDING_API_KEY  — Embedding API key
+        PGVECTOR_EMBEDDING_DIMENSIONS — Embedding dimensions
+        MEMMACHINE_BASE_URL       — MemMachine server URL
+        MEMMACHINE_ORG_ID         — MemMachine organization ID
+        MEMMACHINE_PROJECT        — MemMachine project ID
+        MEMMACHINE_API_KEY        — MemMachine API key (optional)
 
     Note:
         When use_env=True, automatically loads .env file from current directory
@@ -198,56 +198,51 @@ class MemFlowManager:
             llm_api_key = os.getenv("LLM_API_KEY")
             llm = LLMFactory.create(llm_provider, model=llm_model, api_base=llm_api_base, api_key=llm_api_key)
 
-        # Storage Backend - only from .env if not explicitly provided
+        # Storage Backend
+        backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+        file_dir = os.getenv("MEMFLOW_FILE_DIR", "./file_data")
+
+        # MemMachine Configuration
+        mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
+        mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
+        mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
+        mm_key = os.getenv("MEMMACHINE_API_KEY")
+
+        # PgVector Store Configuration
+        pg_url = os.getenv("PGVECTOR_BASE_URL", "postgresql://pgvector:pgvector_password@localhost:5433/pgvector")
+        pg_emb = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+        pg_emb_api_base = os.getenv("PGVECTOR_EMBEDDING_API_BASE")  # No default - must be set
+        pg_emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
+        pg_emb_dim = os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560")
+
         if not store_provided and use_env:
-            data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
-
-            # MemMachine Configuration
-            mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
-            mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
-            mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
-            mm_key = os.getenv("MEMMACHINE_API_KEY")
-
-            # MemFlow Store Configuration
-            mf_url = os.getenv("MEMFLOW_BASE_URL", "postgresql://memflow:memflow_password@localhost:5433/memflow")
-            mf_emb = os.getenv("MEMFLOW_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
-            mf_emb_api_base = os.getenv("MEMFLOW_EMBEDDING_API_BASE")  # No default - must be set
-            mf_emb_api_key = os.getenv("MEMFLOW_EMBEDDING_API_KEY", "EMPTY")
-            mf_emb_dim = os.getenv("MEMFLOW_EMBEDDING_DIMENSIONS", "2560")
-
             if backend == "file":
-                store = FileStore(data_dir=data_dir)
+                store = FileStore(file_dir=file_dir)
             elif backend == "memmachine":
                 store = MemMachineStore(
                     base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
                 )
-            elif backend == "memflow":
-                store = MemFlowStore(
-                    base_url=mf_url,
-                    emb_model=mf_emb,
-                    emb_api_base=mf_emb_api_base,
-                    emb_api_key=mf_emb_api_key,
-                    emb_dim=int(mf_emb_dim),
+            elif backend == "pgvector":
+                store = PgVectorStore(
+                    base_url=pg_url,
+                    emb_model=pg_emb,
+                    emb_api_base=pg_emb_api_base,
+                    emb_api_key=pg_emb_api_key,
+                    emb_dim=int(pg_emb_dim),
                 )
             else:
                 store = EmulatedStore()
 
-        # Bypass - only from .env if not explicitly provided
-        if not bypass_provided and use_env:
-            if backend in ("memmachine", "memflow"):
-                mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
-                mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
-                mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
-                mm_key = os.getenv("MEMMACHINE_API_KEY")
-                bypass_kwargs = {
-                    "base_url": mm_url,
-                    "org_id": mm_org,
-                    "project_id": mm_proj,
-                    "api_key": mm_key,
-                }
-                if backend == "memflow" and store is not None:
-                    bypass_kwargs["memflow_store"] = store
-                bypass = MemMachineBypass(**bypass_kwargs)
+        if not bypass_provided and use_env and backend in ("memmachine", "pgvector"):
+            bypass_kwargs = {
+                "base_url": mm_url,
+                "org_id": mm_org,
+                "project_id": mm_proj,
+                "api_key": mm_key,
+            }
+            if backend == "pgvector" and store is not None:
+                bypass_kwargs["pgvector_store"] = store
+            bypass = MemMachineBypass(**bypass_kwargs)
 
         self.llm = llm
         self.store = store or EmulatedStore()

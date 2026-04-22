@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from memflow.manager import MemFlowManager, _load_env_file
 from memflow.models import Procedure, Step, TaskPlan, StepResult, RunResult, StepType
-from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass
+from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
 
 
 class TestMemFlowManagerInit:
@@ -194,7 +194,7 @@ class TestMemFlowManagerFromEnv:
         mock_factory.create.return_value = mock_llm
 
         os.environ["MEMFLOW_BACKEND"] = "file"
-        os.environ["MEMFLOW_DATA_DIR"] = "/tmp/test_data"
+        os.environ["MEMFLOW_FILE_DIR"] = "/tmp/test_data"
 
         manager = MemFlowManager(use_env=True)
 
@@ -216,6 +216,26 @@ class TestMemFlowManagerFromEnv:
         assert isinstance(manager.store, MemMachineStore)
         # Note: No public getter for bypass, verify manager was created successfully
         assert manager is not None
+
+    @patch("memflow.manager.LLMFactory")
+    @patch("memflow.manager.PgVectorStore")
+    def test_from_env_with_pgvector_backend(self, mock_store_class, mock_factory, clean_env):
+        """Test initialization with use_env=True with pgvector backend."""
+        mock_llm = MagicMock()
+        mock_factory.create.return_value = mock_llm
+
+        mock_store = MagicMock()
+        mock_store_class.return_value = mock_store
+
+        os.environ["MEMFLOW_BACKEND"] = "pgvector"
+        os.environ["PGVECTOR_BASE_URL"] = "postgresql://test:5432/testdb"
+        os.environ["PGVECTOR_EMBEDDING_API_BASE"] = "http://test-api:8000/v1"
+        os.environ["PGVECTOR_EMBEDDING_DIMENSIONS"] = "2560"
+
+        manager = MemFlowManager(use_env=True)
+
+        mock_store_class.assert_called_once()
+        assert manager.store == mock_store
 
     @patch("memflow.manager.LLMFactory")
     def test_from_env_with_openai_provider(self, mock_factory, clean_env):
@@ -625,14 +645,14 @@ class TestLoadEnvFile:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "MEMFLOW_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
+                "PGVECTOR_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
                 encoding="utf-8"
             )
 
-            os.environ.pop("MEMFLOW_EMBEDDING_API_BASE", None)
+            os.environ.pop("PGVECTOR_EMBEDDING_API_BASE", None)
             _load_env_file(str(env_file))
 
-            assert os.environ.get("MEMFLOW_EMBEDDING_API_BASE") == "http://10.78.59.136:8001/v1"
+            assert os.environ.get("PGVECTOR_EMBEDDING_API_BASE") == "http://10.78.59.136:8001/v1"
 
     def test_full_line_comment_ignored(self):
         """Test that full line comments are ignored."""

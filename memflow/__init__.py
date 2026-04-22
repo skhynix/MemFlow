@@ -11,7 +11,7 @@ from memflow.llm import BaseLLM, LLMFactory, OllamaLLM, OpenAICompatibleLLM
 from memflow.manager import MemFlowManager
 from memflow.models import Procedure, RunResult, SearchResult, Step, StepResult, StepType, TaskPlan
 from memflow.planner import LLMPlanner
-from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, MemFlowStore
+from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
 
 __all__ = [
     # Core
@@ -35,7 +35,7 @@ __all__ = [
     "FileStore",
     "MemMachineStore",
     "MemMachineBypass",
-    "MemFlowStore",
+    "PgVectorStore",
     # Phase 3 components
     "LLMPlanner",
     "ToolRegistry",
