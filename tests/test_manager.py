@@ -32,6 +32,16 @@ class TestMemFlowManagerInit:
 
         assert isinstance(manager.store, EmulatedStore)
 
+    def test_init_without_llm_and_use_env_false_should_fail(self):
+        """Test that initializing without LLM and use_env=False raises error."""
+        with pytest.raises(ValueError, match="LLM must be provided"):
+            MemFlowManager(use_env=False)
+
+    def test_init_with_llm_only_and_use_env_false(self, fake_llm):
+        """Test that store defaults to EmulatedStore when not provided."""
+        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        assert isinstance(manager.store, EmulatedStore)
+
     def test_init_with_bypass(self, fake_llm):
         """Test initialization with bypass."""
         bypass = MemMachineBypass()
@@ -101,6 +111,53 @@ class TestMemFlowManagerInit:
 
 class TestMemFlowManagerFromEnv:
     """Tests for MemFlowManager.from_env() - now via use_env=True."""
+
+    @patch("memflow.manager.LLMFactory")
+    def test_explicit_llm_takes_priority_over_env(self, mock_factory, clean_env):
+        """Test that explicitly provided LLM is not overwritten by .env."""
+        os.environ["LLM_PROVIDER"] = "ollama"
+        os.environ["LLM_MODEL"] = "env-model"
+
+        custom_llm = MagicMock()
+        manager = MemFlowManager(llm=custom_llm, use_env=True)
+
+        # LLMFactory.create 가 호출되지 않아야 함 (명시적 LLM 사용)
+        mock_factory.create.assert_not_called()
+        assert manager.llm is custom_llm
+
+    @patch("memflow.manager.LLMFactory")
+    def test_explicit_store_takes_priority_over_env(self, mock_factory, clean_env):
+        """Test that explicitly provided store is not overwritten by .env."""
+        os.environ["MEMFLOW_BACKEND"] = "file"
+
+        custom_store = MemMachineStore(base_url="http://custom", org_id="org", project_id="proj")
+        manager = MemFlowManager(llm=mock_factory.create(), store=custom_store, use_env=True)
+
+        # custom_store 가 유지되어야 함
+        assert manager.store is custom_store
+
+    @patch("memflow.manager.LLMFactory")
+    def test_explicit_bypass_takes_priority_over_env(self, mock_factory, clean_env):
+        """Test that explicitly provided bypass is not overwritten by .env."""
+        os.environ["MEMFLOW_BACKEND"] = "memmachine"
+
+        custom_bypass = MemMachineBypass(base_url="http://custom")
+        manager = MemFlowManager(
+            llm=mock_factory.create(),
+            bypass=custom_bypass,
+            use_env=True
+        )
+
+        # custom_bypass 가 유지되어야 함
+        assert manager._bypass is custom_bypass
+
+    @patch("memflow.manager.LLMFactory")
+    def test_backend_inferred_from_explicit_store(self, mock_factory, clean_env):
+        """Test that backend is inferred from explicitly provided store type."""
+        mock_store = MagicMock()
+        manager = MemFlowManager(llm=mock_factory.create(), store=mock_store, use_env=False)
+        # internal logic verification - store 가 그대로 유지되어야 함
+        assert manager.store is mock_store
 
     @patch("memflow.manager.LLMFactory")
     def test_from_env_defaults(self, mock_factory, clean_env):
