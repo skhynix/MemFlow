@@ -163,19 +163,43 @@ class MemFlowManager:
         max_plan_iterations: int | None = None,
         use_env: bool = True,
     ) -> None:
+        # Track which components are explicitly provided (should not be overwritten by .env)
+        llm_provided = llm is not None
+        store_provided = store is not None
+        bypass_provided = bypass is not None
+
+        # Load .env file first (if enabled) so environment variables are available
         if use_env:
-            # Load .env file if it exists (only sets vars not already in environment)
             _load_env_file()
 
-            # LLM Configuration - fallback defaults only (no hardcoding of internal IPs)
+        # Validate LLM is provided when use_env=False
+        if not use_env and llm is None:
+            raise ValueError("LLM must be provided when use_env=False")
+
+        # Determine backend: explicit store type takes priority, then .env, then default
+        if store_provided:
+            # Infer backend from explicitly provided store type
+            if isinstance(store, MemFlowStore):
+                backend = "memflow"
+            elif isinstance(store, MemMachineStore):
+                backend = "memmachine"
+            elif isinstance(store, FileStore):
+                backend = "file"
+            else:
+                backend = "emulated"
+        else:
+            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+
+        # LLM Configuration - only from .env if not explicitly provided
+        if not llm_provided and use_env:
             llm_provider = os.getenv("LLM_PROVIDER", "ollama")
             llm_model = os.getenv("LLM_MODEL")
             llm_api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
             llm_api_key = os.getenv("LLM_API_KEY")
             llm = LLMFactory.create(llm_provider, model=llm_model, api_base=llm_api_base, api_key=llm_api_key)
 
-            # Storage Backend
-            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+        # Storage Backend - only from .env if not explicitly provided
+        if not store_provided and use_env:
             data_dir = os.getenv("MEMFLOW_DATA_DIR", "./memflow_data")
 
             # MemMachine Configuration
@@ -191,32 +215,37 @@ class MemFlowManager:
             mf_emb_api_key = os.getenv("MEMFLOW_EMBEDDING_API_KEY", "EMPTY")
             mf_emb_dim = os.getenv("MEMFLOW_EMBEDDING_DIMENSIONS", "2560")
 
-            if store is None:
-                if backend == "file":
-                    store = FileStore(data_dir=data_dir)
-                elif backend == "memmachine":
-                    store = MemMachineStore(
-                        base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
-                    )
-                elif backend == "memflow":
-                    store = MemFlowStore(
-                        base_url=mf_url,
-                        emb_model=mf_emb,
-                        emb_api_base=mf_emb_api_base,
-                        emb_api_key=mf_emb_api_key,
-                        emb_dim=int(mf_emb_dim),
-                    )
-                else:
-                    store = EmulatedStore()
+            if backend == "file":
+                store = FileStore(data_dir=data_dir)
+            elif backend == "memmachine":
+                store = MemMachineStore(
+                    base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
+                )
+            elif backend == "memflow":
+                store = MemFlowStore(
+                    base_url=mf_url,
+                    emb_model=mf_emb,
+                    emb_api_base=mf_emb_api_base,
+                    emb_api_key=mf_emb_api_key,
+                    emb_dim=int(mf_emb_dim),
+                )
+            else:
+                store = EmulatedStore()
 
-            if bypass is None and backend in ("memmachine", "memflow"):
+        # Bypass - only from .env if not explicitly provided
+        if not bypass_provided and use_env:
+            if backend in ("memmachine", "memflow"):
+                mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
+                mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
+                mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
+                mm_key = os.getenv("MEMMACHINE_API_KEY")
                 bypass_kwargs = {
                     "base_url": mm_url,
                     "org_id": mm_org,
                     "project_id": mm_proj,
                     "api_key": mm_key,
                 }
-                if backend == "memflow":
+                if backend == "memflow" and store is not None:
                     bypass_kwargs["memflow_store"] = store
                 bypass = MemMachineBypass(**bypass_kwargs)
 
