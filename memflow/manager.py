@@ -179,8 +179,8 @@ class MemFlowManager:
         # Determine backend: explicit store type takes priority, then .env, then default
         if store_provided:
             # Infer backend from explicitly provided store type
-            if isinstance(store, MemFlowStore):
-                backend = "memflow"
+            if isinstance(store, PgVectorStore):
+                backend = "pgvector"
             elif isinstance(store, MemMachineStore):
                 backend = "memmachine"
             elif isinstance(store, FileStore):
