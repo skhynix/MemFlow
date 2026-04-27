@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,7 +30,10 @@ def _extract_steps(traj: Any) -> list[tuple[int, str, str]]:
     parsed: list[tuple[int, str, str]] = []
     # AgentInstruct trajectory format can vary (dataclass-like objects vs dicts),
     # so we normalize both shapes into a stable tuple representation here.
-    raw_steps = list(getattr(traj, "steps", []) or [])
+    if hasattr(traj, "state_action_pairs"):
+        raw_steps = list(getattr(traj, "state_action_pairs", []) or [])
+    else:
+        raw_steps = list(getattr(traj, "steps", []) or [])
     for idx, step in enumerate(raw_steps, start=1):
         if isinstance(step, dict):
             step_id = int(step.get("step_id", idx))
@@ -46,10 +50,12 @@ def _extract_steps(traj: Any) -> list[tuple[int, str, str]]:
 def _format_steps_only(steps: list[tuple[int, str, str]]) -> str:
     # IMPORTANT: benchmark requirement says Procedure.content should include
     # only the procedural trace (not repeating the task description).
+    # Intentionally exclude state from benchmark content so retrieval focuses
+    # on action-only procedural traces rather than environment descriptions.
     if not steps:
         return "Steps:\n"
     lines = ["Steps:"]
-    lines.extend(f"{step_id}. State: {state} -> Action: {action}" for step_id, state, action in steps)
+    lines.extend(f"{step_id}. Action: {action}" for step_id, _state, action in steps)
     return "\n".join(lines)
 
 

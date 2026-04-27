@@ -16,6 +16,8 @@ The benchmark flow is intentionally narrow:
 
 This path benchmarks MemFlow retrieval behavior directly and avoids conflating retrieval quality
 with LLM extraction/classification. No `messages=` ingestion path is used.
+The adapter stores an action-only procedural trace in `Procedure.content` and
+intentionally excludes state text from the benchmark payload.
 
 ## Setup
 
