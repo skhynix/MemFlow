@@ -33,7 +33,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import MemFlowManager, MemMachineBypass, MemMachineStore, Procedure
-from memflow.llm import LLMFactory
 
 # ---------------------------------------------------------------------------
 # Check backend selection
@@ -70,8 +69,8 @@ except Exception as e:
     print("\nStart MemMachine with:  docker compose -f docker-compose.test.yml up -d")
     sys.exit(1)
 
-llm = LLMFactory.create("ollama", model="llama3.2")
-manager = MemFlowManager(llm=llm, store=store, bypass=bypass)
+# LLM loaded from .env, store and bypass explicitly provided
+manager = MemFlowManager(store=store, bypass=bypass)
 
 # ---------------------------------------------------------------------------
 # 1. Store procedures (semantic vector search)
@@ -179,5 +178,5 @@ print("=== 4. Chat ===")
 
 q = "How do I fix a service that stopped working?"
 print(f"  Q: {q}")
-answer = manager.chat(q, enable_auto_learn=False)
+answer = manager.chat(q)
 print(f"  A: {answer[:300]}{'...' if len(answer) > 300 else ''}")

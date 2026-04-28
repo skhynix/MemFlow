@@ -30,9 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import FileStore, MemFlowManager, Procedure
-from memflow.llm import LLMFactory
 
-llm = LLMFactory.create("ollama", model="llama3.2")
 file_dir = tempfile.mkdtemp(prefix="memflow_demo_")
 
 try:
@@ -43,7 +41,8 @@ try:
     print(f"Data directory: {file_dir}\n")
     print("=== Session 1 — store three procedures ===")
 
-    session1 = MemFlowManager(llm=llm, store=FileStore(file_dir=file_dir))
+    # LLM loaded from .env, store explicitly provided
+    session1 = MemFlowManager(store=FileStore(file_dir=file_dir))
 
     procedures = [
         Procedure(
@@ -97,7 +96,8 @@ try:
 
     print("=== Session 2 — new manager, same directory ===")
 
-    session2 = MemFlowManager(llm=llm, store=FileStore(file_dir=file_dir))
+    # LLM loaded from .env, store explicitly provided
+    session2 = MemFlowManager(store=FileStore(file_dir=file_dir))
 
     all_procs = session2.store.list_all()
     print(f"\n  list_all() found {len(all_procs)} procedure(s):")

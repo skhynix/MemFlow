@@ -21,13 +21,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import MemFlowManager
-from memflow.llm import LLMFactory
 from utils import Colors, print_header, print_labeled_text
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
-llm = LLMFactory.create("ollama", model="llama3.2")
-manager = MemFlowManager(llm=llm)
+# LLM and store are loaded from .env file automatically
+manager = MemFlowManager()
 
 print_header("Multi-Intent Chat Demo")
 

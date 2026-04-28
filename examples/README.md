@@ -19,54 +19,40 @@ uv sync --all-extras
 
 ## Running Examples
 
+All examples now use `.env`-based configuration by default. Simply run:
+
 ```bash
 uv run ./examples/<example_name>.py
 ```
 
 ## Environment Configuration
 
-### Using `--env` flag
-
-```bash
-# File Storage (persistent)
-uv run --env MEMFLOW_BACKEND=file ./examples/06_file_persistence.py
-
-# MemMachine (production VectorDB)
-uv run --env MEMFLOW_BACKEND=memmachine ./examples/07_memmachine.py
-
-# PgVectorStore (PostgreSQL + pgvector)
-uv run --env MEMFLOW_BACKEND=pgvector ./examples/10_run.py
-```
-
-### Using `.env` file
+### Using `.env` file (Required)
 
 Create a `.env` file in the project root for persistent configuration:
 
 ```bash
-# .env file
-MEMFLOW_BACKEND=file
-MEMFLOW_FILE_DIR=./file_data
+# Copy the example
+cp .env.example .env
 
+# Edit .env with your settings
+```
+
+Example `.env` file:
+```bash
+# Backend: emulated | file | memmachine | pgvector
+MEMFLOW_BACKEND=emulated
+
+# LLM Configuration
 LLM_PROVIDER=ollama
 LLM_MODEL=llama3.2
 LLM_API_BASE=http://localhost:11434
 ```
 
-Then run examples without specifying `--env` flags:
-
+Then run examples:
 ```bash
 uv run ./examples/01_quickstart.py
+uv run ./examples/10_run.py
 ```
 
-### Model Configuration
-
-```bash
-# Different Ollama model
-uv run --env LLM_MODEL=llama3.1 ./examples/01_quickstart.py
-
-# OpenAI-compatible server (vLLM, LM Studio)
-uv run --env LLM_PROVIDER=openai-compatible \
-       --env LLM_MODEL=meta-llama/Llama-3.2-3B \
-       --env LLM_API_BASE=http://localhost:8000/v1 \
-       ./examples/01_quickstart.py
-```
+For examples that require a specific backend (e.g., `07_memmachine.py`), see the run instructions at the top of each file.

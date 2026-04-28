@@ -21,10 +21,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import MemFlowManager, Procedure
-from memflow.llm import LLMFactory
 
-llm = LLMFactory.create("ollama", model="llama3.2")
-manager = MemFlowManager(llm=llm)
+# LLM and store are loaded from .env file automatically
+manager = MemFlowManager()
 
 print("=== 1. Explicit Store ===")
 print("Pass a ready-made Procedure object directly.\n")

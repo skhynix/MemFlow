@@ -32,10 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from memflow import MemFlowManager, LLMPlanner
-from memflow.llm import LLMFactory
 
 # ---------------------------------------------------------------------------
 # Work directory — all scripts are created here
@@ -43,8 +40,8 @@ from memflow.llm import LLMFactory
 
 WORK_DIR = Path(tempfile.mkdtemp(prefix="memflow_agent_"))
 
-llm = LLMFactory.create("ollama", model="llama3.2")
-manager = MemFlowManager(llm=llm)
+# LLM and store are loaded from .env file automatically
+manager = MemFlowManager()
 
 # ---------------------------------------------------------------------------
 # Custom tools
@@ -74,7 +71,7 @@ CUSTOM_TOOLS = {"write_file": write_file, "run_script": run_script}
 
 # Register the custom tools with the planner so the LLM knows to use them.
 manager._planner = LLMPlanner(
-    llm,
+    manager.llm,
     extra_tools=[
         {
             "name": "write_file",

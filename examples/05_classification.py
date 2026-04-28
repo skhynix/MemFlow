@@ -29,10 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from memflow import MemFlowManager
-from memflow.llm import LLMFactory
 
-llm = LLMFactory.create("ollama", model="llama3.2")
-manager = MemFlowManager(llm=llm)
+# LLM and store are loaded from .env file automatically
+manager = MemFlowManager()
 
 # ---------------------------------------------------------------------------
 # Four inputs covering all memory types (including 'none' for conversational filler)
