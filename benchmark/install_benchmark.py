@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROCED_MEM_BENCH_URL = "https://github.com/qpiai/Proced_mem_bench"
+PROCED_MEM_BENCH_URL = "https://github.com/skhynix/Proced_mem_bench"
 PROCED_MEM_BENCH_PATH = "benchmark/proced_mem_bench/Proced_mem_bench"
 
 

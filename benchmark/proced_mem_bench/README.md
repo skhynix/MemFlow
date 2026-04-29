@@ -26,7 +26,7 @@ intentionally excludes state text from the benchmark payload.
 Clone the external `Procedural_memory_benchmark` repository into the current directory.  You may use `install_benchmark.py` for easy setup:
 
 ```bash
-uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash 08048752
+uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash f7097bcaf6ca
 ```
 
 ### 2. Install dependencies
@@ -57,6 +57,22 @@ For available options, see `--help`:
 ```bash
 uv run benchmark/proced_mem_bench/run_proced_mem_bench.py --help
 ```
+
+## Custom query banks
+
+By default, the runner uses the query bank provided by the installed `procedural-memory-benchmark` package. To evaluate a shifted or otherwise custom query bank, pass its JSON path explicitly:
+
+```bash
+uv run benchmark/proced_mem_bench/run_proced_mem_bench.py \
+  --query-bank-path /path/to/Proced_mem_bench/procedural_memory_benchmark/benchmark/data/query_side_shift_lite.json
+```
+
+```bash
+uv run benchmark/proced_mem_bench/run_proced_mem_bench.py \
+  --query-bank-path /path/to/Proced_mem_bench/procedural_memory_benchmark/benchmark/data/query_side_shift_hard.json
+```
+
+Shifted query banks are maintained in `Proced_mem_bench`; this MemFlow harness only consumes the selected JSON file.
 
 ## `--clear-existing`
 

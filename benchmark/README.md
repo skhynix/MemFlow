@@ -9,7 +9,8 @@ This directory contains benchmark harnesses for evaluating MemFlow.
 The `proced_mem_bench` subdirectory provides a benchmark harness that evaluates **MemFlow retrieval** against raw gold relevance labels from the `procedural_memory_benchmark` query bank.
 
 - **Location**: `benchmark/proced_mem_bench/`
-- **Source**: Based on [qpiai/Proced_mem_bench](https://github.com/qpiai/Proced_mem_bench)
+- **Source**: Based on the [skhynix/Proced_mem_bench](https://github.com/skhynix/Proced_mem_bench) fork
+- **Custom query banks**: Pass external Proced_mem_bench JSON files with `--query-bank-path`.
 
 For detailed instructions, see [proced_mem_bench/README.md](proced_mem_bench/README.md).
 
@@ -22,7 +23,7 @@ Use the install script for easy setup:
 uv run benchmark/install_benchmark.py proced_mem_bench
 
 # Install with specific commit
-uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash 08048752
+uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash f7097bcaf6ca
 ```
 
 ## Directory Structure
