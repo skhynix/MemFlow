@@ -25,6 +25,9 @@ ollama = ["ollama>=0.6.1"]
 memmachine = ["memmachine-client>=0.3.0"]
 openai = ["openai>=2.30.0"]
 
+[project.scripts]
+memflow = "memflow.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

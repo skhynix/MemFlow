@@ -334,9 +334,13 @@ class MemFlow:
                 except Exception:
                     pass  # bypass failures are non-critical
                 return {"results": [], "routed_to": "bypass", "type": memory_type}
-            return {"results": [], "skipped": f"classified as {memory_type}"}
+            return {
+                "results": [],
+                "skipped": f"classified as {memory_type}",
+                "type": memory_type,
+            }
         if memory_type == "none":
-            return {"results": [], "skipped": "classified as none"}
+            return {"results": [], "skipped": "classified as none", "type": memory_type}
 
         # Stage 2: LLM extraction (procedure extraction)
         extraction_messages = [
@@ -348,10 +352,10 @@ class MemFlow:
             response = self.llm.generate(extraction_messages)
             data = parse_json(response)
         except Exception as e:
-            return {"results": [], "error": str(e)}
+            return {"results": [], "error": str(e), "type": memory_type}
 
         if not data.get("has_procedure"):
-            return {"results": []}
+            return {"results": [], "type": memory_type}
 
         proc = Procedure(
             title=data.get("title", "Untitled"),
@@ -360,7 +364,10 @@ class MemFlow:
             category=data.get("category", "general"),
         )
         self.store.add(proc)
-        return {"results": [{"id": proc.id, "title": proc.title, "event": "ADD"}]}
+        return {
+            "results": [{"id": proc.id, "title": proc.title, "event": "ADD"}],
+            "type": memory_type,
+        }
 
     # ------------------------------------------------------------------
     # chat - Primary user interface
