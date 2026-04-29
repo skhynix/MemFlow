@@ -50,6 +50,16 @@ from memflow.store import (
 )
 
 
+def _strip_surrounding_blank_lines(text: str) -> str:
+    """Remove blank padding lines without changing indentation in content."""
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _load_env_file(env_path: str | None = None) -> None:
     """
     Load environment variables from .env file using python-dotenv.
@@ -463,6 +473,7 @@ class MemFlow:
         combined_response = (
             "\n\n".join(responses) if len(responses) > 1 else responses[0]
         )
+        combined_response = _strip_surrounding_blank_lines(combined_response)
 
         response_data = {
             "response": combined_response,

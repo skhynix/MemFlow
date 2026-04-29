@@ -451,6 +451,19 @@ class TestMemFlowChat:
         assert len(fake_llm.generate_calls) > 0
         assert "response" in result
 
+    def test_chat_strips_surrounding_blank_response_lines(self, fake_llm):
+        """Test chat responses do not include LLM-added blank padding lines."""
+        store = EmulatedStore()
+        fake_llm.response = "\n\n    Hello!\n\n"
+        fake_llm.set_response(
+            '{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}'
+        )
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.chat("hi")
+
+        assert result["response"] == "    Hello!"
+
     def test_chat_add_intent_routes_to_add_handler(self, fake_llm):
         """Test that chat with ADD intent triggers learning via handler."""
         store = EmulatedStore()

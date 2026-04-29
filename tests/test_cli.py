@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import io
+import time
 
 from memflow.cli import (
+    StatusLine,
     _create_manager,
     format_verbose_trace,
     run_repl,
@@ -30,6 +32,11 @@ class FakeManager:
             }
         )
         return self.result
+
+
+class TtyOutput(io.StringIO):
+    def isatty(self):
+        return True
 
 
 def test_format_verbose_trace_for_search():
@@ -117,6 +124,27 @@ def test_run_repl_passes_input_to_chat_and_tracks_history():
     ]
 
 
+def test_run_repl_strips_surrounding_blank_response_lines():
+    manager = FakeManager(
+        {
+            "response": "\n\n    hello\n\n",
+            "intents": ["CONVERSATION"],
+            "primary_intent": "CONVERSATION",
+        }
+    )
+    inputs = iter(["hi", "/exit"])
+    output = io.StringIO()
+
+    run_repl(
+        manager,
+        input_fn=lambda _prompt: next(inputs),
+        output=output,
+    )
+
+    assert output.getvalue() == "    hello\n"
+    assert manager.calls[0]["message"] == "hi"
+
+
 def test_create_manager_uses_current_public_api_name(monkeypatch):
     import memflow.manager as manager_module
 
@@ -150,3 +178,39 @@ def test_run_repl_toggles_verbose_and_execute():
     assert "execute: on" in text
     assert "[trace] chat()" in text
     assert manager.calls[0]["allow_execute"] is True
+
+
+def test_run_repl_shows_status_on_tty_output():
+    manager = FakeManager(
+        {
+            "response": "\n\nhello\n",
+            "intents": ["CONVERSATION"],
+            "primary_intent": "CONVERSATION",
+        }
+    )
+    inputs = iter(["hi", "/exit"])
+    output = TtyOutput()
+
+    run_repl(
+        manager,
+        input_fn=lambda _prompt: next(inputs),
+        output=output,
+    )
+
+    text = output.getvalue()
+    assert "\rProcessing" in text
+    assert "\r             \r\nhello\n" in text
+    assert "\r             \r\n\nhello\n" not in text
+
+
+def test_status_line_animates_processing_frames():
+    output = TtyOutput()
+
+    with StatusLine(output, interval=0.01):
+        time.sleep(0.05)
+
+    text = output.getvalue()
+    assert "\rProcessing" in text
+    assert "\rProcessing." in text
+    assert "\rProcessing.." in text
+    assert "\rProcessing..." in text

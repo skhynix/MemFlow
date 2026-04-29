@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, TextIO
 
@@ -49,6 +50,66 @@ def _format_count(value: object) -> str:
         return str(len(value))  # type: ignore[arg-type]
     except TypeError:
         return "unknown"
+
+
+def _strip_surrounding_blank_lines(text: str) -> str:
+    """Remove blank padding lines without changing indentation in content."""
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+class StatusLine:
+    """Show transient progress while a synchronous chat() call is running."""
+
+    def __init__(
+        self,
+        output: TextIO,
+        frames: tuple[str, ...] = (
+            "Processing",
+            "Processing.",
+            "Processing..",
+            "Processing...",
+        ),
+        interval: float = 0.25,
+    ) -> None:
+        self._output = output
+        self._frames = frames
+        self._interval = interval
+        self._enabled = bool(getattr(output, "isatty", lambda: False)())
+        self._max_width = max((len(frame) for frame in frames), default=0)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> None:
+        if not self._enabled or not self._frames:
+            return
+        self._write_frame(self._frames[0])
+        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._thread.start()
+
+    def _animate(self) -> None:
+        index = 1
+        while not self._stop.wait(self._interval):
+            self._write_frame(self._frames[index % len(self._frames)])
+            index += 1
+
+    def _write_frame(self, frame: str) -> None:
+        padding = " " * (self._max_width - len(frame))
+        self._output.write(f"\r{frame}{padding}")
+        self._output.flush()
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self._enabled or not self._frames:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        self._output.write("\r" + (" " * self._max_width) + "\r")
+        self._output.flush()
 
 
 def format_verbose_trace(
@@ -222,30 +283,37 @@ def run_repl(
             continue
 
         context = list(history) if use_history else None
-        if active_manager is None:
-            if manager_factory is None:
-                from memflow.manager import MemFlow
+        init_error = None
+        result = None
+        with StatusLine(output):
+            if active_manager is None:
+                if manager_factory is None:
+                    from memflow.manager import MemFlow
 
-                manager_factory = MemFlow
-            try:
-                active_manager = manager_factory()
-            except ModuleNotFoundError as exc:
-                print(
-                    f"Unable to initialize MemFlow: missing optional dependency '{exc.name}'.",
-                    file=output,
+                    manager_factory = MemFlow
+                try:
+                    active_manager = manager_factory()
+                except ModuleNotFoundError as exc:
+                    init_error = f"Unable to initialize MemFlow: missing optional dependency '{exc.name}'."
+                except Exception as exc:
+                    init_error = f"Unable to initialize MemFlow: {exc}"
+
+            if init_error is None:
+                result = active_manager.chat(
+                    message,
+                    user_id=state["user_id"],
+                    history=context,
+                    allow_execute=state["allow_execute"],
                 )
-                continue
-            except Exception as exc:
-                print(f"Unable to initialize MemFlow: {exc}", file=output)
-                continue
 
-        result = active_manager.chat(
-            message,
-            user_id=state["user_id"],
-            history=context,
-            allow_execute=state["allow_execute"],
-        )
-        print(result.get("response", ""), file=output)
+        if init_error is not None:
+            print(init_error, file=output)
+            continue
+
+        response = _strip_surrounding_blank_lines(result.get("response", ""))
+        if getattr(output, "isatty", lambda: False)():
+            print(file=output)
+        print(response, file=output)
 
         if state["verbose"]:
             print(
@@ -260,7 +328,7 @@ def run_repl(
 
         if use_history:
             history.append({"role": "user", "content": message})
-            history.append({"role": "assistant", "content": result.get("response", "")})
+            history.append({"role": "assistant", "content": response})
 
     return 0
 
