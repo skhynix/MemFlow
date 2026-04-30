@@ -57,3 +57,13 @@ results/
 
 # Cloned external repositories
 benchmark/proced_mem_bench/Proced_mem_bench/
+
+# Execution artifacts produced by examples that exercise the bash tool.
+# TASK prompts in examples 09/10/13 instruct the LLM to create files
+# like file.txt, dst.txt, demo/, dst/ in the repo root.
+/file.txt
+/dst.txt
+/demo/
+/dst/
+/file_data/
+/memflow_data/
