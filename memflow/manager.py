@@ -770,13 +770,14 @@ class MemFlowManager:
                 if global_guard.is_cycle_detected(step.goal, step_result.error):
                     break  # Cycle detected
 
-                # Replan with failed step's goal (not global goal!)
-                # Pass the failure context for alternative approach
-                replan_context = f"Previous attempt failed: {step_result.error}"
+                # Replan the failed step's goal using REPLAN_PROMPT so the
+                # planner sees the failure history and produces an alternative
+                # approach rather than re-deriving the same steps.
                 new_plan = self._planner.plan(
                     step.goal,  # Only this step's goal, not global task
-                    context=f"{context}\n\n{replan_context}",
-                    multi_stage=False,
+                    context=context,
+                    multi_stage=True,
+                    executed_steps=[step],
                 )
 
                 if new_plan.steps:

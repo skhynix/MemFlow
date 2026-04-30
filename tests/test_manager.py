@@ -581,6 +581,41 @@ class TestMemFlowManagerRun:
 
         assert planner.plan.call_count == 4
 
+    def test_run_replans_failed_step_with_history(self, fake_llm):
+        """Test failed steps are replanned through the replan path."""
+        manager = MemFlowManager(llm=fake_llm, use_env=False)
+
+        failed_step = Step(
+            id="step-1",
+            goal="Create report",
+            type=StepType.TOOL,
+            tool_name="bash",
+        )
+
+        planner = MagicMock()
+        planner.plan.side_effect = [
+            TaskPlan(task="Task", steps=[failed_step]),
+            TaskPlan(task="Create report", steps=[]),
+        ]
+        manager._planner = planner
+
+        executor = MagicMock()
+        executor.execute_step.return_value = StepResult(
+            step_id="step-1",
+            success=False,
+            output="",
+            error="permission denied",
+            retryable=False,
+        )
+        manager._executor = executor
+
+        manager.run("Task")
+
+        replan_call = planner.plan.call_args_list[1]
+        assert replan_call.args == ("Create report",)
+        assert replan_call.kwargs["multi_stage"] is True
+        assert replan_call.kwargs["executed_steps"] == [failed_step]
+
 
 class TestMemFlowManagerUtils:
     """Tests for MemFlowManager utility methods via public API."""
