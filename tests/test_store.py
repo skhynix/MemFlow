@@ -29,7 +29,9 @@ class TestEmulatedStore:
     def test_add_and_search(self):
         """Test adding and searching procedures."""
         store = EmulatedStore()
-        proc = Procedure(title="How to deploy", content="1. Run deploy.sh", tags=["deploy"])
+        proc = Procedure(
+            title="How to deploy", content="1. Run deploy.sh", tags=["deploy"]
+        )
         store.add(proc)
 
         results = store.search("deploy")
@@ -116,7 +118,9 @@ class TestFileStore:
     def test_add_and_persist(self, temp_dir):
         """Test that procedures persist to disk."""
         store = FileStore(file_dir=temp_dir)
-        proc = Procedure(title="How to deploy", content="1. Run deploy.sh", tags=["deploy"])
+        proc = Procedure(
+            title="How to deploy", content="1. Run deploy.sh", tags=["deploy"]
+        )
         store.add(proc)
 
         # Verify file exists
@@ -136,13 +140,13 @@ class TestFileStore:
             user_id="testuser",
             category="workflow",
             tags=["tag1", "tag2"],
-            created_at="2026-03-31T10:00:00"
+            created_at="2026-03-31T10:00:00",
         )
         store.add(proc)
 
         # Read raw file and verify format
         filepath = os.path.join(temp_dir, f"{proc.id}.md")
-        content = Path(filepath).read_text(encoding='utf-8')
+        content = Path(filepath).read_text(encoding="utf-8")
 
         assert content.startswith("---")
         assert "id: " in content
@@ -222,7 +226,7 @@ class TestMemMachineStore:
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
-                    "created_at": "2026-03-31T10:00:00"
+                    "created_at": "2026-03-31T10:00:00",
                 },
             )
         )
@@ -252,7 +256,7 @@ class TestMemMachineStore:
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
-                    "created_at": "2026-03-31T10:00:00"
+                    "created_at": "2026-03-31T10:00:00",
                 },
                 score=0.85,
             )
@@ -300,7 +304,7 @@ class TestMemMachineStore:
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
-                    "created_at": "2026-03-31T10:00:00"
+                    "created_at": "2026-03-31T10:00:00",
                 },
             )
         )
@@ -340,7 +344,7 @@ class TestMemMachineStore:
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
-                    "created_at": "2026-03-31T10:00:00"
+                    "created_at": "2026-03-31T10:00:00",
                 },
             ),
             self._episode(
@@ -352,7 +356,7 @@ class TestMemMachineStore:
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
-                    "created_at": "2026-03-31T10:00:00"
+                    "created_at": "2026-03-31T10:00:00",
                 },
             ),
         )
@@ -371,8 +375,10 @@ class TestPgVectorStore:
 
     def test_register_vector_called_on_init(self):
         """Verify register_vector() is called in _init_db."""
-        with patch('memflow.store.register_vector') as mock_register, \
-             patch('memflow.store.create_engine') as mock_create_engine:
+        with (
+            patch("memflow.store.register_vector") as mock_register,
+            patch("memflow.store.create_engine") as mock_create_engine,
+        ):
             # Setup mock engine and connection
             mock_engine = MagicMock()
             mock_conn = MagicMock()
@@ -385,10 +391,13 @@ class TestPgVectorStore:
             mock_create_engine.return_value = mock_engine
 
             # Initialize PgVectorStore (register_vector should be called)
-            with patch.dict('os.environ', {
-                'PGVECTOR_EMBEDDING_API_BASE': 'http://test-api',
-                'PGVECTOR_EMBEDDING_DIMENSIONS': '2560'
-            }):
+            with patch.dict(
+                "os.environ",
+                {
+                    "PGVECTOR_EMBEDDING_API_BASE": "http://test-api",
+                    "PGVECTOR_EMBEDDING_DIMENSIONS": "2560",
+                },
+            ):
                 PgVectorStore(base_url="postgresql://test:5432/testdb")
 
             # Verify register_vector was called with raw_conn

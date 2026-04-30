@@ -29,20 +29,16 @@ if TYPE_CHECKING:
 DEFAULT_TOOLS = [
     {
         "name": "llm",
-        "description": (
-            'Ask the language model. Args: {"prompt": "your question"}'
-        ),
+        "description": ('Ask the language model. Args: {"prompt": "your question"}'),
     },
     {
         "name": "bash",
-        "description": (
-            'Run a shell command. Args: {"command": "echo hello"}'
-        ),
+        "description": ('Run a shell command. Args: {"command": "echo hello"}'),
     },
     {
         "name": "http",
         "description": (
-            'Make an HTTP request. '
+            "Make an HTTP request. "
             'Args: {"url": "https://...", "method": "GET", "body": ""}'
         ),
     },
@@ -153,13 +149,15 @@ class LLMPlanner:
             steps = []
             for s in step_dicts:
                 tool = s.get("tool", "llm")
-                steps.append(Step(
-                    id=str(uuid.uuid4()),
-                    goal=s.get("description", ""),
-                    type=StepType.TOOL,
-                    tool_name=tool,
-                    args=s.get("args", {}),
-                ))
+                steps.append(
+                    Step(
+                        id=str(uuid.uuid4()),
+                        goal=s.get("description", ""),
+                        type=StepType.TOOL,
+                        tool_name=tool,
+                        args=s.get("args", {}),
+                    )
+                )
             return TaskPlan(task=task, steps=steps, context=context)
         finally:
             # Exit recursion depth
@@ -187,7 +185,10 @@ class LLMPlanner:
                         max_steps=10,  # Plan all steps at once
                     ),
                 },
-                {"role": "user", "content": "Plan ALL steps needed to complete the task. Respond with JSON only."},
+                {
+                    "role": "user",
+                    "content": "Plan ALL steps needed to complete the task. Respond with JSON only.",
+                },
             ]
             response = self.llm.generate(messages)
             data = parse_json(response)
@@ -203,13 +204,15 @@ class LLMPlanner:
             # Convert to Step objects
             steps = []
             for s in step_dicts:
-                steps.append(Step(
-                    id=str(uuid.uuid4()),
-                    goal=s.get("description", ""),
-                    type=StepType.TOOL,
-                    tool_name=s.get("tool", "llm"),
-                    args=s.get("args", {}),
-                ))
+                steps.append(
+                    Step(
+                        id=str(uuid.uuid4()),
+                        goal=s.get("description", ""),
+                        type=StepType.TOOL,
+                        tool_name=s.get("tool", "llm"),
+                        args=s.get("args", {}),
+                    )
+                )
             return TaskPlan(task=task, steps=steps, context=context)
         finally:
             # Exit recursion depth
@@ -271,13 +274,15 @@ class LLMPlanner:
             # Convert to Step objects
             steps = []
             for s in step_dicts:
-                steps.append(Step(
-                    id=str(uuid.uuid4()),
-                    goal=s.get("description", ""),
-                    type=StepType.TOOL,
-                    tool_name=s.get("tool", "llm"),
-                    args=s.get("args", {}),
-                ))
+                steps.append(
+                    Step(
+                        id=str(uuid.uuid4()),
+                        goal=s.get("description", ""),
+                        type=StepType.TOOL,
+                        tool_name=s.get("tool", "llm"),
+                        args=s.get("args", {}),
+                    )
+                )
             return TaskPlan(task=task, steps=steps, context=context)
         finally:
             # Exit recursion depth

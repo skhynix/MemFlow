@@ -50,7 +50,12 @@ def _safe_float(value: Any, field_name: str = "unknown") -> float:
     except Exception:
         # Log warning for data quality tracking
         import warnings
-        warnings.warn(f"Invalid float value for {field_name}: {value!r}", RuntimeWarning, stacklevel=2)
+
+        warnings.warn(
+            f"Invalid float value for {field_name}: {value!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return 0.0
 
 
@@ -63,7 +68,9 @@ def _quantize_relevance_score(score: float) -> int:
     return min(3, max(0, int(score / 3.33)))
 
 
-def load_gold_query_bank(query_bank_path: str | None = None) -> list[GoldBenchmarkQuery]:
+def load_gold_query_bank(
+    query_bank_path: str | None = None,
+) -> list[GoldBenchmarkQuery]:
     path = Path(query_bank_path or get_query_bank_path())
     raw_data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(raw_data, dict):
@@ -78,15 +85,29 @@ def load_gold_query_bank(query_bank_path: str | None = None) -> list[GoldBenchma
         # - query_text / tier
         query_id = str(raw.get("query_id", raw.get("id", f"query_{idx}")))
         task_description = str(raw.get("task_description", raw.get("query_text", "")))
-        complexity_tier = str(raw.get("complexity_tier", raw.get("tier", "UNKNOWN"))).upper()
+        complexity_tier = str(
+            raw.get("complexity_tier", raw.get("tier", "UNKNOWN"))
+        ).upper()
         rel_items = []
         for item in raw.get("relevant_trajectories", []) or []:
             if isinstance(item, dict):
-                trajectory_id = str(item.get("trajectory_id", item.get("task_instance_id", "")))
-                relevance_score = _safe_float(item.get("relevance_score", 0.0), field_name=f"query_{query_id}.relevance_score")
+                trajectory_id = str(
+                    item.get("trajectory_id", item.get("task_instance_id", ""))
+                )
+                relevance_score = _safe_float(
+                    item.get("relevance_score", 0.0),
+                    field_name=f"query_{query_id}.relevance_score",
+                )
             else:
-                trajectory_id = str(getattr(item, "trajectory_id", getattr(item, "task_instance_id", "")))
-                relevance_score = _safe_float(getattr(item, "relevance_score", 0.0), field_name=f"query_{query_id}.relevance_score")
+                trajectory_id = str(
+                    getattr(
+                        item, "trajectory_id", getattr(item, "task_instance_id", "")
+                    )
+                )
+                relevance_score = _safe_float(
+                    getattr(item, "relevance_score", 0.0),
+                    field_name=f"query_{query_id}.relevance_score",
+                )
             if trajectory_id:
                 rel_items.append(
                     GoldRelevantTrajectory(
@@ -117,7 +138,10 @@ def _metrics_for_query(
     # Match Proced_mem_bench's current runner behavior:
     # only the retrieved pool is judged for binary relevance/graded gain.
     retrieved_scores = {tid: gold_map.get(tid, 0.0) for tid in retrieved_ids}
-    relevance_judgments = {tid: (score >= DEFAULT_RELEVANCE_THRESHOLD) for tid, score in retrieved_scores.items()}
+    relevance_judgments = {
+        tid: (score >= DEFAULT_RELEVANCE_THRESHOLD)
+        for tid, score in retrieved_scores.items()
+    }
     num_relevant = sum(1 for is_rel in relevance_judgments.values() if is_rel)
 
     precision_at_k: dict[str, float] = {}
@@ -127,13 +151,22 @@ def _metrics_for_query(
 
     for k in k_values:
         top_k_ids = retrieved_ids[:k]
-        rel_in_top_k = sum(1 for tid in top_k_ids if relevance_judgments.get(tid, False))
+        rel_in_top_k = sum(
+            1 for tid in top_k_ids if relevance_judgments.get(tid, False)
+        )
         precision = rel_in_top_k / k if k else 0.0
         recall = (rel_in_top_k / num_relevant) if num_relevant else 0.0
-        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        f1 = (
+            (2 * precision * recall / (precision + recall))
+            if (precision + recall)
+            else 0.0
+        )
 
         # NDCG@k uses the same quantized gains and retrieved-pool IDCG as Proced_mem_bench.
-        relevance_values = [_quantize_relevance_score(retrieved_scores.get(tid, 0.0)) for tid in top_k_ids]
+        relevance_values = [
+            _quantize_relevance_score(retrieved_scores.get(tid, 0.0))
+            for tid in top_k_ids
+        ]
         dcg = 0.0
         for rank, relevance in enumerate(relevance_values, start=1):
             if relevance > 0:
@@ -167,11 +200,15 @@ def _metrics_for_query(
         "ndcg_at_k": ndcg_at_k,
         "average_precision": average_precision,
         "num_relevant": num_relevant,
-        "num_gold_relevant": sum(1 for score in gold_map.values() if score >= DEFAULT_RELEVANCE_THRESHOLD),
+        "num_gold_relevant": sum(
+            1 for score in gold_map.values() if score >= DEFAULT_RELEVANCE_THRESHOLD
+        ),
     }
 
 
-def _aggregate_query_metrics(query_metrics: list[dict[str, Any]], k_values: list[int]) -> dict[str, Any]:
+def _aggregate_query_metrics(
+    query_metrics: list[dict[str, Any]], k_values: list[int]
+) -> dict[str, Any]:
     if not query_metrics:
         return {
             "num_queries": 0,
@@ -194,8 +231,7 @@ def _aggregate_query_metrics(query_metrics: list[dict[str, Any]], k_values: list
             for k in k_values
         },
         "f1_at_k": {
-            str(k): mean(m["f1_at_k"][str(k)] for m in query_metrics)
-            for k in k_values
+            str(k): mean(m["f1_at_k"][str(k)] for m in query_metrics) for k in k_values
         },
         "ndcg_at_k": {
             str(k): mean(m["ndcg_at_k"][str(k)] for m in query_metrics)
@@ -226,8 +262,16 @@ def evaluate_gold_queries(
         ]
 
         # Keep raw graded scores for NDCG and derive binary relevance from them.
-        gold_map = {item.trajectory_id: item.relevance_score for item in query.relevant_trajectories}
-        metrics = _metrics_for_query(retrieved_ids=retrieved_ids, gold_map=gold_map, k_values=k_values, query_id=query.query_id)
+        gold_map = {
+            item.trajectory_id: item.relevance_score
+            for item in query.relevant_trajectories
+        }
+        metrics = _metrics_for_query(
+            retrieved_ids=retrieved_ids,
+            gold_map=gold_map,
+            k_values=k_values,
+            query_id=query.query_id,
+        )
 
         all_metrics.append(metrics)
         by_tier.setdefault(query.complexity_tier, []).append(metrics)
@@ -237,9 +281,16 @@ def evaluate_gold_queries(
             retrieved_payload.append(
                 {
                     "rank": rank,
-                    "trajectory_id": str(getattr(item, "trajectory_id", getattr(item, "task_instance_id", ""))),
+                    "trajectory_id": str(
+                        getattr(
+                            item, "trajectory_id", getattr(item, "task_instance_id", "")
+                        )
+                    ),
                     "task_description": str(getattr(item, "task_description", "")),
-                    "similarity_score": _safe_float(getattr(item, "similarity_score", 0.0), field_name=f"query_{query.query_id}.similarity_score"),
+                    "similarity_score": _safe_float(
+                        getattr(item, "similarity_score", 0.0),
+                        field_name=f"query_{query.query_id}.similarity_score",
+                    ),
                     "total_steps": int(getattr(item, "total_steps", 0) or 0),
                 }
             )
@@ -285,4 +336,3 @@ def evaluate_gold_queries(
         complexity_stratified_metrics=stratified,
         query_results=query_results,
     )
-

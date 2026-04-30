@@ -44,9 +44,9 @@ result = memflow.run(TASK)
 # Show the plan
 # ---------------------------------------------------------------------------
 
-print(f"{'='*60}")
+print(f"{'=' * 60}")
 print(f"  Plan ({len(result.plan.steps)} steps)")
-print(f"{'='*60}")
+print(f"{'=' * 60}")
 for i, step in enumerate(result.plan.steps, 1):
     print(f"  {i}. [{step.tool_name or 'llm'}] {step.goal}")
 
@@ -54,9 +54,9 @@ for i, step in enumerate(result.plan.steps, 1):
 # Show execution results
 # ---------------------------------------------------------------------------
 
-print(f"\n{'='*60}")
+print(f"\n{'=' * 60}")
 print("  Execution Results")
-print(f"{'='*60}")
+print(f"{'=' * 60}")
 success_count = sum(1 for r in result.step_results if r.success)
 print(f"  {success_count}/{len(result.step_results)} steps succeeded\n")
 
@@ -76,9 +76,9 @@ for r in result.step_results:
 # Show what was learned
 # ---------------------------------------------------------------------------
 
-print(f"\n{'='*60}")
+print(f"\n{'=' * 60}")
 print("  Auto-Learn Result")
-print(f"{'='*60}")
+print(f"{'=' * 60}")
 if result.learned:
     print(f"  Stored: [{result.learned.category}] {result.learned.title}")
     print()
@@ -91,9 +91,9 @@ else:
 # Verify the Learn → Retrieve back-edge
 # ---------------------------------------------------------------------------
 
-print(f"\n{'='*60}")
+print(f"\n{'=' * 60}")
 print("  Learn → Retrieve back-edge")
-print(f"{'='*60}")
+print(f"{'=' * 60}")
 hits = memflow.search("how to relax in the evening")
 if hits:
     print(f"  search('how to relax in the evening') → {len(hits)} result(s)")

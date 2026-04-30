@@ -11,28 +11,37 @@ import pytest
 class TestParseJson:
     """Tests for JSON parsing utility."""
 
-    @pytest.mark.parametrize("text,expected", [
-        ('{"has_procedure": true, "title": "Test"}',
-         {"has_procedure": True, "title": "Test"}),
-        ('```json\n{"has_procedure": true}\n```',
-         {"has_procedure": True}),
-        ('"""{"has_procedure": true, "title": "Test"}"""',
-         {"has_procedure": True, "title": "Test"}),
-        ('Here is the result: {"has_procedure": true, "title": "Test"} end.',
-         {"has_procedure": True, "title": "Test"}),
-        ('{"content": "line1\\nline2"}',
-         {"content": "line1\nline2"}),
-    ])
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            (
+                '{"has_procedure": true, "title": "Test"}',
+                {"has_procedure": True, "title": "Test"},
+            ),
+            ('```json\n{"has_procedure": true}\n```', {"has_procedure": True}),
+            (
+                '"""{"has_procedure": true, "title": "Test"}"""',
+                {"has_procedure": True, "title": "Test"},
+            ),
+            (
+                'Here is the result: {"has_procedure": true, "title": "Test"} end.',
+                {"has_procedure": True, "title": "Test"},
+            ),
+            ('{"content": "line1\\nline2"}', {"content": "line1\nline2"}),
+        ],
+    )
     def test_parse_json_valid(self, text, expected):
         """Test parsing various valid JSON formats."""
         from memflow.llm import parse_json
+
         result = parse_json(text)
         assert result == expected
 
     def test_parse_invalid_json_returns_empty(self):
         """Test that invalid JSON returns empty dict."""
         from memflow.llm import parse_json
-        text = 'not valid json at all'
+
+        text = "not valid json at all"
         result = parse_json(text)
         assert result == {}
 
@@ -109,9 +118,7 @@ class TestLLMFactory:
         from memflow.llm import LLMFactory, OpenAICompatibleLLM
 
         llm = LLMFactory.create(
-            "openai-compatible",
-            model="gpt-4",
-            api_base="http://vllm:8000/v1"
+            "openai-compatible", model="gpt-4", api_base="http://vllm:8000/v1"
         )
         assert isinstance(llm, OpenAICompatibleLLM)
 
@@ -119,11 +126,7 @@ class TestLLMFactory:
         """Test creating OpenAI compatible LLM with API key."""
         from memflow.llm import LLMFactory, OpenAICompatibleLLM
 
-        llm = LLMFactory.create(
-            "openai-compatible",
-            model="gpt-4",
-            api_key="test-key"
-        )
+        llm = LLMFactory.create("openai-compatible", model="gpt-4", api_key="test-key")
         assert isinstance(llm, OpenAICompatibleLLM)
 
     def test_create_unknown_provider(self):
@@ -156,8 +159,7 @@ class TestOllamaLLM:
             assert isinstance(response, str)
             assert response == "Hello, I am an AI assistant."
             mock_client.chat.assert_called_once_with(
-                model="llama3.2",
-                messages=[{"role": "user", "content": "Hello"}]
+                model="llama3.2", messages=[{"role": "user", "content": "Hello"}]
             )
 
 

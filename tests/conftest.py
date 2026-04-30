@@ -12,7 +12,10 @@ import pytest
 class FakeLLM:
     """Fake LLM for deterministic unit tests."""
 
-    def __init__(self, response: str = '{"has_procedure": true, "title": "Test", "content": "1. Step one"}'):
+    def __init__(
+        self,
+        response: str = '{"has_procedure": true, "title": "Test", "content": "1. Step one"}',
+    ):
         self.response = response
         self.generate_calls = []
         self._custom_response = None
@@ -47,11 +50,21 @@ def clean_env():
     4. Restores original environment variables after test
     """
     vars_to_clear = [
-        'LLM_PROVIDER', 'LLM_MODEL', 'LLM_API_BASE', 'LLM_API_KEY',
-        'MEMFLOW_BACKEND', 'MEMFLOW_FILE_DIR',
-        'MEMMACHINE_BASE_URL', 'MEMMACHINE_ORG_ID', 'MEMMACHINE_PROJECT', 'MEMMACHINE_API_KEY',
-        'PGVECTOR_BASE_URL', 'PGVECTOR_EMBEDDING_MODEL', 'PGVECTOR_EMBEDDING_API_BASE',
-        'PGVECTOR_EMBEDDING_API_KEY', 'PGVECTOR_EMBEDDING_DIMENSIONS',
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_API_BASE",
+        "LLM_API_KEY",
+        "MEMFLOW_BACKEND",
+        "MEMFLOW_FILE_DIR",
+        "MEMMACHINE_BASE_URL",
+        "MEMMACHINE_ORG_ID",
+        "MEMMACHINE_PROJECT",
+        "MEMMACHINE_API_KEY",
+        "PGVECTOR_BASE_URL",
+        "PGVECTOR_EMBEDDING_MODEL",
+        "PGVECTOR_EMBEDDING_API_BASE",
+        "PGVECTOR_EMBEDDING_API_KEY",
+        "PGVECTOR_EMBEDDING_DIMENSIONS",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:
@@ -85,10 +98,12 @@ def memmachine_mock():
 @pytest.fixture
 def mock_http_response():
     """Provide a mock HTTP response factory."""
+
     def _factory(content: bytes = b'{"status": "ok"}'):
         mock_response = MagicMock()
         mock_response.read.return_value = content
         return mock_response
+
     return _factory
 
 

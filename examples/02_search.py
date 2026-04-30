@@ -56,9 +56,9 @@ print()
 
 # --- Search: direct and indirect ---
 queries = [
-    ("Direct",   "how to make coffee"),
+    ("Direct", "how to make coffee"),
     ("Indirect", "I want something warm to drink"),
-    ("Direct",   "how to wash clothes"),
+    ("Direct", "how to wash clothes"),
     ("Indirect", "my clothes are dirty"),
 ]
 

@@ -97,11 +97,11 @@ print()
 print("=== 3. Search ===")
 
 queries = [
-    ("Direct",   "how to make coffee"),
+    ("Direct", "how to make coffee"),
     ("Indirect", "I want something warm to drink"),
-    ("Direct",   "how to wash clothes"),
+    ("Direct", "how to wash clothes"),
     ("Indirect", "my clothes are dirty"),
-    ("Direct",   "how to water a plant"),
+    ("Direct", "how to water a plant"),
     ("Indirect", "my plant needs water"),
 ]
 
@@ -120,9 +120,9 @@ print()
 print("=== 4. Chat ===")
 
 questions = [
-    ("Direct",   "How do I make coffee?"),
+    ("Direct", "How do I make coffee?"),
     ("Indirect", "I feel sleepy. What can I make quickly at home?"),
-    ("Direct",   "How do I wash clothes?"),
+    ("Direct", "How do I wash clothes?"),
     ("Indirect", "I have a lot of dirty clothes. What should I do?"),
 ]
 

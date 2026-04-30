@@ -40,6 +40,7 @@ def _load_env_file(env_path: str | None = None) -> None:
     # override=False keeps existing environment variables (env has priority)
     load_dotenv(dotenv_path=path, override=False)
 
+
 try:
     from memflow import MemFlow
 except ImportError:
@@ -61,17 +62,25 @@ DEFAULT_TIERS = ["HARD", "MEDIUM", "EASY"]
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run MemFlow gold-label retrieval benchmark.")
+    parser = argparse.ArgumentParser(
+        description="Run MemFlow gold-label retrieval benchmark."
+    )
 
     parser.add_argument("--user-id", default="benchmark")
     parser.add_argument("--k-values", nargs="+", type=int, default=[1, 3, 5, 10])
-    parser.add_argument("--tiers", nargs="+", choices=DEFAULT_TIERS, default=DEFAULT_TIERS)
+    parser.add_argument(
+        "--tiers", nargs="+", choices=DEFAULT_TIERS, default=DEFAULT_TIERS
+    )
     parser.add_argument("--max-queries-per-tier", type=int)
     parser.add_argument("--query-bank-path")
     parser.add_argument("--corpus-path")
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--results-filename")
-    parser.add_argument("--clear-existing", action="store_true", help="Clear existing procedures before seeding (default: False)")
+    parser.add_argument(
+        "--clear-existing",
+        action="store_true",
+        help="Clear existing procedures before seeding (default: False)",
+    )
 
     return parser.parse_args()
 
@@ -80,7 +89,9 @@ def _normalized_k_values(raw_values: list[int]) -> list[int]:
     return sorted({k for k in raw_values if k > 0})
 
 
-def _select_queries(queries: list[Any], tiers: list[str], max_per_tier: int | None) -> list[Any]:
+def _select_queries(
+    queries: list[Any], tiers: list[str], max_per_tier: int | None
+) -> list[Any]:
     selected: list[Any] = []
     for tier in tiers:
         tier_queries = [q for q in queries if q.complexity_tier == tier]
@@ -132,7 +143,9 @@ def _print_summary(
 
     print("\nComplexity tiers:")
     for tier, metrics in stratified.items():
-        print(f"- {tier}: MAP={metrics.get('map', 0.0):.4f}, queries={metrics.get('num_queries', 0)}")
+        print(
+            f"- {tier}: MAP={metrics.get('map', 0.0):.4f}, queries={metrics.get('num_queries', 0)}"
+        )
 
 
 def main() -> None:

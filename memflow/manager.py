@@ -79,6 +79,7 @@ def _load_env_file(env_path: str | None = None) -> None:
 # Guard structures for execution control
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class GlobalGuard:
     """Guard at run() level - controls overall execution.
@@ -87,6 +88,7 @@ class GlobalGuard:
     - max_attempts: maximum replan attempts
     - cycle detection: detect same goal+failure repetition via hash
     """
+
     max_attempts: int = 5
     goal_fingerprints: dict = None
 
@@ -113,6 +115,7 @@ class PlanGuard:
     Design document specification:
     - max_depth: maximum vertical recursion depth for plan decomposition
     """
+
     max_depth: int = 3
     current_depth: int = 0
 
@@ -134,6 +137,7 @@ class ToolGuard:
     - max_retry: maximum retry for transient failures (network timeout, etc.)
     - retry is for same method, replan is for different approach
     """
+
     max_retry: int = 3
 
     def should_retry(self, attempt: int) -> bool:
@@ -214,7 +218,12 @@ class MemFlow:
             llm_model = os.getenv("LLM_MODEL")
             llm_api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
             llm_api_key = os.getenv("LLM_API_KEY")
-            llm = LLMFactory.create(llm_provider, model=llm_model, api_base=llm_api_base, api_key=llm_api_key)
+            llm = LLMFactory.create(
+                llm_provider,
+                model=llm_model,
+                api_base=llm_api_base,
+                api_key=llm_api_key,
+            )
 
         # Storage Backend
         backend = os.getenv("MEMFLOW_BACKEND", "emulated")
@@ -227,9 +236,14 @@ class MemFlow:
         mm_key = os.getenv("MEMMACHINE_API_KEY")
 
         # PgVector Store Configuration
-        pg_url = os.getenv("PGVECTOR_BASE_URL", "postgresql://pgvector:pgvector_password@localhost:5433/pgvector")
+        pg_url = os.getenv(
+            "PGVECTOR_BASE_URL",
+            "postgresql://pgvector:pgvector_password@localhost:5433/pgvector",
+        )
         pg_emb = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
-        pg_emb_api_base = os.getenv("PGVECTOR_EMBEDDING_API_BASE")  # No default - must be set
+        pg_emb_api_base = os.getenv(
+            "PGVECTOR_EMBEDDING_API_BASE"
+        )  # No default - must be set
         pg_emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
         pg_emb_dim = os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560")
 
@@ -384,17 +398,22 @@ class MemFlow:
         # Combine current message with history for context
         if history:
             context_messages = history[-5:]  # Last 5 messages for context
-            full_context = "\n".join(
-                f"{m.get('role', 'user')}: {m.get('content', '')}"
-                for m in context_messages
-            ) + f"\nuser: {message}"
+            full_context = (
+                "\n".join(
+                    f"{m.get('role', 'user')}: {m.get('content', '')}"
+                    for m in context_messages
+                )
+                + f"\nuser: {message}"
+            )
         else:
             full_context = message
 
         # Classify intents (may return multiple)
         intents_data = self._classify_intents(full_context)
         intents = intents_data.get("intents", ["CONVERSATION"])
-        primary_intent = intents_data.get("primary", intents[0] if intents else "CONVERSATION")
+        primary_intent = intents_data.get(
+            "primary", intents[0] if intents else "CONVERSATION"
+        )
 
         # Check EXECUTE confirmation before processing
         if "EXECUTE" in intents and not allow_execute:
@@ -424,7 +443,9 @@ class MemFlow:
             handler_results[intent] = result
 
         # Combine responses
-        combined_response = "\n\n".join(responses) if len(responses) > 1 else responses[0]
+        combined_response = (
+            "\n\n".join(responses) if len(responses) > 1 else responses[0]
+        )
 
         return {
             "response": combined_response,
@@ -462,7 +483,9 @@ class MemFlow:
         except Exception:
             return {"intents": ["CONVERSATION"], "primary": "CONVERSATION"}
 
-    def _handle_search(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+    def _handle_search(
+        self, message: str, user_id: str | None, history: list[dict] | None
+    ) -> dict:
         """Handle SEARCH intent - retrieve and respond."""
         results = self.search(message, user_id=user_id, top_k=3)
 
@@ -471,7 +494,9 @@ class MemFlow:
                 f"**{r.procedure.title}** (Category: {r.procedure.category})\n{r.procedure.content}"
                 for r in results
             )
-            response = f"Found {len(results)} relevant procedure(s):\n\n{procedures_text}"
+            response = (
+                f"Found {len(results)} relevant procedure(s):\n\n{procedures_text}"
+            )
         else:
             response = "I couldn't find any relevant procedures for that. Let me help with what I know..."
             # Still provide LLM response
@@ -480,7 +505,9 @@ class MemFlow:
 
         return {"response": response, "intent": "SEARCH", "results": results}
 
-    def _handle_add(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+    def _handle_add(
+        self, message: str, user_id: str | None, history: list[dict] | None
+    ) -> dict:
         """Handle ADD intent - extract and store procedure."""
         # Use existing extraction logic
         result = self._extract_and_store(message, user_id or "default")
@@ -496,9 +523,14 @@ class MemFlow:
                 "intent": "ADD",
                 "data": result,
             }
-        return {"response": "I couldn't extract a procedure. Please provide clearer step-by-step instructions.", "intent": "ADD"}
+        return {
+            "response": "I couldn't extract a procedure. Please provide clearer step-by-step instructions.",
+            "intent": "ADD",
+        }
 
-    def _handle_execute(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+    def _handle_execute(
+        self, message: str, user_id: str | None, history: list[dict] | None
+    ) -> dict:
         """Handle EXECUTE intent - run the task."""
         try:
             result = self.run(message, user_id=user_id, multi_stage=True)
@@ -515,16 +547,29 @@ class MemFlow:
                 if r.output:
                     steps_output.append(f"    Output: {r.output[:100]}")
 
-            response = f"Executed {total} step(s), {success_count} succeeded:\n\n" + "\n".join(steps_output)
+            response = (
+                f"Executed {total} step(s), {success_count} succeeded:\n\n"
+                + "\n".join(steps_output)
+            )
 
             if result.learned:
                 response += f"\n\nLearned: {result.learned.title}"
 
-            return {"response": response, "intent": "EXECUTE", "data": {"result": result}}
+            return {
+                "response": response,
+                "intent": "EXECUTE",
+                "data": {"result": result},
+            }
         except Exception as e:
-            return {"response": f"Execution failed: {str(e)}", "intent": "EXECUTE", "error": str(e)}
+            return {
+                "response": f"Execution failed: {str(e)}",
+                "intent": "EXECUTE",
+                "error": str(e),
+            }
 
-    def _handle_conversation(self, message: str, user_id: str | None, history: list[dict] | None) -> dict:
+    def _handle_conversation(
+        self, message: str, user_id: str | None, history: list[dict] | None
+    ) -> dict:
         """Handle CONVERSATION intent - respond naturally."""
         # Search for relevant context
         results = self.search(message, user_id=user_id, top_k=2)
@@ -534,13 +579,20 @@ class MemFlow:
 
     def _generate_chat_response(self, message: str, search_results: list) -> str:
         """Generate a natural language response using LLM."""
-        procedures_text = "\n\n".join(
-            f"### {r.procedure.title}\n{r.procedure.content}"
-            for r in search_results
-        ) if search_results else "No relevant procedures found."
+        procedures_text = (
+            "\n\n".join(
+                f"### {r.procedure.title}\n{r.procedure.content}"
+                for r in search_results
+            )
+            if search_results
+            else "No relevant procedures found."
+        )
 
         messages = [
-            {"role": "system", "content": CHAT_SYSTEM_PROMPT.format(procedures=procedures_text)},
+            {
+                "role": "system",
+                "content": CHAT_SYSTEM_PROMPT.format(procedures=procedures_text),
+            },
             {"role": "user", "content": message},
         ]
         return self.llm.generate(messages)
@@ -586,10 +638,13 @@ class MemFlow:
             TaskPlan with steps to execute.
         """
         results = self.search(task, user_id=user_id)
-        context = "\n\n---\n\n".join(
-            f"### {r.procedure.title}\n{r.procedure.content}"
-            for r in results
-        ) if results else ""
+        context = (
+            "\n\n---\n\n".join(
+                f"### {r.procedure.title}\n{r.procedure.content}" for r in results
+            )
+            if results
+            else ""
+        )
 
         if self._planner is None:
             self._planner = LLMPlanner(
@@ -731,10 +786,13 @@ class MemFlow:
         """
         # Retrieve context
         results = self.search(task, user_id=user_id)
-        context = "\n\n---\n\n".join(
-            f"### {r.procedure.title}\n{r.procedure.content}"
-            for r in results
-        ) if results else ""
+        context = (
+            "\n\n---\n\n".join(
+                f"### {r.procedure.title}\n{r.procedure.content}" for r in results
+            )
+            if results
+            else ""
+        )
 
         # Initialize components
         if self._planner is None:
@@ -762,7 +820,7 @@ class MemFlow:
             step = plan.steps[step_index]
 
             # Skip already completed steps
-            if step.status == 'done':
+            if step.status == "done":
                 step_index += 1
                 continue
 
@@ -798,9 +856,9 @@ class MemFlow:
                     # Replace failed step with new subplan
                     # Insert new steps at current position
                     plan.steps = (
-                        plan.steps[:step_index] +
-                        new_plan.steps +
-                        plan.steps[step_index + 1:]
+                        plan.steps[:step_index]
+                        + new_plan.steps
+                        + plan.steps[step_index + 1 :]
                     )
                     # Don't increment step_index - process new first step
                 else:
@@ -809,8 +867,8 @@ class MemFlow:
 
         # Mark remaining steps as not executed
         for i in range(step_index, len(plan.steps)):
-            if plan.steps[i].status == 'pending':
-                plan.steps[i].status = 'failed'
+            if plan.steps[i].status == "pending":
+                plan.steps[i].status = "failed"
 
         # Learn from successful execution
         learned = None
@@ -833,7 +891,9 @@ class MemFlow:
             learned=learned,
         )
 
-    def _execute_step_with_guard(self, step: Step, tools: dict | None = None) -> StepResult:
+    def _execute_step_with_guard(
+        self, step: Step, tools: dict | None = None
+    ) -> StepResult:
         """Execute a single step with ToolGuard retry logic."""
         tool_guard = ToolGuard(max_retry=3)
         attempt = 0

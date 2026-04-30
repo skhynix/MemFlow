@@ -23,7 +23,9 @@ def run_cmd(cmd: list[str], cwd: Path | None = None) -> None:
     subprocess.run(cmd, check=True, cwd=cwd)
 
 
-def install_proced_mem_bench(force: bool = False, commit_hash: str | None = None) -> None:
+def install_proced_mem_bench(
+    force: bool = False, commit_hash: str | None = None
+) -> None:
     project_root = Path(__file__).resolve().parent.parent
     bench_path = project_root / PROCED_MEM_BENCH_PATH
 
@@ -54,7 +56,9 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # proced_mem_bench
-    p1 = subparsers.add_parser("proced_mem_bench", help="Install procedural memory benchmark")
+    p1 = subparsers.add_parser(
+        "proced_mem_bench", help="Install procedural memory benchmark"
+    )
     p1.add_argument("--force", action="store_true", help="Force reinstall")
     p1.add_argument("--commit-hash", help="Install specific commit")
 

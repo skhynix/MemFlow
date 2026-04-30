@@ -63,7 +63,9 @@ class TestMemFlowInit:
 
         # Trigger planner creation by calling plan() with mocked LLMPlanner
         with patch("memflow.manager.LLMPlanner") as mock_planner_cls:
-            mock_planner_cls.return_value.plan.return_value = TaskPlan(task="Test", steps=[])
+            mock_planner_cls.return_value.plan.return_value = TaskPlan(
+                task="Test", steps=[]
+            )
             result = manager.plan("Test task")
 
         # Verify planner was called with correct kwargs
@@ -77,9 +79,11 @@ class TestMemFlowInit:
         manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Trigger executor creation by calling run() with mocked dependencies
-        with patch("memflow.manager.LLMPlanner"), \
-             patch("memflow.manager.ToolRegistry") as mock_registry_cls, \
-             patch("memflow.manager.Learner"):
+        with (
+            patch("memflow.manager.LLMPlanner"),
+            patch("memflow.manager.ToolRegistry") as mock_registry_cls,
+            patch("memflow.manager.Learner"),
+        ):
             mock_registry_cls.return_value.execute_step.return_value = StepResult(
                 step_id="step-1", success=True, output="test"
             )
@@ -96,9 +100,11 @@ class TestMemFlowInit:
         manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Trigger learner creation by calling run() with mocked dependencies
-        with patch("memflow.manager.LLMPlanner"), \
-             patch("memflow.manager.ToolRegistry"), \
-             patch("memflow.manager.Learner") as mock_learner_cls:
+        with (
+            patch("memflow.manager.LLMPlanner"),
+            patch("memflow.manager.ToolRegistry"),
+            patch("memflow.manager.Learner") as mock_learner_cls,
+        ):
             mock_learner = MagicMock()
             mock_learner.extract.return_value = Procedure(
                 title="Test", content="1. Step"
@@ -135,7 +141,9 @@ class TestMemFlowFromEnv:
         """Test that explicitly provided store is not overwritten by .env."""
         os.environ["MEMFLOW_BACKEND"] = "file"
 
-        custom_store = MemMachineStore(base_url="http://custom", org_id="org", project_id="proj")
+        custom_store = MemMachineStore(
+            base_url="http://custom", org_id="org", project_id="proj"
+        )
         manager = MemFlow(llm=mock_factory.create(), store=custom_store, use_env=True)
 
         # custom_store 가 유지되어야 함
@@ -147,11 +155,7 @@ class TestMemFlowFromEnv:
         os.environ["MEMFLOW_BACKEND"] = "memmachine"
 
         custom_bypass = MemMachineBypass(base_url="http://custom")
-        manager = MemFlow(
-            llm=mock_factory.create(),
-            bypass=custom_bypass,
-            use_env=True
-        )
+        manager = MemFlow(llm=mock_factory.create(), bypass=custom_bypass, use_env=True)
 
         # custom_bypass 가 유지되어야 함
         assert manager._bypass is custom_bypass
@@ -224,7 +228,9 @@ class TestMemFlowFromEnv:
 
     @patch("memflow.manager.LLMFactory")
     @patch("memflow.manager.PgVectorStore")
-    def test_from_env_with_pgvector_backend(self, mock_store_class, mock_factory, clean_env):
+    def test_from_env_with_pgvector_backend(
+        self, mock_store_class, mock_factory, clean_env
+    ):
         """Test initialization with use_env=True with pgvector backend."""
         mock_llm = MagicMock()
         mock_factory.create.return_value = mock_llm
@@ -259,7 +265,7 @@ class TestMemFlowFromEnv:
             "openai-compatible",
             model="gpt-4",
             api_base="http://vllm:8000/v1",
-            api_key="test-key"
+            api_key="test-key",
         )
 
 
@@ -351,7 +357,12 @@ class TestMemFlowChat:
         """Test chat with retrieved procedures."""
         store = EmulatedStore()
         # Add procedure with content that will match the search query
-        store.add(Procedure(title="How to deploy", content="1. Run deploy.sh to deploy the application"))
+        store.add(
+            Procedure(
+                title="How to deploy",
+                content="1. Run deploy.sh to deploy the application",
+            )
+        )
         # First call: intent classification -> SEARCH
         # Second call: chat response generation (SEARCH handler uses LLM for response)
         fake_llm.set_response('{"intents": ["SEARCH"], "primary": "SEARCH"}')
@@ -366,13 +377,17 @@ class TestMemFlowChat:
         # chat() returns dict with response key
         assert "response" in result
         # The SEARCH handler returns procedures text
-        assert "How to deploy" in result["response"] or "deploy.sh" in result["response"]
+        assert (
+            "How to deploy" in result["response"] or "deploy.sh" in result["response"]
+        )
         assert len(fake_llm.generate_calls) >= 1
 
     def test_chat_without_procedures(self, fake_llm):
         """Test chat when no procedures found."""
         store = EmulatedStore()
-        fake_llm.set_response('{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}')
+        fake_llm.set_response(
+            '{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}'
+        )
         manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         result = manager.chat("How to deploy?")
@@ -445,7 +460,9 @@ class TestMemFlowPlan:
 
         mock_plan = TaskPlan(
             task="Deploy",
-            steps=[Step(id="step-1", goal="Deploy", type=StepType.TOOL, tool_name="bash")]
+            steps=[
+                Step(id="step-1", goal="Deploy", type=StepType.TOOL, tool_name="bash")
+            ],
         )
         mock_planner_cls.return_value.plan.return_value = mock_plan
 
@@ -461,7 +478,9 @@ class TestMemFlowRun:
     @patch("memflow.manager.LLMPlanner")
     @patch("memflow.manager.ToolRegistry")
     @patch("memflow.manager.Learner")
-    def test_run_full_pipeline(self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm):
+    def test_run_full_pipeline(
+        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
+    ):
         """Test full run: plan -> execute -> learn."""
         fake_llm.set_response('{"type": "procedural"}')
         store = EmulatedStore()
@@ -470,16 +489,22 @@ class TestMemFlowRun:
         # Mock plan
         mock_plan = TaskPlan(
             task="Deploy",
-            steps=[Step(id="step-1", goal="Deploy", type=StepType.TOOL, tool_name="bash", args={"command": "./deploy.sh"})]
+            steps=[
+                Step(
+                    id="step-1",
+                    goal="Deploy",
+                    type=StepType.TOOL,
+                    tool_name="bash",
+                    args={"command": "./deploy.sh"},
+                )
+            ],
         )
         mock_planner_cls.return_value.plan.return_value = mock_plan
 
         # Mock executor
         mock_registry = MagicMock()
         mock_registry.execute_step.return_value = StepResult(
-            step_id="step-1",
-            success=True,
-            output="Deployed"
+            step_id="step-1", success=True, output="Deployed"
         )
         mock_registry_cls.return_value = mock_registry
 
@@ -499,7 +524,9 @@ class TestMemFlowRun:
     @patch("memflow.manager.LLMPlanner")
     @patch("memflow.manager.ToolRegistry")
     @patch("memflow.manager.Learner")
-    def test_run_with_custom_tools(self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm):
+    def test_run_with_custom_tools(
+        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
+    ):
         """Test run with custom tools."""
         fake_llm.set_response('{"type": "procedural"}')
         manager = MemFlow(llm=fake_llm, use_env=False)
@@ -521,7 +548,9 @@ class TestMemFlowRun:
     @patch("memflow.manager.LLMPlanner")
     @patch("memflow.manager.ToolRegistry")
     @patch("memflow.manager.Learner")
-    def test_run_stores_learned_procedure(self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm):
+    def test_run_stores_learned_procedure(
+        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
+    ):
         """Test that run stores the learned procedure."""
         store = EmulatedStore()
         manager = MemFlow(llm=fake_llm, store=store, use_env=False)
@@ -649,7 +678,9 @@ class TestMemFlowUtils:
     def test_classify_memory_type_via_chat(self, fake_llm):
         """Test memory type classification via chat() public API."""
         store = EmulatedStore()
-        fake_llm.set_response('{"type": "procedural", "title": "Test", "content": "1. Step"}')
+        fake_llm.set_response(
+            '{"type": "procedural", "title": "Test", "content": "1. Step"}'
+        )
         manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         # Chat should trigger auto-learn for procedural content
@@ -682,8 +713,7 @@ class TestLoadEnvFile:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "TEST_VAR=http://example.com # This is a comment\n",
-                encoding="utf-8"
+                "TEST_VAR=http://example.com # This is a comment\n", encoding="utf-8"
             )
 
             # Clear env var before test
@@ -697,10 +727,7 @@ class TestLoadEnvFile:
         """Test that quoted values preserve # character."""
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
-            env_file.write_text(
-                'QUOTED_HASH="value#with#hash"\n',
-                encoding="utf-8"
-            )
+            env_file.write_text('QUOTED_HASH="value#with#hash"\n', encoding="utf-8")
 
             os.environ.pop("QUOTED_HASH", None)
             _load_env_file(str(env_file))
@@ -712,8 +739,7 @@ class TestLoadEnvFile:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "SINGLE_QUOTED_HASH='another#value'\n",
-                encoding="utf-8"
+                "SINGLE_QUOTED_HASH='another#value'\n", encoding="utf-8"
             )
 
             os.environ.pop("SINGLE_QUOTED_HASH", None)
@@ -727,23 +753,24 @@ class TestLoadEnvFile:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
                 "PGVECTOR_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
-                encoding="utf-8"
+                encoding="utf-8",
             )
 
             os.environ.pop("PGVECTOR_EMBEDDING_API_BASE", None)
             _load_env_file(str(env_file))
 
-            assert os.environ.get("PGVECTOR_EMBEDDING_API_BASE") == "http://10.78.59.136:8001/v1"
+            assert (
+                os.environ.get("PGVECTOR_EMBEDDING_API_BASE")
+                == "http://10.78.59.136:8001/v1"
+            )
 
     def test_full_line_comment_ignored(self):
         """Test that full line comments are ignored."""
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "# This is a comment\n"
-                "VALID_VAR=value\n"
-                "# Another comment\n",
-                encoding="utf-8"
+                "# This is a comment\nVALID_VAR=value\n# Another comment\n",
+                encoding="utf-8",
             )
 
             os.environ.pop("VALID_VAR", None)
@@ -756,8 +783,7 @@ class TestLoadEnvFile:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "TEST_VAR=test_value   # comment after spaces\n",
-                encoding="utf-8"
+                "TEST_VAR=test_value   # comment after spaces\n", encoding="utf-8"
             )
 
             os.environ.pop("TEST_VAR", None)

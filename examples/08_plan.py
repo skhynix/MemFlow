@@ -35,10 +35,10 @@ TASK = "Plan a relaxing day off at home"
 
 def show_plan(label: str) -> None:
     task_plan = memflow.plan(TASK)
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {label}")
     print(f"  Task: {task_plan.task}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     if task_plan.context:
         print(f"  Context used: yes ({len(task_plan.context)} chars)")
     else:
@@ -61,16 +61,18 @@ show_plan("A. Cold start — no SOP in store")
 # B. Warm start — store a relevant SOP, then plan again
 # ---------------------------------------------------------------------------
 
-memflow.add(procedure=Procedure(
-    title="How to Have a Perfect Rest Day",
-    content=(
-        "1. Start with a light breakfast — fruit, yogurt, or toast.\n"
-        "2. Pick one enjoyable activity: reading, a movie, or a gentle walk.\n"
-        "3. Prepare your favorite snack or warm drink in the afternoon.\n"
-        "4. Take a short nap if you feel tired — 20 to 30 minutes is enough.\n"
-        "5. End with a relaxing bath or shower before bed."
-    ),
-    category="lifestyle",
-))
+memflow.add(
+    procedure=Procedure(
+        title="How to Have a Perfect Rest Day",
+        content=(
+            "1. Start with a light breakfast — fruit, yogurt, or toast.\n"
+            "2. Pick one enjoyable activity: reading, a movie, or a gentle walk.\n"
+            "3. Prepare your favorite snack or warm drink in the afternoon.\n"
+            "4. Take a short nap if you feel tired — 20 to 30 minutes is enough.\n"
+            "5. End with a relaxing bath or shower before bed."
+        ),
+        category="lifestyle",
+    )
+)
 
 show_plan("B. Warm start — SOP stored, planner has context")

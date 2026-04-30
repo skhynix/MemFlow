@@ -110,11 +110,17 @@ def seed_memflow_corpus(
     print("\n=== Seeding AgentInstruct Corpus ===")
 
     try:
-        loader = AgentInstructCorpusLoader(corpus_path=corpus_path) if corpus_path else AgentInstructCorpusLoader()
+        loader = (
+            AgentInstructCorpusLoader(corpus_path=corpus_path)
+            if corpus_path
+            else AgentInstructCorpusLoader()
+        )
     except FileNotFoundError as e:
         raise RuntimeError(f"Corpus path not found: {corpus_path}") from e
     except Exception as e:
-        raise RuntimeError(f"Failed to initialize AgentInstructCorpusLoader: {e}") from e
+        raise RuntimeError(
+            f"Failed to initialize AgentInstructCorpusLoader: {e}"
+        ) from e
 
     # procedural_memory_benchmark corpus loader API uses get_all_trajectories().
     # Keep a fallback for compatibility with older snapshots that exposed
@@ -159,7 +165,11 @@ def seed_memflow_corpus(
         proc = trajectory_to_procedure(traj, user_id=user_id)
         memflow.add(procedure=proc)
         if i % 10 == 0 or i == len(trajectory_map):
-            print(f"\r  Progress: {i}/{len(trajectory_map)} procedures", end="", flush=True)
+            print(
+                f"\r  Progress: {i}/{len(trajectory_map)} procedures",
+                end="",
+                flush=True,
+            )
 
     print()  # newline after loop
     print(f"Corpus seeding complete: {len(trajectory_map)} procedures\n")
@@ -198,12 +208,19 @@ class MemFlowRetrievalAdapter(RetrievalSystem):
             "llm_model": self.llm_model,
         }
 
-    def _to_retrieved_trajectory(self, traj_id: str, score: float) -> RetrievedTrajectory:
+    def _to_retrieved_trajectory(
+        self, traj_id: str, score: float
+    ) -> RetrievedTrajectory:
         traj = self.trajectory_map.get(traj_id)
         if traj is None:
             # Log warning for missing trajectory ID
             import warnings
-            warnings.warn(f"Retrieved trajectory ID '{traj_id}' not found in trajectory map", RuntimeWarning, stacklevel=2)
+
+            warnings.warn(
+                f"Retrieved trajectory ID '{traj_id}' not found in trajectory map",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             # Keep output shape consistent even if a store returns an ID that
             # is missing from the seeded trajectory map.
             return RetrievedTrajectory(

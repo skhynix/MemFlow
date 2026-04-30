@@ -74,7 +74,7 @@ class TestLLMPlanner:
 
         extra_tools = [
             {"name": "custom_tool", "description": "A custom tool"},
-            {"name": "another_tool", "description": "Another tool"}
+            {"name": "another_tool", "description": "Another tool"},
         ]
         planner = LLMPlanner(mock_llm, extra_tools=extra_tools)
         planner.plan("Test task")

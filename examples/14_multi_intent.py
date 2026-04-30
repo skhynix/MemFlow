@@ -40,10 +40,14 @@ message = "How do I restart a service in ubuntu?"
 print_labeled_text("\nUser:", message)
 
 result = memflow.chat(message, user_id="demo")
-print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
-for i, line in enumerate(result['response'].split('\n')):
+for i, line in enumerate(result["response"].split("\n")):
     if i < 10:
         print(f"    {line}")
     else:
@@ -64,14 +68,18 @@ How to check disk usage:
 3. Run: du -ah | sort -rh | head -20 to find largest files
 """
 print_labeled_text("\nUser:", "")
-for line in procedure.strip().split('\n'):
+for line in procedure.strip().split("\n"):
     print(f"    {line}")
 
 result = memflow.chat(procedure, user_id="demo")
-print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
-for line in result['response'].split('\n'):
+for line in result["response"].split("\n"):
     print(f"    {line}")
 
 
@@ -86,31 +94,45 @@ print_labeled_text("\nUser:", message)
 
 # Without allow_execute, should ask for confirmation
 result = memflow.chat(message, user_id="demo", allow_execute=False)
-print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"{Colors.YELLOW}Requires Confirmation:{Colors.RESET} {result.get('requires_confirmation', False)}")
+print(
+    f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"{Colors.YELLOW}Requires Confirmation:{Colors.RESET} {result.get('requires_confirmation', False)}"
+)
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
-for line in result['response'].split('\n'):
+for line in result["response"].split("\n"):
     print(f"    {line}")
 
 # Now with allow_execute=True
 print(f"\n{Colors.GREEN}User confirms: proceed with execution{Colors.RESET}")
 result = memflow.chat(message, user_id="demo", allow_execute=True)
-print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 
 # Show execution details
-if 'handler_results' in result and 'EXECUTE' in result['handler_results']:
-    exec_result = result['handler_results']['EXECUTE']
-    if 'data' in exec_result and 'result' in exec_result['data']:
-        run_result = exec_result['data']['result']
+if "handler_results" in result and "EXECUTE" in result["handler_results"]:
+    exec_result = result["handler_results"]["EXECUTE"]
+    if "data" in exec_result and "result" in exec_result["data"]:
+        run_result = exec_result["data"]["result"]
         print(f"\n{Colors.CYAN}Execution Details:{Colors.RESET}")
-        for i, (step, r) in enumerate(zip(run_result.plan.steps, run_result.step_results), 1):
-            status = f"{Colors.GREEN}✓{Colors.RESET}" if r.success else f"{Colors.RED}✗{Colors.RESET}"
+        for i, (step, r) in enumerate(
+            zip(run_result.plan.steps, run_result.step_results), 1
+        ):
+            status = (
+                f"{Colors.GREEN}✓{Colors.RESET}"
+                if r.success
+                else f"{Colors.RED}✗{Colors.RESET}"
+            )
             print(f"  {i}. {status} [{step.tool_name or 'llm'}] {step.goal}")
             if r.output:
-                output_preview = r.output.replace('\n', ' ')[:60]
+                output_preview = r.output.replace("\n", " ")[:60]
                 print(f"       Output: {output_preview}")
 
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
-for line in result['response'].split('\n'):
+for line in result["response"].split("\n"):
     print(f"    {line}")

@@ -46,6 +46,7 @@ memflow = MemFlow()
 # Custom tools
 # ---------------------------------------------------------------------------
 
+
 def write_file(filename: str, content: str) -> str:
     """Create a Python source file in the work directory."""
     path = WORK_DIR / filename
@@ -93,11 +94,12 @@ memflow._planner = LLMPlanner(
 # Helper: display a run result
 # ---------------------------------------------------------------------------
 
+
 def show_run(label: str, task: str, result) -> None:
-    print(f"\n{'='*62}")
+    print(f"\n{'=' * 62}")
     print(f"  {label}")
     print(f"  Task: {task}")
-    print(f"{'='*62}")
+    print(f"{'=' * 62}")
 
     if result.plan.context:
         print(f"  Stored SOP used: yes ({len(result.plan.context)} chars)\n")
@@ -123,7 +125,9 @@ def show_run(label: str, task: str, result) -> None:
             print(f"           ! {r.error[:80]}")
 
     if result.learned:
-        print(f"\n  Learned → stored: [{result.learned.category}] {result.learned.title}")
+        print(
+            f"\n  Learned → stored: [{result.learned.category}] {result.learned.title}"
+        )
     else:
         print("\n  Learned → nothing stored")
 
@@ -154,9 +158,9 @@ show_run("Run 2 — warm start", result2.plan.task, result2)
 # Final summary
 # ---------------------------------------------------------------------------
 
-print(f"\n{'='*62}")
+print(f"\n{'=' * 62}")
 print("  Summary")
-print(f"{'='*62}")
+print(f"{'=' * 62}")
 procs = memflow.store.list_all()
 print(f"  Procedures stored: {len(procs)}")
 for p in procs:

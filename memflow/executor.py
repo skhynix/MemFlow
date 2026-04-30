@@ -76,16 +76,20 @@ class ToolRegistry:
             output = fn(**step.args)
             return StepResult(step_id=step.id, success=True, output=str(output))
         except Exception as e:
-            return StepResult(step_id=step.id, success=False, output="", error=str(e), retryable=True)
+            return StepResult(
+                step_id=step.id, success=False, output="", error=str(e), retryable=True
+            )
 
 
 # ---------------------------------------------------------------------------
 # Built-in tool implementations
 # ---------------------------------------------------------------------------
 
+
 def _make_llm_tool(llm: BaseLLM) -> Callable[..., str]:
     def _llm_tool(prompt: str) -> str:
         return llm.generate([{"role": "user", "content": prompt}])
+
     return _llm_tool
 
 

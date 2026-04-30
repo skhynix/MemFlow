@@ -33,12 +33,10 @@ class TestLearner:
             goal="Deploy",
             type=StepType.TOOL,
             tool_name="bash",
-            args={"command": "./deploy.sh"}
+            args={"command": "./deploy.sh"},
         )
         successful_step.result = StepResult(
-            step_id="step-1",
-            success=True,
-            output="Deployment successful"
+            step_id="step-1", success=True, output="Deployment successful"
         )
 
         procedure = learner.extract("Deploy app", [successful_step], user_id="user1")
@@ -54,17 +52,10 @@ class TestLearner:
         learner = Learner(mock_llm)
 
         failed_step = Step(
-            id="step-1",
-            goal="Deploy",
-            type=StepType.TOOL,
-            tool_name="bash",
-            args={}
+            id="step-1", goal="Deploy", type=StepType.TOOL, tool_name="bash", args={}
         )
         failed_step.result = StepResult(
-            step_id="step-1",
-            success=False,
-            output="",
-            error="Command failed"
+            step_id="step-1", success=False, output="", error="Command failed"
         )
 
         procedure = learner.extract("Deploy app", [failed_step])
@@ -88,7 +79,9 @@ class TestLearner:
         step1 = Step(id="step-1", goal="Install", type=StepType.TOOL, tool_name="bash")
         step1.result = StepResult(step_id="step-1", success=True, output="Installed")
 
-        step2 = Step(id="step-2", goal="Configure", type=StepType.TOOL, tool_name="bash")
+        step2 = Step(
+            id="step-2", goal="Configure", type=StepType.TOOL, tool_name="bash"
+        )
         step2.result = StepResult(step_id="step-2", success=True, output="Configured")
 
         step3 = Step(id="step-3", goal="Deploy", type=StepType.TOOL, tool_name="bash")
@@ -103,11 +96,19 @@ class TestLearner:
         """Test extraction ignores failed steps."""
         learner = Learner(mock_llm)
 
-        success_step = Step(id="step-1", goal="Success step", type=StepType.TOOL, tool_name="bash")
-        success_step.result = StepResult(step_id="step-1", success=True, output="Success")
+        success_step = Step(
+            id="step-1", goal="Success step", type=StepType.TOOL, tool_name="bash"
+        )
+        success_step.result = StepResult(
+            step_id="step-1", success=True, output="Success"
+        )
 
-        fail_step = Step(id="step-2", goal="Fail step", type=StepType.TOOL, tool_name="bash")
-        fail_step.result = StepResult(step_id="step-2", success=False, output="", error="Failed")
+        fail_step = Step(
+            id="step-2", goal="Fail step", type=StepType.TOOL, tool_name="bash"
+        )
+        fail_step.result = StepResult(
+            step_id="step-2", success=False, output="", error="Failed"
+        )
 
         procedure = learner.extract("Mixed task", [success_step, fail_step])
 
@@ -177,12 +178,10 @@ class TestLearner:
             goal="Deploy step",
             type=StepType.TOOL,
             tool_name="bash",
-            args={}
+            args={},
         )
         step.result = StepResult(
-            step_id="step-1",
-            success=True,
-            output="Deployed successfully"
+            step_id="step-1", success=True, output="Deployed successfully"
         )
 
         learner.extract("Deploy task", [step])

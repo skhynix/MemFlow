@@ -18,16 +18,16 @@ class Colors:
 
 def print_header(text: str) -> None:
     """Print a bold header with separator lines."""
-    print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}")
     print(f"{Colors.BOLD}  {text}{Colors.RESET}")
-    print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}")
 
 
 def print_section(title: str) -> None:
     """Print a section title with cyan color."""
-    print(f"\n{Colors.BOLD}{'='*70}{Colors.RESET}")
+    print(f"\n{Colors.BOLD}{'=' * 70}{Colors.RESET}")
     print(f"{Colors.BOLD}  {title}{Colors.RESET}")
-    print(f"{Colors.BOLD}{'='*70}{Colors.RESET}")
+    print(f"{Colors.BOLD}{'=' * 70}{Colors.RESET}")
 
 
 def print_info(text: str) -> None:
@@ -66,7 +66,9 @@ def print_labeled_text(label: str, text: str, color: str = Colors.CYAN) -> None:
     print(f"{color}{label}{Colors.RESET} {text}")
 
 
-def print_step(index: int, goal: str, success: bool, output: str = None, error: str = None) -> None:
+def print_step(
+    index: int, goal: str, success: bool, output: str = None, error: str = None
+) -> None:
     """Print a step execution result.
 
     Args:
@@ -76,11 +78,13 @@ def print_step(index: int, goal: str, success: bool, output: str = None, error: 
         output: Optional output text (truncated to 60 chars)
         error: Optional error text
     """
-    status = f"{Colors.GREEN}✓{Colors.RESET}" if success else f"{Colors.RED}✗{Colors.RESET}"
+    status = (
+        f"{Colors.GREEN}✓{Colors.RESET}" if success else f"{Colors.RED}✗{Colors.RESET}"
+    )
     print(f"  {index}. {status} {goal}")
 
     if output:
-        output_preview = output.replace('\n', ' ')[:60]
+        output_preview = output.replace("\n", " ")[:60]
         print(f"       Output: {output_preview}")
 
     if error and not success:

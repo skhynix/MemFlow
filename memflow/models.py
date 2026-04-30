@@ -15,6 +15,7 @@ from datetime import datetime
 @dataclass
 class Procedure:
     """A stored procedural memory entry."""
+
     title: str
     content: str  # Markdown text with numbered steps
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -27,6 +28,7 @@ class Procedure:
 @dataclass
 class SearchResult:
     """A procedure retrieved from search with its relevance score."""
+
     procedure: Procedure
     score: float
 
@@ -35,12 +37,14 @@ class SearchResult:
 # Phase 3 — Plan / Execute / Learn
 # ---------------------------------------------------------------------------
 
+
 class StepType:
     """Step type: PLAN (sub-plan recursion) or TOOL (external call).
 
     Note: PLAN type is reserved for future hierarchical decomposition feature.
     Currently only TOOL type is implemented and used in Phase 3.
     """
+
     PLAN = "plan"  # TODO: Not yet implemented - reserved for future extension
     TOOL = "tool"
 
@@ -48,6 +52,7 @@ class StepType:
 @dataclass
 class StepResult:
     """Result of executing a single Step."""
+
     step_id: str
     success: bool
     output: str = ""
@@ -58,6 +63,7 @@ class StepResult:
 @dataclass
 class Step:
     """A single step in a TaskPlan with execution status tracking."""
+
     id: str
     goal: str
     type: str  # StepType.PLAN or StepType.TOOL
@@ -70,6 +76,7 @@ class Step:
 @dataclass
 class TaskPlan:
     """A decomposed task ready for execution."""
+
     task: str
     steps: list[Step]
     context: str = ""  # procedure content retrieved and used during planning
@@ -78,6 +85,7 @@ class TaskPlan:
 @dataclass
 class RunResult:
     """Aggregate result of executing a full TaskPlan."""
+
     plan: TaskPlan
     step_results: list[StepResult]
     learned: Procedure | None = None  # procedure extracted and stored after execution

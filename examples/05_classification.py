@@ -66,7 +66,7 @@ print("=" * 68)
 print("  2-Stage Pipeline (Classification + Extraction)")
 print("=" * 68)
 print(f"  {'Type':<22}  {'Stage 1':<12}  Action")
-print(f"  {'-'*22}  {'-'*12}  {'-'*30}")
+print(f"  {'-' * 22}  {'-' * 12}  {'-' * 30}")
 
 for label, content in inputs:
     result = memflow.add(messages=content, user_id="demo")

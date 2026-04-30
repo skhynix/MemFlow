@@ -33,7 +33,7 @@ def parse_json(text: str) -> dict:
         start = text.find("{")
         end = text.rfind("}")
         if start >= 0 and end > start:
-            json_str = text[start:end + 1]
+            json_str = text[start : end + 1]
             try:
                 return json.loads(json_str)
             except json.JSONDecodeError:
@@ -53,6 +53,7 @@ class OllamaLLM(BaseLLM):
         api_base: str = "http://localhost:11434",
     ) -> None:
         from ollama import Client
+
         self._client = Client(host=api_base)
         self._model = model
 
@@ -82,6 +83,7 @@ class OpenAICompatibleLLM(BaseLLM):
         api_key: str = "EMPTY",
     ) -> None:
         from openai import OpenAI
+
         self._client = OpenAI(base_url=api_base, api_key=api_key)
         self._model = model
 

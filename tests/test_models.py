@@ -36,7 +36,7 @@ class TestProcedure:
             user_id="user123",
             category="workflow",
             tags=["tag1", "tag2"],
-            created_at="2026-03-31T10:00:00"
+            created_at="2026-03-31T10:00:00",
         )
         assert proc.title == "Full Procedure"
         assert proc.content == "1. First\n2. Second"
@@ -70,7 +70,7 @@ class TestStepResult:
             success=False,
             output="",
             error="Error message",
-            retryable=False
+            retryable=False,
         )
         assert result.success is False
         assert result.error == "Error message"
@@ -82,7 +82,9 @@ class TestStep:
 
     def test_step_minimal(self):
         """Test creating a step with minimum fields."""
-        step = Step(id="step-123", goal="Run command", type=StepType.TOOL, tool_name="bash")
+        step = Step(
+            id="step-123", goal="Run command", type=StepType.TOOL, tool_name="bash"
+        )
         assert step.id == "step-123"
         assert step.goal == "Run command"
         assert step.type == StepType.TOOL
@@ -96,14 +98,14 @@ class TestStep:
         data = {
             "tool": "bash",
             "description": "Run a command",
-            "args": {"command": "echo hello"}
+            "args": {"command": "echo hello"},
         }
         step = Step(
             id="step-123",
             goal=data.get("description", ""),
             type=StepType.TOOL,
             tool_name=data.get("tool", "llm"),
-            args=data.get("args", {})
+            args=data.get("args", {}),
         )
         assert step.tool_name == "bash"
         assert step.goal == "Run a command"

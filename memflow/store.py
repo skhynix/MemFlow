@@ -280,6 +280,7 @@ class MemMachineBypass:
         with self._lock:
             if self._memory is None:
                 import memmachine_client as memmachine
+
                 kwargs: dict[str, Any] = {"base_url": self._base_url}
                 if self._api_key:
                     kwargs["api_key"] = self._api_key
@@ -348,6 +349,7 @@ class MemMachineStore(BaseStore):
         with self._lock:
             if self._memory is None:
                 import memmachine_client as memmachine
+
                 kwargs: dict[str, Any] = {"base_url": self._base_url}
                 if self._api_key:
                     kwargs["api_key"] = self._api_key
@@ -365,21 +367,25 @@ class MemMachineStore(BaseStore):
         for k, v in meta.items():
             if v is None:
                 continue
-            result[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, list) else str(v)
+            result[k] = (
+                json.dumps(v, ensure_ascii=False) if isinstance(v, list) else str(v)
+            )
         return result
 
     def _to_text(self, procedure: Procedure) -> str:
         return f"# {procedure.title}\n\n{procedure.content}"
 
     def _to_metadata(self, procedure: Procedure) -> dict:
-        return self._sanitize({
-            "mm_type": self._MM_TYPE,
-            "record_id": procedure.id,
-            "user_id": procedure.user_id,
-            "category": procedure.category,
-            "tags": procedure.tags,
-            "created_at": procedure.created_at,
-        })
+        return self._sanitize(
+            {
+                "mm_type": self._MM_TYPE,
+                "record_id": procedure.id,
+                "user_id": procedure.user_id,
+                "category": procedure.category,
+                "tags": procedure.tags,
+                "created_at": procedure.created_at,
+            }
+        )
 
     def _extract_episodes(self, raw: Any) -> list[Any]:
         """Extract episodes from SearchResult (both long-term and short-term)."""
@@ -550,7 +556,10 @@ class PgVectorStore(BaseStore):
     ) -> None:
         # Load from environment if not provided
         if base_url is None:
-            base_url = os.getenv("PGVECTOR_BASE_URL", "postgresql://pgvector:pgvector_password@localhost:5433/pgvector")
+            base_url = os.getenv(
+                "PGVECTOR_BASE_URL",
+                "postgresql://pgvector:pgvector_password@localhost:5433/pgvector",
+            )
         if emb_model is None:
             emb_model = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
         if emb_api_base is None:
@@ -591,7 +600,8 @@ class PgVectorStore(BaseStore):
                     register_vector(raw_conn)
 
                 # Create table with emb column
-                conn.execute(text(f"""
+                conn.execute(
+                    text(f"""
                     CREATE TABLE IF NOT EXISTS procedures (
                         id TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL DEFAULT 'default',
@@ -602,28 +612,35 @@ class PgVectorStore(BaseStore):
                         created_at TEXT NOT NULL,
                         emb vector({self._emb_dim})
                     )
-                """))
+                """)
+                )
 
                 # Add emb column if table exists but column is missing (migration)
-                conn.execute(text(f"""
+                conn.execute(
+                    text(f"""
                     ALTER TABLE procedures
                     ADD COLUMN IF NOT EXISTS emb vector({self._emb_dim})
-                """))
+                """)
+                )
 
                 # Create index for semantic search
                 # ivfflat: up to 2000 dimensions
                 # hnsw: also limited to 2000 dimensions in current pgvector
                 if self._emb_dim <= 2000:
-                    conn.execute(text("""
+                    conn.execute(
+                        text("""
                         CREATE INDEX IF NOT EXISTS idx_procedures_emb
                         ON procedures USING ivfflat (emb vector_cosine_ops)
-                    """))
+                    """)
+                    )
                 # Skip index creation for dimensions > 2000 (sequential scan will be used)
                 conn.commit()
 
             self._engine = engine
         except Exception as e:
-            raise RuntimeError(f"Failed to initialize PgVectorStore database: {e}") from e
+            raise RuntimeError(
+                f"Failed to initialize PgVectorStore database: {e}"
+            ) from e
 
     def _get_emb_config(self) -> dict:
         """Get embedding API configuration."""
@@ -663,7 +680,8 @@ class PgVectorStore(BaseStore):
                 "Embedding API request failed (%s: %s); falling back to "
                 "hash-based pseudo-embedding — search results will not be "
                 "semantically meaningful until the endpoint is reachable.",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
             emb = [0.0] * config["dim"]
             words = text.lower().split()
@@ -692,7 +710,8 @@ class PgVectorStore(BaseStore):
 
         with self._engine.connect() as conn:
             # Use CAST for the vector type - the ::vector syntax doesn't work with parameters
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 INSERT INTO procedures (id, user_id, title, content, category, tags, created_at, emb)
                 VALUES (:id, :user_id, :title, :content, :category, :tags, :created_at, CAST(:emb AS vector))
                 ON CONFLICT (id) DO UPDATE SET
@@ -703,16 +722,18 @@ class PgVectorStore(BaseStore):
                     tags = EXCLUDED.tags,
                     created_at = EXCLUDED.created_at,
                     emb = EXCLUDED.emb
-            """), {
-                "id": procedure.id,
-                "user_id": procedure.user_id,
-                "title": procedure.title,
-                "content": procedure.content,
-                "category": procedure.category,
-                "tags": json.dumps(procedure.tags),
-                "created_at": procedure.created_at,
-                "emb": emb_str,
-            })
+            """),
+                {
+                    "id": procedure.id,
+                    "user_id": procedure.user_id,
+                    "title": procedure.title,
+                    "content": procedure.content,
+                    "category": procedure.category,
+                    "tags": json.dumps(procedure.tags),
+                    "created_at": procedure.created_at,
+                    "emb": emb_str,
+                },
+            )
             conn.commit()
 
     def search(
@@ -770,10 +791,13 @@ class PgVectorStore(BaseStore):
     def get(self, id: str) -> Procedure | None:
         """Get a procedure by ID."""
         with self._engine.connect() as conn:
-            result = conn.execute(text("""
+            result = conn.execute(
+                text("""
                 SELECT id, user_id, title, content, category, tags, created_at
                 FROM procedures WHERE id = :id
-            """), {"id": id})
+            """),
+                {"id": id},
+            )
             row = result.fetchone()
 
         if row is None:
@@ -798,9 +822,12 @@ class PgVectorStore(BaseStore):
         """Delete a procedure by ID."""
         try:
             with self._engine.connect() as conn:
-                result = conn.execute(text("""
+                result = conn.execute(
+                    text("""
                     DELETE FROM procedures WHERE id = :id
-                """), {"id": id})
+                """),
+                    {"id": id},
+                )
                 conn.commit()
                 return result.rowcount > 0
         except Exception:
@@ -810,15 +837,20 @@ class PgVectorStore(BaseStore):
         """List all procedures."""
         with self._engine.connect() as conn:
             if user_id:
-                result = conn.execute(text("""
+                result = conn.execute(
+                    text("""
                     SELECT id, user_id, title, content, category, tags, created_at
                     FROM procedures WHERE user_id = :user_id
-                """), {"user_id": user_id})
+                """),
+                    {"user_id": user_id},
+                )
             else:
-                result = conn.execute(text("""
+                result = conn.execute(
+                    text("""
                     SELECT id, user_id, title, content, category, tags, created_at
                     FROM procedures
-                """))
+                """)
+                )
             rows = result.fetchall()
 
         procs = []
@@ -828,13 +860,15 @@ class PgVectorStore(BaseStore):
             except Exception:
                 tags = []
 
-            procs.append(Procedure(
-                id=row.id,
-                user_id=row.user_id,
-                title=row.title,
-                content=row.content,
-                category=row.category,
-                tags=tags,
-                created_at=row.created_at,
-            ))
+            procs.append(
+                Procedure(
+                    id=row.id,
+                    user_id=row.user_id,
+                    title=row.title,
+                    content=row.content,
+                    category=row.category,
+                    tags=tags,
+                    created_at=row.created_at,
+                )
+            )
         return procs

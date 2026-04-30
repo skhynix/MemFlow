@@ -114,7 +114,7 @@ print()
 print("=== 2. Semantic Search ===")
 
 queries = [
-    "I need a hot beverage",           # similar to "coffee" by meaning
+    "I need a hot beverage",  # similar to "coffee" by meaning
     "the application is not responding",  # similar to "restart a service"
 ]
 

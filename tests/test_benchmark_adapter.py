@@ -58,9 +58,16 @@ def adapter_module(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setitem(sys.modules, "memflow", memflow_mod)
     monkeypatch.setitem(sys.modules, "procedural_memory_benchmark", benchmark_mod)
-    monkeypatch.setitem(sys.modules, "procedural_memory_benchmark.agentinstruct", agentinstruct_mod)
+    monkeypatch.setitem(
+        sys.modules, "procedural_memory_benchmark.agentinstruct", agentinstruct_mod
+    )
 
-    adapter_path = Path(__file__).resolve().parents[1] / "benchmark" / "proced_mem_bench" / "adapter.py"
+    adapter_path = (
+        Path(__file__).resolve().parents[1]
+        / "benchmark"
+        / "proced_mem_bench"
+        / "adapter.py"
+    )
     module_name = "tests._proced_mem_bench_adapter"
     spec = importlib.util.spec_from_file_location(module_name, adapter_path)
     assert spec is not None and spec.loader is not None
@@ -101,7 +108,9 @@ def test_trajectory_to_procedure_formats_steps_attribute(adapter_module) -> None
     )
 
 
-def test_trajectory_to_procedure_formats_state_action_pairs_attribute(adapter_module) -> None:
+def test_trajectory_to_procedure_formats_state_action_pairs_attribute(
+    adapter_module,
+) -> None:
     traj = SimpleNamespace(
         task_instance_id="alfworld_0",
         task_description="find two laptop and put them in bed.",

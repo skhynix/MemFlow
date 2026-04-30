@@ -69,7 +69,7 @@ print(f"  Tool:   {step.tool_name}")
 print(f"  Status: {step.status}")
 
 # Execute the step
-result = memflow.execute(type('TaskPlan', (), {'steps': [step]})())
+result = memflow.execute(type("TaskPlan", (), {"steps": [step]})())
 if result:
     r = result[0]
     step.status = "done" if r.success else "failed"
@@ -92,8 +92,12 @@ print(f"""
 print_label("Test 1: CONVERSATION Intent")
 print_labeled_text("User:", "Hello! How are you?")
 result = memflow.chat("Hello! How are you?")
-print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
 
 # Test ADD intent
@@ -108,12 +112,16 @@ How to restart a service:
 4. Verify status: sudo systemctl status myservice
 """
 print_labeled_text("User:", "")
-for line in procedure_text.strip().split('\n'):
+for line in procedure_text.strip().split("\n"):
     print(f"    {line}")
 
 result = memflow.chat(procedure_text, user_id="demo")
-print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
 
 # Test SEARCH intent
@@ -121,11 +129,15 @@ print("\n")
 print_label("Test 3: SEARCH Intent")
 print_labeled_text("User:", "How do I restart a service?")
 result = memflow.chat("How do I restart a service?")
-print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"  {Colors.CYAN}Response:{Colors.RESET}")
 # Print the actual response text
-for line in result['response'].split('\n'):
+for line in result["response"].split("\n"):
     print(f"    {line}")
 
 # Test EXECUTE intent without confirmation
@@ -133,36 +145,52 @@ print("\n")
 print_label("Test 4: EXECUTE Intent (with Tool Calling Details)")
 print_labeled_text("User:", "Show me the current date")
 result = memflow.chat("Show me the current date", allow_execute=True)
-print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
-print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
+print(
+    f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}"
+)
+print(
+    f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}"
+)
 print(f"  {Colors.CYAN}Response:{Colors.RESET}")
-print(f"  {Colors.CYAN}Full Response:{Colors.RESET} {result['response'][:200] if result.get('response') else 'N/A'}...")
+print(
+    f"  {Colors.CYAN}Full Response:{Colors.RESET} {result['response'][:200] if result.get('response') else 'N/A'}..."
+)
 
 # Access execute result from handler_results
-if 'handler_results' in result and 'EXECUTE' in result['handler_results']:
-    exec_handler = result['handler_results']['EXECUTE']
-    if 'data' in exec_handler and 'result' in exec_handler['data']:
-        exec_result = exec_handler['data']['result']
+if "handler_results" in result and "EXECUTE" in result["handler_results"]:
+    exec_handler = result["handler_results"]["EXECUTE"]
+    if "data" in exec_handler and "result" in exec_handler["data"]:
+        exec_result = exec_handler["data"]["result"]
         success = sum(1 for r in exec_result.step_results if r.success)
 
         # Show tool calling details
         print(f"\n{Colors.CYAN}Tool Calling Details:{Colors.RESET}")
-        for i, (step, r) in enumerate(zip(exec_result.plan.steps, exec_result.step_results), 1):
-            status = f"{Colors.GREEN}✓{Colors.RESET}" if r.success else f"{Colors.RED}✗{Colors.RESET}"
+        for i, (step, r) in enumerate(
+            zip(exec_result.plan.steps, exec_result.step_results), 1
+        ):
+            status = (
+                f"{Colors.GREEN}✓{Colors.RESET}"
+                if r.success
+                else f"{Colors.RED}✗{Colors.RESET}"
+            )
             print(f"\n    {Colors.CYAN}Step {i}:{Colors.RESET} {step.goal}")
-            print(f"      {Colors.YELLOW}Tool:{Colors.RESET} [{step.type}] {step.tool_name or 'llm'}")
+            print(
+                f"      {Colors.YELLOW}Tool:{Colors.RESET} [{step.type}] {step.tool_name or 'llm'}"
+            )
             if step.args:
                 print(f"      {Colors.YELLOW}Args:{Colors.RESET}")
                 for key, value in step.args.items():
                     print(f"        {key}: {value}")
             print(f"      {Colors.YELLOW}Result:{Colors.RESET} {status}")
             if r.output:
-                output_preview = r.output.replace('\n', ' ')[:70]
+                output_preview = r.output.replace("\n", " ")[:70]
                 print(f"      {Colors.YELLOW}Output:{Colors.RESET} {output_preview}")
             if r.error and not r.success:
                 print(f"      {Colors.YELLOW}Error:{Colors.RESET} {r.error}")
 
-        print(f"\n    {Colors.GREEN}Summary:{Colors.RESET} {success}/{len(exec_result.step_results)} steps succeeded")
+        print(
+            f"\n    {Colors.GREEN}Summary:{Colors.RESET} {success}/{len(exec_result.step_results)} steps succeeded"
+        )
 
 # ---------------------------------------------------------------------------
 # Feature 3: Multi-stage Planning
@@ -184,7 +212,9 @@ result = memflow.run(TASK, user_id="demo", multi_stage=True)
 
 print_success("\nExecution Complete!")
 print(f"  Total steps: {len(result.plan.steps)}")
-print(f"  Success:     {sum(1 for r in result.step_results if r.success)}/{len(result.step_results)}")
+print(
+    f"  Success:     {sum(1 for r in result.step_results if r.success)}/{len(result.step_results)}"
+)
 
 if result.learned:
     print_success(f"  Learned: [{result.learned.category}] {result.learned.title}")
@@ -192,5 +222,10 @@ if result.learned:
 # Show step details
 print(f"\n{Colors.CYAN}Step Details:{Colors.RESET}")
 for i, (step, r) in enumerate(zip(result.plan.steps, result.step_results), 1):
-    print_step(i, f"[{step.tool_name or 'llm'}] {step.goal}", r.success, r.output if r.success else None, r.error if not r.success else None)
-
+    print_step(
+        i,
+        f"[{step.tool_name or 'llm'}] {step.goal}",
+        r.success,
+        r.output if r.success else None,
+        r.error if not r.success else None,
+    )

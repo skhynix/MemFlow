@@ -64,7 +64,7 @@ class TestToolRegistry:
             goal="Test echo",
             type=StepType.TOOL,
             tool_name="echo",
-            args={"message": "Hello"}
+            args={"message": "Hello"},
         )
         result = registry.execute_step(step)
 
@@ -80,7 +80,7 @@ class TestToolRegistry:
             goal="Test",
             type=StepType.TOOL,
             tool_name="unknown_tool",
-            args={}
+            args={},
         )
         result = registry.execute_step(step)
 
@@ -98,11 +98,7 @@ class TestToolRegistry:
         registry.register("failing", failing_tool)
 
         step = Step(
-            id="step-1",
-            goal="Test",
-            type=StepType.TOOL,
-            tool_name="failing",
-            args={}
+            id="step-1", goal="Test", type=StepType.TOOL, tool_name="failing", args={}
         )
         result = registry.execute_step(step)
 
@@ -123,11 +119,7 @@ class TestToolRegistry:
         registry.register("my_tool", replaced_tool)
 
         step = Step(
-            id="step-1",
-            goal="Test",
-            type=StepType.TOOL,
-            tool_name="my_tool",
-            args={}
+            id="step-1", goal="Test", type=StepType.TOOL, tool_name="my_tool", args={}
         )
         result = registry.execute_step(step)
 
@@ -143,7 +135,7 @@ class TestToolRegistry:
             goal="Ask question",
             type=StepType.TOOL,
             tool_name="llm",
-            args={"prompt": "What is X?"}
+            args={"prompt": "What is X?"},
         )
         result = registry.execute_step(step)
 
@@ -160,7 +152,7 @@ class TestToolRegistry:
             goal="Echo test",
             type=StepType.TOOL,
             tool_name="bash",
-            args={"command": "echo hello"}
+            args={"command": "echo hello"},
         )
         result = registry.execute_step(step)
 
@@ -176,7 +168,7 @@ class TestToolRegistry:
             goal="GET request",
             type=StepType.TOOL,
             tool_name="http",
-            args={"url": "https://example.com/api", "method": "GET"}
+            args={"url": "https://example.com/api", "method": "GET"},
         )
         result = registry.execute_step(step)
 
@@ -188,11 +180,7 @@ class TestToolRegistry:
         registry = ToolRegistry(llm=mock_llm)
 
         step = Step(
-            id="step-1",
-            goal="Sub-plan",
-            type=StepType.PLAN,
-            tool_name=None,
-            args={}
+            id="step-1", goal="Sub-plan", type=StepType.PLAN, tool_name=None, args={}
         )
         result = registry.execute_step(step)
 
@@ -241,14 +229,14 @@ class TestHttpTool:
         mock_urlopen_context.return_value.__enter__.return_value = mock_response
 
         result = _http_tool(
-            "https://example.com/api",
-            method="POST",
-            body='{"key": "value"}'
+            "https://example.com/api", method="POST", body='{"key": "value"}'
         )
 
         assert result == '{"status": "created"}'
 
-    def test_http_tool_default_method_is_get(self, mock_urlopen_context, mock_http_response):
+    def test_http_tool_default_method_is_get(
+        self, mock_urlopen_context, mock_http_response
+    ):
         """Test HTTP tool defaults to GET method."""
         mock_response = mock_http_response(b"OK")
         mock_urlopen_context.return_value.__enter__.return_value = mock_response
@@ -272,4 +260,6 @@ class TestMakeLlmTool:
         result = llm_tool(prompt="Test prompt")
 
         assert result == "Response text"
-        mock_llm.generate.assert_called_once_with([{"role": "user", "content": "Test prompt"}])
+        mock_llm.generate.assert_called_once_with(
+            [{"role": "user", "content": "Test prompt"}]
+        )

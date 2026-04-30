@@ -50,7 +50,10 @@ except (FileNotFoundError, OSError):
 
 print_header("Multi-Stage Planning with Reflect-and-Refine")
 print_labeled_text("Task:", TASK)
-print_labeled_text("Config:", "max_steps_per_iteration=1 (one step at a time)\n", Colors.YELLOW)
+print_labeled_text(
+    "Config:", "max_steps_per_iteration=1 (one step at a time)\n", Colors.YELLOW
+)
+
 
 def run(task, memflow, max_iterations=8):
     """
@@ -65,7 +68,9 @@ def run(task, memflow, max_iterations=8):
 
     while iteration < max_iterations:
         iteration += 1
-        print_labeled_text(f"  Iteration {iteration}/{max_iterations}:", "", Colors.CYAN)
+        print_labeled_text(
+            f"  Iteration {iteration}/{max_iterations}:", "", Colors.CYAN
+        )
 
         # Plan next step(s) using public plan() API with multi_stage=True
         if executed_steps:
@@ -87,7 +92,11 @@ def run(task, memflow, max_iterations=8):
         all_results.extend(results)
 
         for r in results:
-            status = f"{Colors.GREEN}✓{Colors.RESET} Done" if r.success else f"{Colors.RED}✗{Colors.RESET} Failed"
+            status = (
+                f"{Colors.GREEN}✓{Colors.RESET} Done"
+                if r.success
+                else f"{Colors.RED}✗{Colors.RESET} Failed"
+            )
             print(f"    {status}")
             if not r.success and r.error:
                 print(f"        {Colors.RED}Error: {r.error[:50]}{Colors.RESET}")
@@ -101,6 +110,7 @@ def run(task, memflow, max_iterations=8):
     # Learn from execution
     if memflow._learner is None:
         from memflow.learner import Learner
+
         memflow._learner = Learner(memflow.llm)
 
     learned = memflow._learner.extract(task, executed_steps, user_id="default")
@@ -108,8 +118,10 @@ def run(task, memflow, max_iterations=8):
         memflow.store.add(learned)
 
     from memflow.models import RunResult, TaskPlan
+
     merged = TaskPlan(task=task, steps=executed_steps, context="")
     return RunResult(plan=merged, step_results=all_results, learned=learned)
+
 
 # ---------------------------------------------------------------------------
 # Run: Multi-stage planning with learning
@@ -120,7 +132,7 @@ print(f"{Colors.BOLD}>>> Executing with multi-stage planning{Colors.RESET}\n")
 # Configure MemFlow for 1 step per iteration to show each planning cycle
 memflow = MemFlow(
     max_steps_per_iteration=1,  # Plan 1 step at a time
-    max_plan_iterations=8,       # Max 8 planning iterations
+    max_plan_iterations=8,  # Max 8 planning iterations
 )
 
 result = run(TASK, memflow, max_iterations=8)
