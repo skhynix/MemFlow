@@ -15,14 +15,15 @@ Run:
   uv run ./examples/12_multi_stage_plan.py
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlow
 from utils import Colors, print_header, print_labeled_text, print_success
+
+from memflow import MemFlow
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
@@ -74,7 +75,7 @@ def run(task, memflow, max_iterations=8):
             plan = memflow.plan(task, multi_stage=True)
 
         if not plan.steps:
-            print_success(f"    Task complete (no more steps)\n")
+            print_success("    Task complete (no more steps)\n")
             break
 
         for step in plan.steps:
@@ -93,7 +94,7 @@ def run(task, memflow, max_iterations=8):
 
         # Check completion
         if memflow._is_task_complete(task, executed_steps):
-            print_success(f"    Task verified complete\n")
+            print_success("    Task verified complete\n")
             break
         print()
 
@@ -106,7 +107,7 @@ def run(task, memflow, max_iterations=8):
     if learned:
         memflow.store.add(learned)
 
-    from memflow.models import TaskPlan, RunResult
+    from memflow.models import RunResult, TaskPlan
     merged = TaskPlan(task=task, steps=executed_steps, context="")
     return RunResult(plan=merged, step_results=all_results, learned=learned)
 

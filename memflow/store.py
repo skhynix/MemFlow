@@ -24,13 +24,11 @@ from typing import Any
 
 import httpx
 
-from memflow.models import Procedure, SearchResult
-
+# Register pgvector for proper vector type handling
+from pgvector.psycopg2 import register_vector
 from sqlalchemy import create_engine, text
 
-# Register pgvector for proper vector type handling
-import psycopg2
-from pgvector.psycopg2 import register_vector
+from memflow.models import Procedure, SearchResult
 
 logger = logging.getLogger(__name__)
 

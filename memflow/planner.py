@@ -16,10 +16,14 @@ Supports two planning modes:
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 from memflow.llm import BaseLLM, parse_json
-from memflow.models import TaskPlan, Step, StepType
+from memflow.models import Step, StepType, TaskPlan
 from memflow.prompts import PLANNING_PROMPT, REPLAN_PROMPT
+
+if TYPE_CHECKING:
+    from memflow.manager import PlanGuard
 
 # Default tool descriptions shown to the planner LLM.
 DEFAULT_TOOLS = [

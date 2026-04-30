@@ -7,10 +7,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from memflow import MemFlow, Procedure
-
 from procedural_memory_benchmark import RetrievalSystem, RetrievedTrajectory
 from procedural_memory_benchmark.agentinstruct import AgentInstructCorpusLoader
+
+from memflow import MemFlow, Procedure
 
 
 @dataclass

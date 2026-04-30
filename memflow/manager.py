@@ -23,10 +23,29 @@ from typing import Callable
 from memflow.executor import ToolRegistry
 from memflow.learner import Learner
 from memflow.llm import BaseLLM, LLMFactory, parse_json
-from memflow.models import Procedure, RunResult, SearchResult, TaskPlan, Step, StepResult
+from memflow.models import (
+    Procedure,
+    RunResult,
+    SearchResult,
+    Step,
+    StepResult,
+    TaskPlan,
+)
 from memflow.planner import LLMPlanner
-from memflow.prompts import CHAT_SYSTEM_PROMPT, CLASSIFICATION_PROMPT, EXTRACTION_PROMPT, INTENT_CLASSIFICATION_PROMPT
-from memflow.store import BaseStore, EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
+from memflow.prompts import (
+    CHAT_SYSTEM_PROMPT,
+    CLASSIFICATION_PROMPT,
+    EXTRACTION_PROMPT,
+    INTENT_CLASSIFICATION_PROMPT,
+)
+from memflow.store import (
+    BaseStore,
+    EmulatedStore,
+    FileStore,
+    MemMachineBypass,
+    MemMachineStore,
+    PgVectorStore,
+)
 
 
 def _load_env_file(env_path: str | None = None) -> None:
@@ -509,10 +528,6 @@ class MemFlow:
         """Handle CONVERSATION intent - respond naturally."""
         # Search for relevant context
         results = self.search(message, user_id=user_id, top_k=2)
-        procedures_text = "\n\n".join(
-            f"### {r.procedure.title}\n{r.procedure.content}"
-            for r in results
-        ) if results else "No relevant procedures found."
 
         response = self._generate_chat_response(message, results)
         return {"response": response, "intent": "CONVERSATION"}

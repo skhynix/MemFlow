@@ -3,7 +3,6 @@
 
 """Unit tests for MemFlow LLM components."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -178,7 +177,7 @@ class TestOpenAICompatibleLLM:
         with patch.dict("sys.modules", {"openai": mock_openai}):
             from memflow.llm import OpenAICompatibleLLM
 
-            llm = OpenAICompatibleLLM(model="test-model")
+            OpenAICompatibleLLM(model="test-model")
 
             mock_openai_class.assert_called_once()
             call_kwargs = mock_openai_class.call_args.kwargs
@@ -197,7 +196,7 @@ class TestOpenAICompatibleLLM:
         with patch.dict("sys.modules", {"openai": mock_openai}):
             from memflow.llm import OpenAICompatibleLLM
 
-            llm = OpenAICompatibleLLM(model="test-model", api_key="my-key")
+            OpenAICompatibleLLM(model="test-model", api_key="my-key")
 
             mock_openai_class.assert_called_once()
             call_kwargs = mock_openai_class.call_args.kwargs

@@ -48,9 +48,14 @@ except ImportError:
         sys.path.insert(0, str(REPO_ROOT))
     from memflow import MemFlow
 
-from benchmark.proced_mem_bench.adapter import MemFlowRetrievalAdapter, seed_memflow_corpus
-from benchmark.proced_mem_bench.evaluation import evaluate_gold_queries, load_gold_query_bank
-
+from benchmark.proced_mem_bench.adapter import (  # noqa: E402
+    MemFlowRetrievalAdapter,
+    seed_memflow_corpus,
+)
+from benchmark.proced_mem_bench.evaluation import (  # noqa: E402
+    evaluate_gold_queries,
+    load_gold_query_bank,
+)
 
 DEFAULT_TIERS = ["HARD", "MEDIUM", "EASY"]
 

@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
 from procedural_memory_benchmark.utils.paths import get_query_bank_path
-
 
 # Relevance threshold for binary relevance classification.
 # Queries with relevance_score >= this threshold are considered relevant.

@@ -3,8 +3,15 @@
 
 """Unit tests for MemFlow data models."""
 
-import pytest
-from memflow.models import Procedure, Step, StepResult, TaskPlan, RunResult, SearchResult, StepType
+from memflow.models import (
+    Procedure,
+    RunResult,
+    SearchResult,
+    Step,
+    StepResult,
+    StepType,
+    TaskPlan,
+)
 
 
 class TestProcedure:

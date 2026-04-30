@@ -3,11 +3,12 @@
 
 """Unit tests for MemFlow executor."""
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 from memflow.executor import ToolRegistry, _bash_tool, _http_tool, _make_llm_tool
-from memflow.models import Step, StepResult, StepType
+from memflow.models import Step, StepType
 
 
 class TestToolRegistry:

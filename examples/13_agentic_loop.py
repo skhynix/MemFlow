@@ -20,9 +20,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import (
+    Colors,
+    print_header,
+    print_label,
+    print_labeled_text,
+    print_section,
+    print_step,
+    print_success,
+)
+
 from memflow import MemFlow
 from memflow.models import Step, StepType
-from utils import Colors, print_header, print_section, print_labeled_text, print_label, print_step, print_success
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
@@ -88,7 +97,7 @@ print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', resu
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
 
 # Test ADD intent
-print(f"\n")
+print("\n")
 print_label("Test 2: ADD Intent (storing a procedure)")
 procedure_text = """
 Remember this procedure:
@@ -108,7 +117,7 @@ print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', resu
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
 
 # Test SEARCH intent
-print(f"\n")
+print("\n")
 print_label("Test 3: SEARCH Intent")
 print_labeled_text("User:", "How do I restart a service?")
 result = memflow.chat("How do I restart a service?")
@@ -120,7 +129,7 @@ for line in result['response'].split('\n'):
     print(f"    {line}")
 
 # Test EXECUTE intent without confirmation
-print(f"\n")
+print("\n")
 print_label("Test 4: EXECUTE Intent (with Tool Calling Details)")
 print_labeled_text("User:", "Show me the current date")
 result = memflow.chat("Show me the current date", allow_execute=True)
@@ -173,7 +182,7 @@ print(f"\n{Colors.CYAN}Executing with multi-stage planning...{Colors.RESET}\n")
 
 result = memflow.run(TASK, user_id="demo", multi_stage=True)
 
-print_success(f"\nExecution Complete!")
+print_success("\nExecution Complete!")
 print(f"  Total steps: {len(result.plan.steps)}")
 print(f"  Success:     {sum(1 for r in result.step_results if r.success)}/{len(result.step_results)}")
 

@@ -9,11 +9,18 @@ import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+
 from memflow.models import Procedure
-from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
+from memflow.store import (
+    EmulatedStore,
+    FileStore,
+    MemMachineBypass,
+    MemMachineStore,
+    PgVectorStore,
+)
 
 
 class TestEmulatedStore:
@@ -382,7 +389,7 @@ class TestPgVectorStore:
                 'PGVECTOR_EMBEDDING_API_BASE': 'http://test-api',
                 'PGVECTOR_EMBEDDING_DIMENSIONS': '2560'
             }):
-                store = PgVectorStore(base_url="postgresql://test:5432/testdb")
+                PgVectorStore(base_url="postgresql://test:5432/testdb")
 
             # Verify register_vector was called with raw_conn
             mock_register.assert_called_once_with(mock_raw_conn)

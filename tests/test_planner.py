@@ -3,11 +3,12 @@
 
 """Unit tests for MemFlow planner."""
 
-import pytest
 from unittest.mock import MagicMock
 
-from memflow.planner import LLMPlanner, DEFAULT_TOOLS
-from memflow.models import Step, TaskPlan, StepType
+import pytest
+
+from memflow.models import StepType, TaskPlan
+from memflow.planner import LLMPlanner
 
 
 class TestLLMPlanner:

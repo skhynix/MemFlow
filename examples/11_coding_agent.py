@@ -28,11 +28,10 @@ Run:
 """
 
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
-from memflow import MemFlow, LLMPlanner
+from memflow import LLMPlanner, MemFlow
 
 # ---------------------------------------------------------------------------
 # Work directory — all scripts are created here

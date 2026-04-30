@@ -15,13 +15,13 @@ Run:
 """
 
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlow
 from utils import Colors, print_header, print_labeled_text
+
+from memflow import MemFlow
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
@@ -37,7 +37,7 @@ print_header("Multi-Intent Chat Demo")
 print_header("Test 1: Single Intent (SEARCH)")
 
 message = "How do I restart a service in ubuntu?"
-print_labeled_text(f"\nUser:", message)
+print_labeled_text("\nUser:", message)
 
 result = memflow.chat(message, user_id="demo")
 print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
@@ -63,7 +63,7 @@ How to check disk usage:
 2. Run: du -sh * to see directory sizes
 3. Run: du -ah | sort -rh | head -20 to find largest files
 """
-print_labeled_text(f"\nUser:", "")
+print_labeled_text("\nUser:", "")
 for line in procedure.strip().split('\n'):
     print(f"    {line}")
 
@@ -82,7 +82,7 @@ for line in result['response'].split('\n'):
 print_header("Test 3: Multi-Intent (SEARCH + EXECUTE, requires confirmation)")
 
 message = "Find the disk usage procedure and run it for me"
-print_labeled_text(f"\nUser:", message)
+print_labeled_text("\nUser:", message)
 
 # Without allow_execute, should ask for confirmation
 result = memflow.chat(message, user_id="demo", allow_execute=False)

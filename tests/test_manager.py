@@ -6,13 +6,18 @@
 import os
 import tempfile
 from pathlib import Path
-
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from memflow.manager import MemFlow, _load_env_file
-from memflow.models import Procedure, Step, TaskPlan, StepResult, RunResult, StepType
-from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
+from memflow.models import Procedure, RunResult, Step, StepResult, StepType, TaskPlan
+from memflow.store import (
+    EmulatedStore,
+    FileStore,
+    MemMachineBypass,
+    MemMachineStore,
+)
 
 
 class TestMemFlowInit:
@@ -248,7 +253,7 @@ class TestMemFlowFromEnv:
         os.environ["LLM_API_BASE"] = "http://vllm:8000/v1"
         os.environ["LLM_API_KEY"] = "test-key"
 
-        manager = MemFlow(use_env=True)
+        MemFlow(use_env=True)
 
         mock_factory.create.assert_called_once_with(
             "openai-compatible",
@@ -406,7 +411,7 @@ class TestMemFlowPlan:
         mock_planner_cls.return_value.plan.return_value = mock_plan
 
         manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-        plan = manager.plan("deploy app")
+        assert manager.plan("deploy app") == mock_plan
 
         # Verify planner was called with context containing procedure
         mock_planner_cls.return_value.plan.assert_called_once()

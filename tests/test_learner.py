@@ -3,11 +3,12 @@
 
 """Unit tests for MemFlow learner."""
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
+
 from memflow.learner import Learner
-from memflow.models import Step, StepResult, Procedure, StepType
+from memflow.models import Step, StepResult, StepType
 
 
 class TestLearner:

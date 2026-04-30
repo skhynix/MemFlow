@@ -3,7 +3,11 @@
 
 """Procedural Memory Benchmark (Proced_mem_bench) for MemFlow."""
 
-from .adapter import MemFlowRetrievalAdapter, seed_memflow_corpus, trajectory_to_procedure
+from .adapter import (
+    MemFlowRetrievalAdapter,
+    seed_memflow_corpus,
+    trajectory_to_procedure,
+)
 from .evaluation import (
     GoldBenchmarkQuery,
     GoldBenchmarkResult,
