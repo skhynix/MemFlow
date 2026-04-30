@@ -16,7 +16,6 @@ Public API:
 from __future__ import annotations
 
 import os
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -853,15 +852,6 @@ class MemFlow:
     # internal helpers
     # ------------------------------------------------------------------
 
-    def _auto_learn_async(self, messages: list[dict], user_id: str) -> None:
-        # Keyword filter removed - always attempt extraction for async learning
-        thread = threading.Thread(
-            target=self._extract_and_store,
-            args=(messages, user_id),
-            daemon=True,
-        )
-        thread.start()
-
     def _classify_memory_type(self, content: str) -> str:
         """Stage 1: LLM classification — returns procedural/semantic/episodic/none."""
         messages = [
@@ -874,68 +864,6 @@ class MemFlow:
             return data.get("type", "procedural")
         except Exception:
             return "none"  # fall back to none on error (safe default)
-
-    def _validate_step_output(self, step: Step) -> bool:
-        """
-        Validate that a step result has meaningful output.
-        Returns False if output is empty or meaningless.
-
-        Special handling for file operations - if the command creates a file,
-        verify the file exists even if output is empty.
-        """
-        if step.result is None:
-            return False
-
-        if not step.result.success:
-            return True  # Don't validate failed steps
-
-        output = step.result.output.strip() if step.result.output else ""
-        command = step.args.get("command", "") if step.args else ""
-
-        # Empty output - check if it's a file/directory operation that succeeded
-        if not output:
-            if command:
-                import os
-                import re
-
-                # Directory creation commands (mkdir) - verify directory exists
-                if command.strip().startswith('mkdir '):
-                    parts = command.split()
-                    # Handle mkdir -p dirname or mkdir dirname
-                    dirnames = [p for p in parts if p != 'mkdir' and p != '-p']
-                    for dirname in dirnames:
-                        if os.path.isdir(dirname):
-                            return True
-
-                # Extract filename from common patterns
-                filename_match = re.search(r'>\s*(\S+)', command)
-                if filename_match:
-                    filename = filename_match.group(1)
-                    if os.path.exists(filename):
-                        # Verify file has content
-                        if os.path.getsize(filename) > 0:
-                            return True  # File was created with content
-
-                # Touch command
-                if command.strip().startswith('touch '):
-                    parts = command.split()
-                    if len(parts) > 1:
-                        filename = parts[-1]
-                        if os.path.exists(filename):
-                            return True
-
-            return False  # No output and no file/directory created
-
-        # Single character or very short output might be meaningless
-        if len(output) < 2:
-            return False
-
-        # Common meaningless outputs
-        meaningless_patterns = ["$", "%", "#", ">", "", " ", "\n"]
-        if output in meaningless_patterns:
-            return False
-
-        return True
 
     def _is_task_complete(self, task: str, steps: list[Step]) -> bool:
         """
