@@ -41,12 +41,12 @@ def _load_env_file(env_path: str | None = None) -> None:
     load_dotenv(dotenv_path=path, override=False)
 
 try:
-    from memflow import MemFlowManager
+    from memflow import MemFlow
 except ImportError:
     REPO_ROOT = Path(__file__).resolve().parent.parent
     if str(REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(REPO_ROOT))
-    from memflow import MemFlowManager
+    from memflow import MemFlow
 
 from benchmark.proced_mem_bench.adapter import MemFlowRetrievalAdapter, seed_memflow_corpus
 from benchmark.proced_mem_bench.evaluation import evaluate_gold_queries, load_gold_query_bank
@@ -146,19 +146,19 @@ def main() -> None:
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
     llm_model = os.environ.get("LLM_MODEL", "llama3.2")
 
-    manager = MemFlowManager()
+    memflow = MemFlow()
 
     start = time.perf_counter()
 
     trajectory_map = seed_memflow_corpus(
-        manager=manager,
+        memflow=memflow,
         user_id=args.user_id,
         corpus_path=args.corpus_path,
         clear_existing=args.clear_existing,
     )
 
     retrieval_system = MemFlowRetrievalAdapter(
-        manager=manager,
+        memflow=memflow,
         user_id=args.user_id,
         trajectory_map=trajectory_map,
         backend=backend,

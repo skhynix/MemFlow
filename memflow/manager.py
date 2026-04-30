@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-MemFlowManager — core orchestrator for MemFlow.
+MemFlow — core orchestrator for MemFlow.
 
 Public API:
   add(messages, procedure, user_id)  — store a procedure
@@ -122,7 +122,7 @@ class ToolGuard:
         return attempt < self.max_retry
 
 
-class MemFlowManager:
+class MemFlow:
     """
     Core orchestrator for MemFlow operations.
 

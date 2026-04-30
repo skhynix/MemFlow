@@ -7,12 +7,12 @@ This directory provides a thin benchmark harness that evaluates **MemFlow retrie
 The benchmark flow is intentionally narrow:
 
 1. Load AgentInstruct trajectories from the external `procedural_memory_benchmark` package.
-2. Ingest all trajectories into MemFlow using direct `Procedure` ingestion (`manager.add(procedure=...)`).
-3. Run retrieval using `MemFlowManager.search()`.
+2. Ingest all trajectories into MemFlow using direct `Procedure` ingestion (`memflow.add(procedure=...)`).
+3. Run retrieval using `MemFlow.search()`.
 4. Evaluate retrieved rankings against raw query-bank labels (`relevant_trajectories` + `relevance_score`).
 5. Print a console summary and save a JSON results file.
 
-## Why direct `procedure=` ingestion + `manager.search()`
+## Why direct `procedure=` ingestion + `memflow.search()`
 
 This path benchmarks MemFlow retrieval behavior directly and avoids conflating retrieval quality
 with LLM extraction/classification. No `messages=` ingestion path is used.

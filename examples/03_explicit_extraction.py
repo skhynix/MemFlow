@@ -20,10 +20,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager, Procedure
+from memflow import MemFlow, Procedure
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 print("=== 1. Explicit Store ===")
 print("Pass a ready-made Procedure object directly.\n")
@@ -34,7 +34,7 @@ proc = Procedure(
     user_id="alice",
     category="cooking",
 )
-manager.add(procedure=proc, user_id="alice")
+memflow.add(procedure=proc, user_id="alice")
 print(f"  [Stored] {proc.title}\n")
 
 print("=== 2. Explicit Extraction ===")
@@ -50,7 +50,7 @@ Step 3: Stop when water comes out.
 Step 4: Water weekly.
 """
 
-result = manager.add(messages=conversation, user_id="alice")
+result = memflow.add(messages=conversation, user_id="alice")
 if result.get("results"):
     for r in result["results"]:
         print(f"  [Extracted] {r['title']}")
@@ -60,4 +60,4 @@ else:
     print("  LLM found no procedure in the conversation")
 
 print()
-print(f"Total stored: {len(manager.store.list_all(user_id='alice'))}")
+print(f"Total stored: {len(memflow.store.list_all(user_id='alice'))}")

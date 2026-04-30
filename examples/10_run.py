@@ -26,10 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager
+from memflow import MemFlow
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 TASK = "Help me wind down and have a comfortable evening at home tonight"
 
@@ -38,7 +38,7 @@ TASK = "Help me wind down and have a comfortable evening at home tonight"
 # ---------------------------------------------------------------------------
 
 print(f"Task: {TASK}\n")
-result = manager.run(TASK)
+result = memflow.run(TASK)
 
 # ---------------------------------------------------------------------------
 # Show the plan
@@ -94,7 +94,7 @@ else:
 print(f"\n{'='*60}")
 print("  Learn → Retrieve back-edge")
 print(f"{'='*60}")
-hits = manager.search("how to relax in the evening")
+hits = memflow.search("how to relax in the evening")
 if hits:
     print(f"  search('how to relax in the evening') → {len(hits)} result(s)")
     for h in hits:

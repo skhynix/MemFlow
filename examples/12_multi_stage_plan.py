@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager
+from memflow import MemFlow
 from utils import Colors, print_header, print_labeled_text, print_success
 
 # NOTE: This example might not be executed as expected.
@@ -51,7 +51,7 @@ print_header("Multi-Stage Planning with Reflect-and-Refine")
 print_labeled_text("Task:", TASK)
 print_labeled_text("Config:", "max_steps_per_iteration=1 (one step at a time)\n", Colors.YELLOW)
 
-def run(task, manager, max_iterations=8):
+def run(task, memflow, max_iterations=8):
     """
     Run task with multi-stage planning, showing each iteration.
 
@@ -68,10 +68,10 @@ def run(task, manager, max_iterations=8):
 
         # Plan next step(s) using public plan() API with multi_stage=True
         if executed_steps:
-            plan = manager.plan(task, multi_stage=True, executed_steps=executed_steps)
+            plan = memflow.plan(task, multi_stage=True, executed_steps=executed_steps)
         else:
             # Initial planning
-            plan = manager.plan(task, multi_stage=True)
+            plan = memflow.plan(task, multi_stage=True)
 
         if not plan.steps:
             print_success(f"    Task complete (no more steps)\n")
@@ -81,7 +81,7 @@ def run(task, manager, max_iterations=8):
             print(f"    [{step.tool_name or 'llm'}] {step.goal}")
 
         # Execute using public execute() API
-        results = manager.execute(plan)
+        results = memflow.execute(plan)
         executed_steps.extend(plan.steps)
         all_results.extend(results)
 
@@ -92,19 +92,19 @@ def run(task, manager, max_iterations=8):
                 print(f"        {Colors.RED}Error: {r.error[:50]}{Colors.RESET}")
 
         # Check completion
-        if manager._is_task_complete(task, executed_steps):
+        if memflow._is_task_complete(task, executed_steps):
             print_success(f"    Task verified complete\n")
             break
         print()
 
     # Learn from execution
-    if manager._learner is None:
+    if memflow._learner is None:
         from memflow.learner import Learner
-        manager._learner = Learner(manager.llm)
+        memflow._learner = Learner(memflow.llm)
 
-    learned = manager._learner.extract(task, executed_steps, user_id="default")
+    learned = memflow._learner.extract(task, executed_steps, user_id="default")
     if learned:
-        manager.store.add(learned)
+        memflow.store.add(learned)
 
     from memflow.models import TaskPlan, RunResult
     merged = TaskPlan(task=task, steps=executed_steps, context="")
@@ -116,10 +116,10 @@ def run(task, manager, max_iterations=8):
 
 print(f"{Colors.BOLD}>>> Executing with multi-stage planning{Colors.RESET}\n")
 
-# Configure manager for 1 step per iteration to show each planning cycle
-manager = MemFlowManager(
+# Configure MemFlow for 1 step per iteration to show each planning cycle
+memflow = MemFlow(
     max_steps_per_iteration=1,  # Plan 1 step at a time
     max_plan_iterations=8,       # Max 8 planning iterations
 )
 
-result = run(TASK, manager, max_iterations=8)
+result = run(TASK, memflow, max_iterations=8)

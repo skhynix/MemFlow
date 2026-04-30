@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager, Procedure
+from memflow import MemFlow, Procedure
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 # --- Store ---
 proc = Procedure(
@@ -35,12 +35,12 @@ proc = Procedure(
     user_id="alice",
     category="cooking",
 )
-manager.add(procedure=proc, user_id="alice")
+memflow.add(procedure=proc, user_id="alice")
 print(f"[Stored] {proc.title}")
 print(f"{proc.content}\n")
 
 # --- Chat ---
 question = "How do I make coffee?"
 print(f"[Q] {question}")
-answer = manager.chat(question, user_id="alice")
+answer = memflow.chat(question, user_id="alice")
 print(f"[A] {answer}")

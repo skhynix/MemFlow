@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager, Procedure
+from memflow import MemFlow, Procedure
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 # --- Store two procedures ---
 procedures = [
@@ -50,7 +50,7 @@ procedures = [
 ]
 
 for proc in procedures:
-    manager.add(procedure=proc, user_id="alice")
+    memflow.add(procedure=proc, user_id="alice")
     print(f"[Stored] {proc.title}")
 print()
 
@@ -64,7 +64,7 @@ queries = [
 
 print("[Search]")
 for label, q in queries:
-    results = manager.search(q, user_id="alice")
+    results = memflow.search(q, user_id="alice")
     top = results[0] if results else None
     hit = f"score={top.score:.2f}  →  {top.procedure.title}" if top else "no result"
     print(f"  {label:8s}  '{q}'")

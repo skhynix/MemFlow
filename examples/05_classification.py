@@ -28,10 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager
+from memflow import MemFlow
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 # ---------------------------------------------------------------------------
 # Four inputs covering all memory types (including 'none' for conversational filler)
@@ -69,7 +69,7 @@ print(f"  {'Type':<22}  {'Stage 1':<12}  Action")
 print(f"  {'-'*22}  {'-'*12}  {'-'*30}")
 
 for label, content in inputs:
-    result = manager.add(messages=content, user_id="demo")
+    result = memflow.add(messages=content, user_id="demo")
 
     skipped = result.get("skipped", "")
     routed = result.get("routed_to", "")
@@ -89,4 +89,4 @@ for label, content in inputs:
     print(f"  {label:<22}  {stage1:<12}  {action}")
 
 print()
-print(f"Procedures stored: {len(manager.store.list_all())}")
+print(f"Procedures stored: {len(memflow.store.list_all())}")

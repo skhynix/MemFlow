@@ -252,7 +252,7 @@ class MemMachineBypass:
     """
     Write-only bridge that routes non-procedural content to MemMachine.
 
-    When MemFlowManager classifies content as semantic or episodic, it forwards
+    When MemFlow classifies content as semantic or episodic, it forwards
     the content here so MemMachine can store it in the appropriate backend
     (VectorDB for semantic, GraphDB for episodic).
 

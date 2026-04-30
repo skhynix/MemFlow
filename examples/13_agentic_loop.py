@@ -20,14 +20,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager
+from memflow import MemFlow
 from memflow.models import Step, StepType
 from utils import Colors, print_header, print_section, print_labeled_text, print_label, print_step, print_success
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 print_header("Agentic Loop using chat API()")
 
@@ -60,7 +60,7 @@ print(f"  Tool:   {step.tool_name}")
 print(f"  Status: {step.status}")
 
 # Execute the step
-result = manager.execute(type('TaskPlan', (), {'steps': [step]})())
+result = memflow.execute(type('TaskPlan', (), {'steps': [step]})())
 if result:
     r = result[0]
     step.status = "done" if r.success else "failed"
@@ -82,7 +82,7 @@ print(f"""
 # Test CONVERSATION intent
 print_label("Test 1: CONVERSATION Intent")
 print_labeled_text("User:", "Hello! How are you?")
-result = manager.chat("Hello! How are you?")
+result = memflow.chat("Hello! How are you?")
 print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
@@ -102,7 +102,7 @@ print_labeled_text("User:", "")
 for line in procedure_text.strip().split('\n'):
     print(f"    {line}")
 
-result = manager.chat(procedure_text, user_id="demo")
+result = memflow.chat(procedure_text, user_id="demo")
 print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
@@ -111,7 +111,7 @@ print(f"  {Colors.CYAN}Response:{Colors.RESET} {result['response']}")
 print(f"\n")
 print_label("Test 3: SEARCH Intent")
 print_labeled_text("User:", "How do I restart a service?")
-result = manager.chat("How do I restart a service?")
+result = memflow.chat("How do I restart a service?")
 print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"  {Colors.CYAN}Response:{Colors.RESET}")
@@ -123,7 +123,7 @@ for line in result['response'].split('\n'):
 print(f"\n")
 print_label("Test 4: EXECUTE Intent (with Tool Calling Details)")
 print_labeled_text("User:", "Show me the current date")
-result = manager.chat("Show me the current date", allow_execute=True)
+result = memflow.chat("Show me the current date", allow_execute=True)
 print(f"  {Colors.CYAN}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"  {Colors.CYAN}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"  {Colors.CYAN}Response:{Colors.RESET}")
@@ -171,7 +171,7 @@ TASK = "Create a file named 'demo.txt' with 'Hello World', then verify it exists
 print_labeled_text("Task:", TASK)
 print(f"\n{Colors.CYAN}Executing with multi-stage planning...{Colors.RESET}\n")
 
-result = manager.run(TASK, user_id="demo", multi_stage=True)
+result = memflow.run(TASK, user_id="demo", multi_stage=True)
 
 print_success(f"\nExecution Complete!")
 print(f"  Total steps: {len(result.plan.steps)}")

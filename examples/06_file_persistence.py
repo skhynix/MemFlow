@@ -7,14 +7,14 @@
 
 EmulatedStore keeps everything in RAM and loses data when the process exits.
 FileStore writes each procedure as a Markdown file so data persists across
-multiple MemFlowManager instances and process restarts.
+multiple MemFlow instances and process restarts.
 
 This example runs two independent sessions against the same data directory:
 
-  Session 1  Create a MemFlowManager backed by FileStore.
-             Store three procedures.  Exit the manager (object goes out of scope).
+  Session 1  Create a MemFlow backed by FileStore.
+             Store three procedures.  Exit the MemFlow instance.
 
-  Session 2  Create a brand-new MemFlowManager pointing at the same directory.
+  Session 2  Create a brand-new MemFlow pointing at the same directory.
              list_all() and search() both find the procedures from Session 1.
 
 The data directory is cleaned up at the end of the example.
@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import FileStore, MemFlowManager, Procedure
+from memflow import FileStore, MemFlow, Procedure
 
 file_dir = tempfile.mkdtemp(prefix="memflow_demo_")
 
@@ -42,7 +42,7 @@ try:
     print("=== Session 1 — store three procedures ===")
 
     # LLM loaded from .env, store explicitly provided
-    session1 = MemFlowManager(store=FileStore(file_dir=file_dir))
+    session1 = MemFlow(store=FileStore(file_dir=file_dir))
 
     procedures = [
         Procedure(
@@ -86,18 +86,18 @@ try:
     for f in files:
         print(f"    {f.name}")
 
-    # Discard the manager object — data lives only on disk from here on.
+    # Discard the MemFlow instance — data lives only on disk from here on.
     del session1
-    print("\n  Manager discarded (data lives on disk only)\n")
+    print("\n  MemFlow instance discarded (data lives on disk only)\n")
 
     # -----------------------------------------------------------------------
-    # Session 2 — new manager, same directory
+    # Session 2 — new MemFlow instance, same directory
     # -----------------------------------------------------------------------
 
-    print("=== Session 2 — new manager, same directory ===")
+    print("=== Session 2 — new MemFlow instance, same directory ===")
 
     # LLM loaded from .env, store explicitly provided
-    session2 = MemFlowManager(store=FileStore(file_dir=file_dir))
+    session2 = MemFlow(store=FileStore(file_dir=file_dir))
 
     all_procs = session2.store.list_all()
     print(f"\n  list_all() found {len(all_procs)} procedure(s):")

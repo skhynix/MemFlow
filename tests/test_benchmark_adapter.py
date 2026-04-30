@@ -26,11 +26,11 @@ def adapter_module(monkeypatch: pytest.MonkeyPatch):
         category: str = "general"
         tags: list[str] = field(default_factory=list)
 
-    class MemFlowManager:
+    class MemFlow:
         pass
 
     memflow_mod.Procedure = Procedure
-    memflow_mod.MemFlowManager = MemFlowManager
+    memflow_mod.MemFlow = MemFlow
 
     benchmark_mod = ModuleType("procedural_memory_benchmark")
 

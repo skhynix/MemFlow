@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager, MemMachineBypass, MemMachineStore, Procedure
+from memflow import MemFlow, MemMachineBypass, MemMachineStore, Procedure
 
 # ---------------------------------------------------------------------------
 # Check backend selection
@@ -70,7 +70,7 @@ except Exception as e:
     sys.exit(1)
 
 # LLM loaded from .env, store and bypass explicitly provided
-manager = MemFlowManager(store=store, bypass=bypass)
+memflow = MemFlow(store=store, bypass=bypass)
 
 # ---------------------------------------------------------------------------
 # 1. Store procedures (semantic vector search)
@@ -102,7 +102,7 @@ procedures = [
 ]
 
 for proc in procedures:
-    manager.add(procedure=proc)
+    memflow.add(procedure=proc)
     print(f"  [Stored in MemMachine] {proc.title}")
 
 print()
@@ -119,7 +119,7 @@ queries = [
 ]
 
 for q in queries:
-    results = manager.search(q, top_k=1)
+    results = memflow.search(q, top_k=1)
     top = results[0] if results else None
     hit = f"score={top.score:.3f}  →  {top.procedure.title}" if top else "no match"
     print(f"  Q: {q}")
@@ -153,7 +153,7 @@ inputs = [
 ]
 
 for label, content in inputs:
-    result = manager.add(messages=content)
+    result = memflow.add(messages=content)
     stored = result.get("results", [])
     skipped = result.get("skipped", "")
     routed = result.get("routed_to", "")
@@ -178,5 +178,5 @@ print("=== 4. Chat ===")
 
 q = "How do I fix a service that stopped working?"
 print(f"  Q: {q}")
-answer = manager.chat(q)
+answer = memflow.chat(q)
 print(f"  A: {answer[:300]}{'...' if len(answer) > 300 else ''}")

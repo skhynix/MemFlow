@@ -20,13 +20,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager
+from memflow import MemFlow
 from utils import Colors, print_header, print_labeled_text
 
 # NOTE: This example might not be executed as expected.
 #       Better model is recommended.
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 print_header("Multi-Intent Chat Demo")
 
@@ -39,7 +39,7 @@ print_header("Test 1: Single Intent (SEARCH)")
 message = "How do I restart a service in ubuntu?"
 print_labeled_text(f"\nUser:", message)
 
-result = manager.chat(message, user_id="demo")
+result = memflow.chat(message, user_id="demo")
 print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
@@ -67,7 +67,7 @@ print_labeled_text(f"\nUser:", "")
 for line in procedure.strip().split('\n'):
     print(f"    {line}")
 
-result = manager.chat(procedure, user_id="demo")
+result = memflow.chat(procedure, user_id="demo")
 print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
@@ -85,7 +85,7 @@ message = "Find the disk usage procedure and run it for me"
 print_labeled_text(f"\nUser:", message)
 
 # Without allow_execute, should ask for confirmation
-result = manager.chat(message, user_id="demo", allow_execute=False)
+result = memflow.chat(message, user_id="demo", allow_execute=False)
 print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"{Colors.YELLOW}Requires Confirmation:{Colors.RESET} {result.get('requires_confirmation', False)}")
 print(f"{Colors.CYAN}Response:{Colors.RESET}")
@@ -94,7 +94,7 @@ for line in result['response'].split('\n'):
 
 # Now with allow_execute=True
 print(f"\n{Colors.GREEN}User confirms: proceed with execution{Colors.RESET}")
-result = manager.chat(message, user_id="demo", allow_execute=True)
+result = memflow.chat(message, user_id="demo", allow_execute=True)
 print(f"\n{Colors.YELLOW}Intents:{Colors.RESET} {result.get('intents', [result.get('intent', 'N/A')])}")
 print(f"{Colors.YELLOW}Primary:{Colors.RESET} {result.get('primary_intent', result.get('intent', 'N/A'))}")
 

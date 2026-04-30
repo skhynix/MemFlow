@@ -32,7 +32,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from memflow import MemFlowManager, LLMPlanner
+from memflow import MemFlow, LLMPlanner
 
 # ---------------------------------------------------------------------------
 # Work directory — all scripts are created here
@@ -41,7 +41,7 @@ from memflow import MemFlowManager, LLMPlanner
 WORK_DIR = Path(tempfile.mkdtemp(prefix="memflow_agent_"))
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 # ---------------------------------------------------------------------------
 # Custom tools
@@ -70,8 +70,8 @@ def run_script(filename: str) -> str:
 CUSTOM_TOOLS = {"write_file": write_file, "run_script": run_script}
 
 # Register the custom tools with the planner so the LLM knows to use them.
-manager._planner = LLMPlanner(
-    manager.llm,
+memflow._planner = LLMPlanner(
+    memflow.llm,
     extra_tools=[
         {
             "name": "write_file",
@@ -133,7 +133,7 @@ def show_run(label: str, task: str, result) -> None:
 # Run 1 — cold start
 # ---------------------------------------------------------------------------
 
-result1 = manager.run(
+result1 = memflow.run(
     "Write a Python script called count.py that prints numbers 1 to 5, "
     "one per line, then run it.",
     tools=CUSTOM_TOOLS,
@@ -144,7 +144,7 @@ show_run("Run 1 — cold start", result1.plan.task, result1)
 # Run 2 — warm start (SOP from Run 1 is now in the store)
 # ---------------------------------------------------------------------------
 
-result2 = manager.run(
+result2 = memflow.run(
     "Write a Python script called times_table.py that prints the "
     "multiplication table for 3 (3×1 through 3×10), then run it.",
     tools=CUSTOM_TOOLS,
@@ -158,7 +158,7 @@ show_run("Run 2 — warm start", result2.plan.task, result2)
 print(f"\n{'='*62}")
 print("  Summary")
 print(f"{'='*62}")
-procs = manager.store.list_all()
+procs = memflow.store.list_all()
 print(f"  Procedures stored: {len(procs)}")
 for p in procs:
     print(f"    [{p.category}] {p.title}")

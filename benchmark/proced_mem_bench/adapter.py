@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from memflow import MemFlowManager, Procedure
+from memflow import MemFlow, Procedure
 
 from procedural_memory_benchmark import RetrievalSystem, RetrievedTrajectory
 from procedural_memory_benchmark.agentinstruct import AgentInstructCorpusLoader
@@ -92,7 +92,7 @@ def trajectory_to_procedure(traj: Any, user_id: str) -> Procedure:
         title=meta.task_description,
         # Content must carry only procedural trace.
         content=_format_steps_only(meta.steps),
-        # user_id must be set before manager.add(procedure=...) because stores
+        # user_id must be set before memflow.add(procedure=...) because stores
         # persist the Procedure object as-is.
         user_id=user_id,
         category="alfworld",
@@ -101,7 +101,7 @@ def trajectory_to_procedure(traj: Any, user_id: str) -> Procedure:
 
 
 def seed_memflow_corpus(
-    manager: MemFlowManager,
+    memflow: MemFlow,
     user_id: str,
     corpus_path: str | None = None,
     clear_existing: bool = True,
@@ -142,11 +142,11 @@ def seed_memflow_corpus(
         # This avoids deleting unrelated procedures from the same store.
         print("Clearing existing procedures...")
         try:
-            existing = manager.store.list_all(user_id=user_id)
+            existing = memflow.store.list_all(user_id=user_id)
             deleted_count = 0
             for proc in existing:
                 if proc.id in corpus_ids:
-                    manager.store.delete(proc.id)
+                    memflow.store.delete(proc.id)
                     deleted_count += 1
             print(f"  Deleted {deleted_count} existing procedures")
         except Exception as e:
@@ -157,7 +157,7 @@ def seed_memflow_corpus(
         if not tid:
             continue
         proc = trajectory_to_procedure(traj, user_id=user_id)
-        manager.add(procedure=proc)
+        memflow.add(procedure=proc)
         if i % 10 == 0 or i == len(trajectory_map):
             print(f"\r  Progress: {i}/{len(trajectory_map)} procedures", end="", flush=True)
 
@@ -167,18 +167,18 @@ def seed_memflow_corpus(
 
 
 class MemFlowRetrievalAdapter(RetrievalSystem):
-    """RetrievalSystem adapter that uses MemFlowManager.search()."""
+    """RetrievalSystem adapter that uses MemFlow.search()."""
 
     def __init__(
         self,
-        manager: MemFlowManager,
+        memflow: MemFlow,
         user_id: str,
         trajectory_map: dict[str, Any],
         backend: str,
         llm_provider: str,
         llm_model: str,
     ) -> None:
-        self.manager = manager
+        self.memflow = memflow
         self.user_id = user_id
         self.trajectory_map = trajectory_map
         self.backend = backend
@@ -186,11 +186,11 @@ class MemFlowRetrievalAdapter(RetrievalSystem):
         self.llm_model = llm_model
 
     def get_system_name(self) -> str:
-        return "memflow_manager_search"
+        return "memflow_search"
 
     def get_system_info(self) -> dict[str, Any]:
         return {
-            "method": "memflow_manager.search",
+            "method": "memflow.search",
             "backend": self.backend,
             "user_id": self.user_id,
             "corpus_size": len(self.trajectory_map),
@@ -226,8 +226,8 @@ class MemFlowRetrievalAdapter(RetrievalSystem):
         )
 
     def retrieve(self, query: str, k: int = 5) -> list[RetrievedTrajectory]:
-        # Required benchmark path: use MemFlowManager.search directly.
-        search_results = self.manager.search(query, user_id=self.user_id, top_k=k)
+        # Required benchmark path: use MemFlow.search directly.
+        search_results = self.memflow.search(query, user_id=self.user_id, top_k=k)
         return [
             self._to_retrieved_trajectory(
                 result.procedure.id,

@@ -1,7 +1,7 @@
 # Copyright 2026 SK hynix Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for MemFlowManager."""
+"""Unit tests for MemFlow."""
 
 import os
 import tempfile
@@ -10,42 +10,42 @@ from pathlib import Path
 import pytest
 from unittest.mock import MagicMock, patch
 
-from memflow.manager import MemFlowManager, _load_env_file
+from memflow.manager import MemFlow, _load_env_file
 from memflow.models import Procedure, Step, TaskPlan, StepResult, RunResult, StepType
 from memflow.store import EmulatedStore, FileStore, MemMachineStore, MemMachineBypass, PgVectorStore
 
 
-class TestMemFlowManagerInit:
-    """Tests for MemFlowManager initialization."""
+class TestMemFlowInit:
+    """Tests for MemFlow initialization."""
 
     def test_init_with_llm_and_store(self, fake_llm):
         """Test initialization with LLM and store."""
         store = EmulatedStore()
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         assert manager.llm == fake_llm
         assert manager.store == store
 
     def test_init_with_llm_only(self, fake_llm):
         """Test initialization creates default EmulatedStore."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         assert isinstance(manager.store, EmulatedStore)
 
     def test_init_without_llm_and_use_env_false_should_fail(self):
         """Test that initializing without LLM and use_env=False raises error."""
         with pytest.raises(ValueError, match="LLM must be provided"):
-            MemFlowManager(use_env=False)
+            MemFlow(use_env=False)
 
     def test_init_with_llm_only_and_use_env_false(self, fake_llm):
         """Test that store defaults to EmulatedStore when not provided."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
         assert isinstance(manager.store, EmulatedStore)
 
     def test_init_with_bypass(self, fake_llm):
         """Test initialization with bypass."""
         bypass = MemMachineBypass()
-        manager = MemFlowManager(llm=fake_llm, bypass=bypass, use_env=False)
+        manager = MemFlow(llm=fake_llm, bypass=bypass, use_env=False)
 
         # Note: No public getter for bypass, so we verify it was accepted
         # by checking the manager was created successfully with bypass
@@ -54,7 +54,7 @@ class TestMemFlowManagerInit:
 
     def test_planner_lazy_initialization(self, fake_llm):
         """Test that planner is lazily initialized on first use."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Trigger planner creation by calling plan() with mocked LLMPlanner
         with patch("memflow.manager.LLMPlanner") as mock_planner_cls:
@@ -69,7 +69,7 @@ class TestMemFlowManagerInit:
 
     def test_executor_lazy_initialization(self, fake_llm):
         """Test that executor is lazily initialized on first use."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Trigger executor creation by calling run() with mocked dependencies
         with patch("memflow.manager.LLMPlanner"), \
@@ -88,7 +88,7 @@ class TestMemFlowManagerInit:
 
     def test_learner_lazy_initialization(self, fake_llm):
         """Test that learner is lazily initialized on first use."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Trigger learner creation by calling run() with mocked dependencies
         with patch("memflow.manager.LLMPlanner"), \
@@ -109,8 +109,8 @@ class TestMemFlowManagerInit:
         assert isinstance(result, RunResult)
 
 
-class TestMemFlowManagerFromEnv:
-    """Tests for MemFlowManager.from_env() - now via use_env=True."""
+class TestMemFlowFromEnv:
+    """Tests for MemFlow.from_env() - now via use_env=True."""
 
     @patch("memflow.manager.LLMFactory")
     def test_explicit_llm_takes_priority_over_env(self, mock_factory, clean_env):
@@ -119,7 +119,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["LLM_MODEL"] = "env-model"
 
         custom_llm = MagicMock()
-        manager = MemFlowManager(llm=custom_llm, use_env=True)
+        manager = MemFlow(llm=custom_llm, use_env=True)
 
         # LLMFactory.create 가 호출되지 않아야 함 (명시적 LLM 사용)
         mock_factory.create.assert_not_called()
@@ -131,7 +131,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["MEMFLOW_BACKEND"] = "file"
 
         custom_store = MemMachineStore(base_url="http://custom", org_id="org", project_id="proj")
-        manager = MemFlowManager(llm=mock_factory.create(), store=custom_store, use_env=True)
+        manager = MemFlow(llm=mock_factory.create(), store=custom_store, use_env=True)
 
         # custom_store 가 유지되어야 함
         assert manager.store is custom_store
@@ -142,7 +142,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["MEMFLOW_BACKEND"] = "memmachine"
 
         custom_bypass = MemMachineBypass(base_url="http://custom")
-        manager = MemFlowManager(
+        manager = MemFlow(
             llm=mock_factory.create(),
             bypass=custom_bypass,
             use_env=True
@@ -155,7 +155,7 @@ class TestMemFlowManagerFromEnv:
     def test_backend_inferred_from_explicit_store(self, mock_factory, clean_env):
         """Test that backend is inferred from explicitly provided store type."""
         mock_store = MagicMock()
-        manager = MemFlowManager(llm=mock_factory.create(), store=mock_store, use_env=False)
+        manager = MemFlow(llm=mock_factory.create(), store=mock_store, use_env=False)
         # internal logic verification - store 가 그대로 유지되어야 함
         assert manager.store is mock_store
 
@@ -165,7 +165,7 @@ class TestMemFlowManagerFromEnv:
         mock_llm = MagicMock()
         mock_factory.create.return_value = mock_llm
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         # Verify LLMFactory.create was called with ollama provider
         mock_factory.create.assert_called_once()
@@ -183,7 +183,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["LLM_PROVIDER"] = "ollama"
         os.environ["LLM_MODEL"] = "llama3.2"
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         assert isinstance(manager.store, EmulatedStore)
 
@@ -196,7 +196,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["MEMFLOW_BACKEND"] = "file"
         os.environ["MEMFLOW_FILE_DIR"] = "/tmp/test_data"
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         assert isinstance(manager.store, FileStore)
 
@@ -211,7 +211,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["MEMMACHINE_ORG_ID"] = "test-org"
         os.environ["MEMMACHINE_PROJECT"] = "test-project"
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         assert isinstance(manager.store, MemMachineStore)
         # Note: No public getter for bypass, verify manager was created successfully
@@ -232,7 +232,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["PGVECTOR_EMBEDDING_API_BASE"] = "http://test-api:8000/v1"
         os.environ["PGVECTOR_EMBEDDING_DIMENSIONS"] = "2560"
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         mock_store_class.assert_called_once()
         assert manager.store == mock_store
@@ -248,7 +248,7 @@ class TestMemFlowManagerFromEnv:
         os.environ["LLM_API_BASE"] = "http://vllm:8000/v1"
         os.environ["LLM_API_KEY"] = "test-key"
 
-        manager = MemFlowManager(use_env=True)
+        manager = MemFlow(use_env=True)
 
         mock_factory.create.assert_called_once_with(
             "openai-compatible",
@@ -258,12 +258,12 @@ class TestMemFlowManagerFromEnv:
         )
 
 
-class TestMemFlowManagerAdd:
-    """Tests for MemFlowManager.add()."""
+class TestMemFlowAdd:
+    """Tests for MemFlow.add()."""
 
     def test_add_procedure_direct(self, fake_llm):
         """Test adding a procedure directly."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
         proc = Procedure(title="Test", content="1. Step")
 
         result = manager.add(procedure=proc)
@@ -274,14 +274,14 @@ class TestMemFlowManagerAdd:
 
     def test_add_procedure_requires_either_messages_or_procedure(self, fake_llm):
         """Test that add requires either messages or procedure."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         with pytest.raises(ValueError, match="Either 'messages' or 'procedure'"):
             manager.add()
 
     def test_add_with_string_messages_keyword_detection(self, fake_llm):
         """Test add with string messages - classification is now LLM-based."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Set LLM to classify as "none" (non-procedural)
         fake_llm.set_response('{"type": "none"}')
@@ -292,7 +292,7 @@ class TestMemFlowManagerAdd:
 
     def test_add_with_procedural_keywords(self, fake_llm):
         """Test add with procedural keywords triggers extraction."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # LLM will classify as procedural and extract
         result = manager.add(messages="how to deploy step 1 step 2")
@@ -301,14 +301,14 @@ class TestMemFlowManagerAdd:
         assert "results" in result
 
 
-class TestMemFlowManagerSearch:
-    """Tests for MemFlowManager.search()."""
+class TestMemFlowSearch:
+    """Tests for MemFlow.search()."""
 
     def test_search_delegates_to_store(self, fake_llm):
         """Test that search delegates to store."""
         store = EmulatedStore()
         store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         results = manager.search("deploy")
 
@@ -320,7 +320,7 @@ class TestMemFlowManagerSearch:
         store = EmulatedStore()
         store.add(Procedure(title="User1 deploy", content="1. Deploy", user_id="user1"))
         store.add(Procedure(title="User2 deploy", content="1. Deploy", user_id="user2"))
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         results = manager.search("deploy", user_id="user1")
 
@@ -332,15 +332,15 @@ class TestMemFlowManagerSearch:
         store = EmulatedStore()
         for i in range(10):
             store.add(Procedure(title=f"Deploy {i}", content=f"1. Deploy {i}"))
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         results = manager.search("deploy", top_k=3)
 
         assert len(results) == 3
 
 
-class TestMemFlowManagerChat:
-    """Tests for MemFlowManager.chat()."""
+class TestMemFlowChat:
+    """Tests for MemFlow.chat()."""
 
     def test_chat_with_procedures(self, fake_llm):
         """Test chat with retrieved procedures."""
@@ -350,7 +350,7 @@ class TestMemFlowManagerChat:
         # First call: intent classification -> SEARCH
         # Second call: chat response generation (SEARCH handler uses LLM for response)
         fake_llm.set_response('{"intents": ["SEARCH"], "primary": "SEARCH"}')
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         # First verify search works directly
         search_results = manager.search("How to deploy?")
@@ -368,7 +368,7 @@ class TestMemFlowManagerChat:
         """Test chat when no procedures found."""
         store = EmulatedStore()
         fake_llm.set_response('{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}')
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         result = manager.chat("How to deploy?")
 
@@ -382,7 +382,7 @@ class TestMemFlowManagerChat:
         # Configure LLM to respond to intent classification and extraction
         # First call: intent classification, Second call: extraction
         fake_llm.response = '{"intents": ["ADD"], "primary": "ADD"}'
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         result = manager.chat("Test query")
 
@@ -392,8 +392,8 @@ class TestMemFlowManagerChat:
         assert "ADD" in result.get("handler_results", {})
 
 
-class TestMemFlowManagerPlan:
-    """Tests for MemFlowManager.plan()."""
+class TestMemFlowPlan:
+    """Tests for MemFlow.plan()."""
 
     @patch("memflow.manager.LLMPlanner")
     def test_plan_retrieves_context(self, mock_planner_cls, fake_llm):
@@ -405,7 +405,7 @@ class TestMemFlowManagerPlan:
         mock_plan = TaskPlan(task="Deploy", steps=[])
         mock_planner_cls.return_value.plan.return_value = mock_plan
 
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
         plan = manager.plan("deploy app")
 
         # Verify planner was called with context containing procedure
@@ -420,7 +420,7 @@ class TestMemFlowManagerPlan:
     def test_plan_creates_planner_if_needed(self, mock_planner_cls, fake_llm):
         """Test that plan creates planner if not exists."""
         fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         mock_plan = TaskPlan(task="Test", steps=[])
         mock_planner_cls.return_value.plan.return_value = mock_plan
@@ -436,7 +436,7 @@ class TestMemFlowManagerPlan:
     def test_plan_returns_task_plan(self, mock_planner_cls, fake_llm):
         """Test that plan returns TaskPlan."""
         fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         mock_plan = TaskPlan(
             task="Deploy",
@@ -450,8 +450,8 @@ class TestMemFlowManagerPlan:
         assert plan.task == "Deploy"
 
 
-class TestMemFlowManagerRun:
-    """Tests for MemFlowManager.run()."""
+class TestMemFlowRun:
+    """Tests for MemFlow.run()."""
 
     @patch("memflow.manager.LLMPlanner")
     @patch("memflow.manager.ToolRegistry")
@@ -460,7 +460,7 @@ class TestMemFlowManagerRun:
         """Test full run: plan -> execute -> learn."""
         fake_llm.set_response('{"type": "procedural"}')
         store = EmulatedStore()
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         # Mock plan
         mock_plan = TaskPlan(
@@ -497,7 +497,7 @@ class TestMemFlowManagerRun:
     def test_run_with_custom_tools(self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm):
         """Test run with custom tools."""
         fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         mock_plan = TaskPlan(task="Test", steps=[])
         mock_planner_cls.return_value.plan.return_value = mock_plan
@@ -519,7 +519,7 @@ class TestMemFlowManagerRun:
     def test_run_stores_learned_procedure(self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm):
         """Test that run stores the learned procedure."""
         store = EmulatedStore()
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         mock_plan = TaskPlan(task="Test", steps=[])
         mock_planner_cls.return_value.plan.return_value = mock_plan
@@ -542,7 +542,7 @@ class TestMemFlowManagerRun:
 
     def test_run_scopes_global_guard_to_single_call(self, fake_llm):
         """Test cycle detection state does not leak across run() calls."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         first_failed_step = Step(
             id="step-1",
@@ -583,7 +583,7 @@ class TestMemFlowManagerRun:
 
     def test_run_replans_failed_step_with_history(self, fake_llm):
         """Test failed steps are replanned through the replan path."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         failed_step = Step(
             id="step-1",
@@ -617,12 +617,12 @@ class TestMemFlowManagerRun:
         assert replan_call.kwargs["executed_steps"] == [failed_step]
 
 
-class TestMemFlowManagerUtils:
-    """Tests for MemFlowManager utility methods via public API."""
+class TestMemFlowUtils:
+    """Tests for MemFlow utility methods via public API."""
 
     def test_add_detects_procedural_keywords(self, fake_llm):
         """Test that add() detects procedural keywords and triggers extraction."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # When input contains procedural keywords, extraction should be attempted
         result = manager.add(messages="how to deploy step by step")
@@ -632,7 +632,7 @@ class TestMemFlowManagerUtils:
 
     def test_add_skips_non_procedural_content(self, fake_llm):
         """Test that add() skips content classified as non-procedural."""
-        manager = MemFlowManager(llm=fake_llm, use_env=False)
+        manager = MemFlow(llm=fake_llm, use_env=False)
 
         # Set LLM to classify as "none" (non-procedural)
         fake_llm.set_response('{"type": "none"}')
@@ -645,7 +645,7 @@ class TestMemFlowManagerUtils:
         """Test memory type classification via chat() public API."""
         store = EmulatedStore()
         fake_llm.set_response('{"type": "procedural", "title": "Test", "content": "1. Step"}')
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         # Chat should trigger auto-learn for procedural content
         manager.chat("how to deploy step by step")
@@ -657,7 +657,7 @@ class TestMemFlowManagerUtils:
         """Test classification falls back safely on error."""
         store = EmulatedStore()
         fake_llm.set_response("invalid json response")
-        manager = MemFlowManager(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
 
         # Should not raise even with invalid LLM response
         result = manager.chat("test content")

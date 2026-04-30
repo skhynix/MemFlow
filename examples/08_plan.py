@@ -25,16 +25,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memflow import MemFlowManager, Procedure
+from memflow import MemFlow, Procedure
 
 # LLM and store are loaded from .env file automatically
-manager = MemFlowManager()
+memflow = MemFlow()
 
 TASK = "Plan a relaxing day off at home"
 
 
 def show_plan(label: str) -> None:
-    task_plan = manager.plan(TASK)
+    task_plan = memflow.plan(TASK)
     print(f"\n{'='*60}")
     print(f"  {label}")
     print(f"  Task: {task_plan.task}")
@@ -61,7 +61,7 @@ show_plan("A. Cold start — no SOP in store")
 # B. Warm start — store a relevant SOP, then plan again
 # ---------------------------------------------------------------------------
 
-manager.add(procedure=Procedure(
+memflow.add(procedure=Procedure(
     title="How to Have a Perfect Rest Day",
     content=(
         "1. Start with a light breakfast — fruit, yogurt, or toast.\n"
