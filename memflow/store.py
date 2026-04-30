@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import threading
 import uuid
@@ -30,6 +31,8 @@ from sqlalchemy import create_engine, text
 # Register pgvector for proper vector type handling
 import psycopg2
 from pgvector.psycopg2 import register_vector
+
+logger = logging.getLogger(__name__)
 
 
 def _text_score(text: str, query: str) -> float:
@@ -654,8 +657,16 @@ class PgVectorStore(BaseStore):
             data = response.json()
             emb = data["data"][0]["embedding"]
             return emb
-        except Exception:
-            # Fallback: simple hash-based embedding
+        except Exception as exc:
+            # Fallback: hash-based pseudo-embedding. Semantic search results
+            # will be effectively random until the embedding endpoint works,
+            # so surface this loudly instead of hiding the failure.
+            logger.warning(
+                "Embedding API request failed (%s: %s); falling back to "
+                "hash-based pseudo-embedding — search results will not be "
+                "semantically meaningful until the endpoint is reachable.",
+                type(exc).__name__, exc,
+            )
             emb = [0.0] * config["dim"]
             words = text.lower().split()
             for word in words:

@@ -3,6 +3,7 @@
 
 """Unit tests for MemFlow storage backends."""
 
+import logging
 import os
 import shutil
 import tempfile
@@ -363,6 +364,22 @@ class TestPgVectorStore:
 
             # Verify register_vector was called with raw_conn
             mock_register.assert_called_once_with(mock_raw_conn)
+
+    def test_compute_emb_warns_on_hash_fallback(self, caplog):
+        """Test embedding failures are visible when fallback is used."""
+        store = object.__new__(PgVectorStore)
+        store._emb_model = "test-model"
+        store._emb_api_base = "http://test-api"
+        store._emb_api_key = "EMPTY"
+        store._emb_dim = 8
+
+        with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
+            with caplog.at_level(logging.WARNING, logger="memflow.store"):
+                emb = store._compute_emb("deploy service")
+
+        assert len(emb) == 8
+        assert "RuntimeError: boom" in caplog.text
+        assert "falling back to hash-based pseudo-embedding" in caplog.text
 
 
 class TestMemMachineBypass:
