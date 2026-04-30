@@ -731,10 +731,10 @@ class MemFlowManager:
             for name, fn in tools.items():
                 self._executor.register(name, fn)
 
-        # Guards - instance level for cycle detection across replan calls
-        if not hasattr(self, '_global_guard'):
-            self._global_guard = GlobalGuard(max_attempts=5)
-        global_guard = self._global_guard
+        # Guards are scoped to a single run() — reusing an instance-level guard
+        # would let goal_fingerprints from past runs trigger false cycle detection
+        # on the first failure of a new task.
+        global_guard = GlobalGuard(max_attempts=5)
         attempt = 0
 
         # Initial plan

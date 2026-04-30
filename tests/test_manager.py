@@ -540,6 +540,47 @@ class TestMemFlowManagerRun:
 
         assert final_count == initial_count + 1
 
+    def test_run_scopes_global_guard_to_single_call(self, fake_llm):
+        """Test cycle detection state does not leak across run() calls."""
+        manager = MemFlowManager(llm=fake_llm, use_env=False)
+
+        first_failed_step = Step(
+            id="step-1",
+            goal="Create report",
+            type=StepType.TOOL,
+            tool_name="bash",
+        )
+        second_failed_step = Step(
+            id="step-2",
+            goal="Create report",
+            type=StepType.TOOL,
+            tool_name="bash",
+        )
+
+        planner = MagicMock()
+        planner.plan.side_effect = [
+            TaskPlan(task="Task A", steps=[first_failed_step]),
+            TaskPlan(task="Create report", steps=[]),
+            TaskPlan(task="Task B", steps=[second_failed_step]),
+            TaskPlan(task="Create report", steps=[]),
+        ]
+        manager._planner = planner
+
+        executor = MagicMock()
+        executor.execute_step.return_value = StepResult(
+            step_id="step",
+            success=False,
+            output="",
+            error="permission denied",
+            retryable=False,
+        )
+        manager._executor = executor
+
+        manager.run("Task A")
+        manager.run("Task B")
+
+        assert planner.plan.call_count == 4
+
 
 class TestMemFlowManagerUtils:
     """Tests for MemFlowManager utility methods via public API."""
