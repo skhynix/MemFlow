@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -179,25 +180,45 @@ class TestFileStore:
 class TestMemMachineStore:
     """Tests for MemMachine store (mocked)."""
 
+    @staticmethod
+    def _episode(id: str, content: str, metadata: dict, score: float | None = None):
+        return SimpleNamespace(
+            id=id,
+            content=content,
+            metadata=metadata,
+            score=score,
+        )
+
+    @staticmethod
+    def _search_result(*episodes):
+        return SimpleNamespace(
+            content=SimpleNamespace(
+                episodic_memory=SimpleNamespace(
+                    long_term_memory=SimpleNamespace(episodes=list(episodes)),
+                    short_term_memory=None,
+                )
+            )
+        )
+
     def test_add(self, memmachine_mock):
         """Test adding a procedure."""
         mock_client, mock_memory, mock_module = memmachine_mock
 
         # Mock search to return the procedure for get() which calls list_all()
-        mock_memory.search.return_value = [
-            {
-                "id": "mm-episode-id",
-                "content": "# Test\n\n1. Step",
-                "metadata": {
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-episode-id",
+                content="# Test\n\n1. Step",
+                metadata={
                     "mm_type": "procedural",
                     "record_id": "proc-id-123",
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
                     "created_at": "2026-03-31T10:00:00"
-                }
-            }
-        ]
+                },
+            )
+        )
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
@@ -214,11 +235,11 @@ class TestMemMachineStore:
         """Test searching procedures."""
         mock_client, mock_memory, mock_module = memmachine_mock
 
-        mock_memory.search.return_value = [
-            {
-                "id": "mm-id-1",
-                "content": "# Test Procedure\n\n1. Step one",
-                "metadata": {
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-id-1",
+                content="# Test Procedure\n\n1. Step one",
+                metadata={
                     "mm_type": "procedural",
                     "record_id": "proc-id-1",
                     "user_id": "default",
@@ -226,9 +247,9 @@ class TestMemMachineStore:
                     "tags": "[]",
                     "created_at": "2026-03-31T10:00:00"
                 },
-                "score": 0.85
-            }
-        ]
+                score=0.85,
+            )
+        )
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
@@ -242,14 +263,14 @@ class TestMemMachineStore:
         """Test that non-procedural items are filtered out."""
         mock_client, mock_memory, mock_module = memmachine_mock
 
-        mock_memory.search.return_value = [
-            {
-                "id": "mm-id-1",
-                "content": "# Test",
-                "metadata": {"mm_type": "semantic", "record_id": "proc-id-1"},
-                "score": 0.9
-            }
-        ]
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-id-1",
+                content="# Test",
+                metadata={"mm_type": "semantic", "record_id": "proc-id-1"},
+                score=0.9,
+            )
+        )
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
@@ -262,20 +283,20 @@ class TestMemMachineStore:
         mock_client, mock_memory, mock_module = memmachine_mock
 
         # Mock list_all to return a procedure and populate the index
-        mock_memory.search.return_value = [
-            {
-                "id": "mm-episode-id",
-                "content": "# Test\n\n1. Step",
-                "metadata": {
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-episode-id",
+                content="# Test\n\n1. Step",
+                metadata={
                     "mm_type": "procedural",
                     "record_id": "proc-id-123",
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
                     "created_at": "2026-03-31T10:00:00"
-                }
-            }
-        ]
+                },
+            )
+        )
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
@@ -290,6 +311,7 @@ class TestMemMachineStore:
     def test_delete_not_found(self, memmachine_mock):
         """Test deleting non-existent procedure."""
         mock_client, mock_memory, mock_module = memmachine_mock
+        mock_memory.search.return_value = self._search_result()
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
@@ -301,32 +323,32 @@ class TestMemMachineStore:
         """Test listing all procedures."""
         mock_client, mock_memory, mock_module = memmachine_mock
 
-        mock_memory.search.return_value = [
-            {
-                "id": "mm-id-1",
-                "content": "# Proc 1\n\n1. Step",
-                "metadata": {
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-id-1",
+                content="# Proc 1\n\n1. Step",
+                metadata={
                     "mm_type": "procedural",
                     "record_id": "proc-id-1",
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
                     "created_at": "2026-03-31T10:00:00"
-                }
-            },
-            {
-                "id": "mm-id-2",
-                "content": "# Proc 2\n\n1. Step",
-                "metadata": {
+                },
+            ),
+            self._episode(
+                id="mm-id-2",
+                content="# Proc 2\n\n1. Step",
+                metadata={
                     "mm_type": "procedural",
                     "record_id": "proc-id-2",
                     "user_id": "default",
                     "category": "general",
                     "tags": "[]",
                     "created_at": "2026-03-31T10:00:00"
-                }
-            }
-        ]
+                },
+            ),
+        )
 
         with patch.dict("sys.modules", {"memmachine_client": mock_module}):
             store = MemMachineStore()
