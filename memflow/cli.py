@@ -11,7 +11,7 @@ import argparse
 import sys
 import threading
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 if TYPE_CHECKING:
     from memflow.manager import MemFlow
@@ -112,6 +112,96 @@ class StatusLine:
         self._output.flush()
 
 
+def _clear_prompt_screen(event: Any) -> None:
+    app = event.app
+    renderer = getattr(app, "renderer", None)
+    if renderer is not None and hasattr(renderer, "clear"):
+        renderer.clear()
+        return
+
+    output = getattr(app, "output", None)
+    if output is None:
+        return
+
+    erase_screen = getattr(output, "erase_screen", None)
+    if erase_screen is not None:
+        erase_screen()
+
+    cursor_goto = getattr(output, "cursor_goto", None)
+    if cursor_goto is not None:
+        cursor_goto(0, 0)
+
+
+def _handle_prompt_submit(event: Any) -> None:
+    event.app.exit(result=event.app.current_buffer.text)
+
+
+def _handle_prompt_newline(event: Any) -> None:
+    event.app.current_buffer.insert_text("\n")
+
+
+def _handle_prompt_clear_screen(event: Any) -> None:
+    _clear_prompt_screen(event)
+
+
+def _handle_prompt_cancel(event: Any) -> None:
+    buffer = event.app.current_buffer
+    if buffer.text:
+        buffer.reset()
+        _clear_prompt_screen(event)
+        return
+
+    event.app.exit(exception=KeyboardInterrupt)
+
+
+def _build_prompt_key_bindings() -> Any:
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+    bindings.add("enter")(_handle_prompt_submit)
+    bindings.add("c-j")(_handle_prompt_newline)
+    bindings.add("c-l")(_handle_prompt_clear_screen)
+    bindings.add("c-c")(_handle_prompt_cancel)
+    return bindings
+
+
+class PromptToolkitInput:
+    """Read chat input with multiline editing and chat-specific key bindings."""
+
+    def __init__(self) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import InMemoryHistory
+
+        self._session = PromptSession(
+            history=InMemoryHistory(),
+            key_bindings=_build_prompt_key_bindings(),
+            multiline=True,
+        )
+
+    def __call__(self, prompt: str) -> str:
+        return self._session.prompt(prompt)
+
+
+def _should_use_prompt_toolkit(output: TextIO) -> bool:
+    return bool(
+        getattr(sys.stdin, "isatty", lambda: False)()
+        and getattr(output, "isatty", lambda: False)()
+    )
+
+
+def _create_input_reader(
+    input_fn: Callable[[str], str] | None,
+    output: TextIO,
+) -> Callable[[str], str]:
+    if input_fn is not None:
+        return input_fn
+
+    if _should_use_prompt_toolkit(output):
+        return PromptToolkitInput()
+
+    return input
+
+
 def format_verbose_trace(
     result: dict,
     *,
@@ -210,6 +300,11 @@ def _handle_command(
         print("/execute [on|off]  Toggle immediate EXECUTE handling.", file=output)
         print("/user <id>         Change the user scope.", file=output)
         print("/exit             Quit.", file=output)
+        print(
+            "Keys: Enter send, Ctrl+J newline, Ctrl+L clear screen, "
+            "Ctrl+C cancel/quit, Ctrl+R search history.",
+            file=output,
+        )
         return True
 
     if command == "/verbose":
@@ -251,7 +346,7 @@ def run_repl(
     verbose: bool = False,
     allow_execute: bool = False,
     use_history: bool = True,
-    input_fn: Callable[[str], str] = input,
+    input_fn: Callable[[str], str] | None = None,
     output: TextIO = sys.stdout,
 ) -> int:
     history: list[dict] = []
@@ -262,10 +357,11 @@ def run_repl(
         "allow_execute": allow_execute,
     }
     active_manager = manager
+    read_input = _create_input_reader(input_fn, output)
 
     while state["running"]:
         try:
-            message = input_fn("> ")
+            message = read_input("> ")
         except EOFError:
             print(file=output)
             break

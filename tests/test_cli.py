@@ -11,6 +11,10 @@ import time
 from memflow.cli import (
     StatusLine,
     _create_manager,
+    _handle_prompt_cancel,
+    _handle_prompt_clear_screen,
+    _handle_prompt_newline,
+    _handle_prompt_submit,
     format_verbose_trace,
     run_repl,
 )
@@ -37,6 +41,46 @@ class FakeManager:
 class TtyOutput(io.StringIO):
     def isatty(self):
         return True
+
+
+class FakePromptBuffer:
+    def __init__(self, text=""):
+        self.text = text
+        self.inserted = []
+        self.reset_count = 0
+
+    def insert_text(self, text):
+        self.inserted.append(text)
+        self.text += text
+
+    def reset(self):
+        self.text = ""
+        self.reset_count += 1
+
+
+class FakePromptRenderer:
+    def __init__(self):
+        self.clear_count = 0
+
+    def clear(self):
+        self.clear_count += 1
+
+
+class FakePromptApp:
+    def __init__(self, text=""):
+        self.current_buffer = FakePromptBuffer(text)
+        self.renderer = FakePromptRenderer()
+        self.exit_result = None
+        self.exit_exception = None
+
+    def exit(self, *, result=None, exception=None):
+        self.exit_result = result
+        self.exit_exception = exception
+
+
+class FakePromptEvent:
+    def __init__(self, text=""):
+        self.app = FakePromptApp(text)
 
 
 def test_format_verbose_trace_for_search():
@@ -178,6 +222,53 @@ def test_run_repl_toggles_verbose_and_execute():
     assert "execute: on" in text
     assert "[trace] chat()" in text
     assert manager.calls[0]["allow_execute"] is True
+
+
+def test_prompt_submit_accepts_current_buffer():
+    event = FakePromptEvent("hello")
+
+    _handle_prompt_submit(event)
+
+    assert event.app.exit_result == "hello"
+    assert event.app.exit_exception is None
+
+
+def test_prompt_ctrl_j_inserts_newline():
+    event = FakePromptEvent("hello")
+
+    _handle_prompt_newline(event)
+
+    assert event.app.current_buffer.text == "hello\n"
+    assert event.app.current_buffer.inserted == ["\n"]
+
+
+def test_prompt_ctrl_l_clears_screen_without_changing_buffer():
+    event = FakePromptEvent("hello")
+
+    _handle_prompt_clear_screen(event)
+
+    assert event.app.current_buffer.text == "hello"
+    assert event.app.renderer.clear_count == 1
+
+
+def test_prompt_ctrl_c_clears_draft_without_exiting():
+    event = FakePromptEvent("draft")
+
+    _handle_prompt_cancel(event)
+
+    assert event.app.current_buffer.text == ""
+    assert event.app.current_buffer.reset_count == 1
+    assert event.app.renderer.clear_count == 1
+    assert event.app.exit_exception is None
+
+
+def test_prompt_ctrl_c_exits_on_empty_buffer():
+    event = FakePromptEvent("")
+
+    _handle_prompt_cancel(event)
+
+    assert event.app.current_buffer.reset_count == 0
+    assert event.app.exit_exception is KeyboardInterrupt
 
 
 def test_run_repl_shows_status_on_tty_output():
