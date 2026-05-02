@@ -224,6 +224,29 @@ def test_run_repl_toggles_verbose_and_execute():
     assert manager.calls[0]["allow_execute"] is True
 
 
+def test_run_repl_clear_command_resets_chat_history():
+    manager = FakeManager(
+        {
+            "response": "hello",
+            "intents": ["CONVERSATION"],
+            "primary_intent": "CONVERSATION",
+        }
+    )
+    inputs = iter(["hi", "/clear", "again", "/exit"])
+    output = io.StringIO()
+
+    run_repl(
+        manager,
+        input_fn=lambda _prompt: next(inputs),
+        output=output,
+    )
+
+    assert "history: cleared" in output.getvalue()
+    assert manager.calls[0]["history"] == []
+    assert manager.calls[1]["message"] == "again"
+    assert manager.calls[1]["history"] == []
+
+
 def test_prompt_submit_accepts_current_buffer():
     event = FakePromptEvent("hello")
 

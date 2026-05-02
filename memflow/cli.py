@@ -285,6 +285,7 @@ def _handle_command(
     line: str,
     *,
     state: dict,
+    history: list[dict],
     output: TextIO,
 ) -> bool:
     parts = line.strip().split()
@@ -299,6 +300,7 @@ def _handle_command(
         print("/verbose [on|off]  Toggle trace output.", file=output)
         print("/execute [on|off]  Toggle immediate EXECUTE handling.", file=output)
         print("/user <id>         Change the user scope.", file=output)
+        print("/clear            Clear chat history.", file=output)
         print("/exit             Quit.", file=output)
         print(
             "Keys: Enter send, Ctrl+J newline, Ctrl+L clear screen, "
@@ -333,6 +335,11 @@ def _handle_command(
         else:
             state["user_id"] = parts[1]
             print(f"user: {state['user_id']}", file=output)
+        return True
+
+    if command == "/clear":
+        history.clear()
+        print("history: cleared", file=output)
         return True
 
     return False
@@ -374,7 +381,7 @@ def run_repl(
             continue
 
         if message.startswith("/") and _handle_command(
-            message, state=state, output=output
+            message, state=state, history=history, output=output
         ):
             continue
 
