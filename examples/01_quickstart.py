@@ -42,5 +42,5 @@ print(f"{proc.content}\n")
 # --- Chat ---
 question = "How do I make coffee?"
 print(f"[Q] {question}")
-answer = memflow.chat(question, user_id="alice")
-print(f"[A] {answer}")
+result = memflow.chat(question, user_id="alice")
+print(f"[A] {result['response']}")

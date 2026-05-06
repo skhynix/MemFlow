@@ -178,5 +178,7 @@ print("=== 4. Chat ===")
 
 q = "How do I fix a service that stopped working?"
 print(f"  Q: {q}")
-answer = memflow.chat(q)
-print(f"  A: {answer[:300]}{'...' if len(answer) > 300 else ''}")
+result = memflow.chat(q)
+print(
+    f"  A: {result['response'][:300]}{'...' if len(result['response']) > 300 else ''}"
+)
