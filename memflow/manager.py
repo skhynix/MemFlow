@@ -7,6 +7,7 @@ MemFlow — core orchestrator for MemFlow.
 Public API:
   add(messages, procedure, user_id)  — store a procedure
   search(query, user_id, top_k)      — retrieve procedures
+  delete(id, user_id)                — delete a procedure by id
   chat(query, user_id)               — respond using procedure context
   plan(task, user_id)                — decompose task into executable steps
   execute(plan, tools)               — execute a task plan
@@ -609,6 +610,47 @@ class MemFlow:
     ) -> list[SearchResult]:
         """Retrieve relevant procedures by similarity."""
         return self.store.search(query, top_k=top_k, user_id=user_id)
+
+    # ------------------------------------------------------------------
+    # delete
+    # ------------------------------------------------------------------
+
+    def delete(self, id: str, user_id: str | None = None) -> dict:
+        """Delete a stored procedure by exact id within the optional user scope."""
+        proc = None
+        for candidate in self.store.list_all(user_id=user_id):
+            if candidate.id == id:
+                proc = candidate
+                break
+
+        if proc is None:
+            return {
+                "id": id,
+                "event": "DELETE",
+                "deleted": False,
+                "error": "not_found",
+            }
+
+        try:
+            deleted = self.store.delete(proc.id)
+        except Exception:
+            deleted = False
+
+        if deleted:
+            return {
+                "id": proc.id,
+                "title": proc.title,
+                "event": "DELETE",
+                "deleted": True,
+            }
+
+        return {
+            "id": proc.id,
+            "title": proc.title,
+            "event": "DELETE",
+            "deleted": False,
+            "error": "delete_failed",
+        }
 
     # ------------------------------------------------------------------
     # plan

@@ -350,6 +350,62 @@ class TestMemFlowSearch:
         assert len(results) == 3
 
 
+class TestMemFlowDelete:
+    """Tests for MemFlow.delete()."""
+
+    def test_delete_removes_procedure(self, fake_llm):
+        """Test deleting a procedure by ID."""
+        store = EmulatedStore()
+        proc = Procedure(title="Deploy guide", content="1. Deploy")
+        store.add(proc)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.delete(proc.id)
+
+        assert result == {
+            "id": proc.id,
+            "title": proc.title,
+            "event": "DELETE",
+            "deleted": True,
+        }
+        assert store.get(proc.id) is None
+
+    def test_delete_missing_id_returns_not_found(self, fake_llm):
+        """Test deleting a missing ID returns not_found."""
+        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=False)
+
+        result = manager.delete("missing-id")
+
+        assert result == {
+            "id": "missing-id",
+            "event": "DELETE",
+            "deleted": False,
+            "error": "not_found",
+        }
+
+    def test_delete_respects_user_scope(self, fake_llm):
+        """Test scoped delete does not remove another user's procedure."""
+        store = EmulatedStore()
+        proc = Procedure(
+            id="shared-looking-id",
+            title="Private deploy guide",
+            content="1. Deploy",
+            user_id="user-a",
+        )
+        store.add(proc)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.delete(proc.id, user_id="user-b")
+
+        assert result == {
+            "id": proc.id,
+            "event": "DELETE",
+            "deleted": False,
+            "error": "not_found",
+        }
+        assert store.get(proc.id) is proc
+
+
 class TestMemFlowChat:
     """Tests for MemFlow.chat()."""
 
