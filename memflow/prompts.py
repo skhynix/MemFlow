@@ -180,6 +180,9 @@ Classify the user's intent into one or more of these categories.
 - EXECUTE: User wants to perform an action or task
   (e.g., "Run this...", "Execute...", "Do this for me...")
 
+- DELETE: User wants to remove a stored procedure
+  (e.g., "Delete procedure <id>", "Remove this saved workflow...")
+
 - CONVERSATION: General chat, questions, or anything that doesn't fit above
   (e.g., greetings, "How are you?", factual questions, opinions)
 

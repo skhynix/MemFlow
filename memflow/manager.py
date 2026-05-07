@@ -17,6 +17,7 @@ Public API:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -371,6 +372,7 @@ class MemFlow:
         user_id: str | None = None,
         history: list[dict] | None = None,
         allow_execute: bool = False,
+        allow_delete: bool = False,
     ) -> dict:
         """
         Primary user interface for MemFlow.
@@ -379,6 +381,7 @@ class MemFlow:
         - SEARCH: Retrieve and respond with relevant procedures
         - ADD: Extract and store procedural knowledge
         - EXECUTE: Run the task (requires allow_execute=True)
+        - DELETE: Delete a procedure by explicit id (requires allow_delete=True)
         - CONVERSATION: Respond naturally without memory operations
 
         Args:
@@ -387,6 +390,8 @@ class MemFlow:
             history:       Previous conversation messages for context
             allow_execute: If True, EXECUTE intent will run the task.
                           If False, asks for confirmation first.
+            allow_delete:  If True, DELETE intent may delete by explicit id.
+                          If False, returns candidates for confirmation.
 
         Returns:
             dict with response and metadata:
@@ -394,7 +399,8 @@ class MemFlow:
             - intents: list[str] - All detected intents
             - primary_intent: str - Main intent for response formatting
             - handler_results: dict - Results from each intent handler
-            - requires_confirmation: bool - (optional) True when EXECUTE needs confirmation
+            - requires_confirmation: bool - (optional) True when action needs confirmation
+            - candidates: list[dict] - (optional) scoped DELETE candidates
         """
         # Combine current message with history for context
         if history:
@@ -434,6 +440,9 @@ class MemFlow:
             "SEARCH": self._handle_search,
             "ADD": self._handle_add,
             "EXECUTE": self._handle_execute,
+            "DELETE": lambda msg, uid, hist: self._handle_delete(
+                msg, uid, hist, allow_delete=allow_delete
+            ),
             "CONVERSATION": self._handle_conversation,
         }
 
@@ -448,12 +457,17 @@ class MemFlow:
             "\n\n".join(responses) if len(responses) > 1 else responses[0]
         )
 
-        return {
+        response_data = {
             "response": combined_response,
             "intents": intents,
             "primary_intent": primary_intent,
             "handler_results": handler_results,
         }
+        if any(r.get("requires_confirmation") for r in handler_results.values()):
+            response_data["requires_confirmation"] = True
+        if "DELETE" in handler_results and "candidates" in handler_results["DELETE"]:
+            response_data["candidates"] = handler_results["DELETE"]["candidates"]
+        return response_data
 
     def _classify_intents(self, context: str) -> dict:
         """Classify user intents using LLM. Returns multiple intents if applicable."""
@@ -470,7 +484,7 @@ class MemFlow:
             # Validate intents
             valid_intents = []
             for intent in intents:
-                if intent in ("SEARCH", "ADD", "EXECUTE", "CONVERSATION"):
+                if intent in ("SEARCH", "ADD", "EXECUTE", "DELETE", "CONVERSATION"):
                     valid_intents.append(intent)
 
             if not valid_intents:
@@ -479,6 +493,9 @@ class MemFlow:
             # If CONVERSATION is mixed with others, remove it (others take priority)
             if len(valid_intents) > 1 and "CONVERSATION" in valid_intents:
                 valid_intents.remove("CONVERSATION")
+
+            if primary not in valid_intents:
+                primary = valid_intents[0]
 
             return {"intents": valid_intents, "primary": primary}
         except Exception:
@@ -568,6 +585,55 @@ class MemFlow:
                 "error": str(e),
             }
 
+    def _handle_delete(
+        self,
+        message: str,
+        user_id: str | None,
+        history: list[dict] | None,
+        allow_delete: bool = False,
+    ) -> dict:
+        """Handle DELETE intent - delete only with confirmation and explicit id."""
+        explicit_ids, explicit_procs = self._find_explicit_delete_targets(
+            message, user_id
+        )
+        candidates = self._delete_candidates(message, user_id, explicit_procs)
+
+        if not allow_delete:
+            return {
+                "response": "Please confirm deletion with an explicit procedure id.",
+                "intent": "DELETE",
+                "requires_confirmation": True,
+                "candidates": candidates,
+                "deleted": False,
+            }
+
+        if len(explicit_ids) == 1:
+            result = self.delete(explicit_ids[0], user_id=user_id)
+            if result.get("deleted"):
+                response = f"Deleted: {result['title']} ({result['id']})"
+            else:
+                response = (
+                    f"Could not delete procedure {result['id']}: "
+                    f"{result.get('error', 'unknown_error')}"
+                )
+            return {"response": response, "intent": "DELETE", "data": result}
+
+        if len(explicit_ids) > 1:
+            response = "Please provide exactly one procedure id to delete."
+            error = "multiple_ids"
+        else:
+            response = "Please provide an explicit procedure id to delete."
+            error = "explicit_id_required"
+
+        return {
+            "response": response,
+            "intent": "DELETE",
+            "requires_confirmation": True,
+            "candidates": candidates,
+            "deleted": False,
+            "error": error,
+        }
+
     def _handle_conversation(
         self, message: str, user_id: str | None, history: list[dict] | None
     ) -> dict:
@@ -597,6 +663,61 @@ class MemFlow:
             {"role": "user", "content": message},
         ]
         return self.llm.generate(messages)
+
+    @staticmethod
+    def _message_mentions_id(message: str, id: str) -> bool:
+        """Return True when a stored id appears as a standalone token."""
+        if not id:
+            return False
+        pattern = rf"(?<![A-Za-z0-9_-]){re.escape(id)}(?![A-Za-z0-9_-])"
+        return re.search(pattern, message) is not None
+
+    def _find_explicit_delete_targets(
+        self, message: str, user_id: str | None
+    ) -> tuple[list[str], list[Procedure]]:
+        """Find exact mentioned ids and scoped procedures safe to show."""
+        scoped_procs = self.store.list_all(user_id=user_id)
+        scoped_matches = [
+            proc for proc in scoped_procs if self._message_mentions_id(message, proc.id)
+        ]
+        explicit_ids = [proc.id for proc in scoped_matches]
+
+        return explicit_ids, scoped_matches
+
+    @staticmethod
+    def _procedure_candidate(procedure: Procedure) -> dict:
+        return {
+            "id": procedure.id,
+            "title": procedure.title,
+            "category": procedure.category,
+        }
+
+    def _delete_candidates(
+        self,
+        message: str,
+        user_id: str | None,
+        explicit_procs: list[Procedure],
+        top_k: int = 3,
+    ) -> list[dict]:
+        """Return scoped delete candidates from exact id matches, search, or list."""
+        candidates: list[Procedure] = []
+        seen = set()
+
+        def add_candidate(proc: Procedure) -> None:
+            if proc.id in seen or len(candidates) >= top_k:
+                return
+            seen.add(proc.id)
+            candidates.append(proc)
+
+        for proc in explicit_procs:
+            add_candidate(proc)
+        for result in self.search(message, user_id=user_id, top_k=top_k):
+            add_candidate(result.procedure)
+        if not candidates:
+            for proc in self.store.list_all(user_id=user_id):
+                add_candidate(proc)
+
+        return [self._procedure_candidate(proc) for proc in candidates]
 
     # ------------------------------------------------------------------
     # search

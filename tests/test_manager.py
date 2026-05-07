@@ -467,6 +467,113 @@ class TestMemFlowChat:
         # Check that handler_results contains ADD handler result
         assert "ADD" in result.get("handler_results", {})
 
+    def test_chat_normalizes_primary_intent(self, fake_llm):
+        """Test primary_intent stays within validated intents."""
+        store = EmulatedStore()
+        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
+        fake_llm.set_response(
+            '{"intents": ["SEARCH", "CONVERSATION"], "primary": "CONVERSATION"}'
+        )
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.chat("How do I deploy?")
+
+        assert result["intents"] == ["SEARCH"]
+        assert result["primary_intent"] == "SEARCH"
+
+    def test_chat_delete_requires_confirmation_by_default(self, fake_llm):
+        """Test DELETE intent does not delete without allow_delete."""
+        store = EmulatedStore()
+        proc = Procedure(
+            id="proc-delete-1",
+            title="Deploy guide",
+            content="1. Deploy",
+        )
+        store.add(proc)
+        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.chat(f"Delete procedure {proc.id}")
+
+        assert result["requires_confirmation"] is True
+        assert result["candidates"][0]["id"] == proc.id
+        assert result["handler_results"]["DELETE"]["deleted"] is False
+        assert store.get(proc.id) is proc
+
+    def test_chat_delete_with_allow_delete_and_id_deletes(self, fake_llm):
+        """Test DELETE intent deletes when allow_delete and ID are explicit."""
+        store = EmulatedStore()
+        proc = Procedure(
+            id="proc-delete-2",
+            title="Deploy guide",
+            content="1. Deploy",
+        )
+        store.add(proc)
+        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.chat(f"Delete procedure {proc.id}", allow_delete=True)
+
+        delete_result = result["handler_results"]["DELETE"]["data"]
+        assert delete_result["deleted"] is True
+        assert delete_result["id"] == proc.id
+        assert store.get(proc.id) is None
+
+    def test_chat_delete_with_allow_delete_hides_other_user_ids(self, fake_llm):
+        """Test DELETE intent does not reveal another user's ID."""
+        store = EmulatedStore()
+        proc = Procedure(
+            id="proc-delete-other-user",
+            title="Private deploy guide",
+            content="1. Deploy",
+            user_id="user-a",
+        )
+        store.add(proc)
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
+        foreign_result = manager.chat(
+            f"Delete procedure {proc.id}",
+            user_id="user-b",
+            allow_delete=True,
+        )
+        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
+        missing_result = manager.chat(
+            "Delete procedure missing-id",
+            user_id="user-b",
+            allow_delete=True,
+        )
+
+        foreign_delete = foreign_result["handler_results"]["DELETE"]
+        missing_delete = missing_result["handler_results"]["DELETE"]
+        assert foreign_delete == missing_delete
+        assert foreign_delete["error"] == "explicit_id_required"
+        assert foreign_delete["candidates"] == []
+        assert "data" not in foreign_delete
+        assert foreign_result["candidates"] == []
+        assert store.get(proc.id) is proc
+
+    def test_chat_delete_with_allow_delete_requires_explicit_id(self, fake_llm):
+        """Test DELETE intent with no ID returns candidates instead of deleting."""
+        store = EmulatedStore()
+        proc = Procedure(
+            id="proc-delete-3",
+            title="Deploy guide",
+            content="1. Deploy application",
+        )
+        store.add(proc)
+        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.chat("Delete the deploy procedure", allow_delete=True)
+
+        delete_result = result["handler_results"]["DELETE"]
+        assert result["requires_confirmation"] is True
+        assert delete_result["deleted"] is False
+        assert delete_result["error"] == "explicit_id_required"
+        assert result["candidates"][0]["id"] == proc.id
+        assert store.get(proc.id) is proc
+
 
 class TestMemFlowPlan:
     """Tests for MemFlow.plan()."""
