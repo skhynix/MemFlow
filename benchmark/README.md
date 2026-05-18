@@ -14,16 +14,42 @@ The `proced_mem_bench` subdirectory provides a benchmark harness that evaluates 
 
 For detailed instructions, see [proced_mem_bench/README.md](proced_mem_bench/README.md).
 
+### `wikihow_procedure_silver` - WikiHow Procedure Silver v1
+
+The `wikihow_procedure_silver` subdirectory evaluates **MemFlow retrieval**
+against explicit binary relevance sets from the WikiHow Procedure Silver v1
+query bank vendored with MemFlow.
+
+- **Location**: `benchmark/wikihow_procedure_silver/`
+- **Source**: Kaggle dataset `paolop/human-instructions-dataset-updated-json-files`
+- **Data shape**: streamed JSONL procedures plus JSONL query bank records
+
+For detailed instructions, see
+[wikihow_procedure_silver/README.md](wikihow_procedure_silver/README.md).
+
 ## Installation
 
 Use the install script for easy setup:
 
 ```bash
+# Install optional Kaggle CLI support for WikiHow downloads
+uv sync --extra benchmark
+
 # Install proced_mem_bench
 uv run benchmark/install_benchmark.py proced_mem_bench
 
 # Install with specific commit
 uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash f7097bcaf6ca
+
+# Print WikiHow Procedure Silver paths and source instructions
+uv run benchmark/install_benchmark.py wikihow_procedure_silver
+
+# Build the local WikiHow procedure corpus from Kaggle raw shards
+uv run benchmark/install_benchmark.py wikihow_procedure_silver \
+  --raw-dir /path/to/kaggle/raw/wikiHow-json-files
+
+# Install all benchmark dependencies, building WikiHow if --raw-dir is set
+uv run benchmark/install_benchmark.py all
 ```
 
 ## Directory Structure
@@ -39,7 +65,15 @@ benchmark/
 │   ├── adapter.py
 │   ├── evaluation.py
 │   └── run_proced_mem_bench.py
-└── ...                          # Future benchmarks
+├── wikihow_procedure_silver/    # WikiHow Procedure Silver v1
+│   ├── README.md
+│   ├── __init__.py
+│   ├── adapter.py
+│   ├── build_wikihow_procedures.py
+│   ├── evaluation.py
+│   ├── benchmark_data/          # Vendored query bank and metadata
+│   └── run_wikihow_procedure_silver.py
+└── results/                     # Benchmark outputs (gitignored)
 ```
 
 ## Adding New Benchmarks
