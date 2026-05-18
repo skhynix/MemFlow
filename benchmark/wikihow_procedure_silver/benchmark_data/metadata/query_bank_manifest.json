@@ -1,0 +1,80 @@
+{
+  "counts": {
+    "accepted_item_count": 1000,
+    "expected_count": 1000,
+    "input_file_count": 5,
+    "input_record_count": 1000,
+    "query_bank_count": 1000
+  },
+  "dataset_name": "wikihow-procedure-silver-v1",
+  "deterministic": true,
+  "input_files": [
+    {
+      "path": "../wikihow-procedure-silver-v1/collection-round-000/accepted_items.jsonl",
+      "records": 830,
+      "sha256": "a5d734d74d605d1bc26d105715b9a777201a8845cccfcb11feae28f416444616",
+      "size_bytes": 2486179
+    },
+    {
+      "path": "../wikihow-procedure-silver-v1/collection-replacements-round-001/accepted_items.jsonl",
+      "records": 139,
+      "sha256": "cb3e2e6bc6cae2a3d6044afad7e63522f5d42e25e589a1a81664e4135b723ffd",
+      "size_bytes": 460894
+    },
+    {
+      "path": "../wikihow-procedure-silver-v1/collection-replacements-round-002/accepted_items.jsonl",
+      "records": 25,
+      "sha256": "a1696dc0d08df5e9bbf35935c7f8d8135d563612a08993daeff09d49aac9feef",
+      "size_bytes": 76271
+    },
+    {
+      "path": "../wikihow-procedure-silver-v1/collection-replacements-round-003/accepted_items.jsonl",
+      "records": 5,
+      "sha256": "b244f0523a5758efa859ae7c8e0e01ffcb56f934e683828b5ea1daeba5a0b07e",
+      "size_bytes": 15749
+    },
+    {
+      "path": "../wikihow-procedure-silver-v1/collection-replacements-round-004/accepted_items.jsonl",
+      "records": 1,
+      "sha256": "220a3c29e41daa9f0ca96186caabd25a841297758117f8a85ad7684994e3d5ae",
+      "size_bytes": 2401
+    }
+  ],
+  "outputs": {
+    "benchmark_definition": {
+      "path": "benchmark_data/metadata/benchmark_definition.json",
+      "sha256": "70abb649c905e01631685e6419c5ffe56786bcd42c2536ad830ec2055034ad57",
+      "size_bytes": 2419
+    },
+    "query_bank": {
+      "path": "benchmark_data/query_bank.jsonl",
+      "sha256": "90f64baf9f2c46e153df42dc820c6167d273c42c295b0f78d00d4116d7fe85ef",
+      "size_bytes": 3264545
+    },
+    "source_holdout": {
+      "path": "benchmark_data/metadata/source_holdout.jsonl",
+      "records": 1000,
+      "sha256": "755e375164bc825b5f492964177936368b4f0a30b97c875bab8f50bac02ef93d",
+      "size_bytes": 235095
+    }
+  },
+  "relevant_count_distribution": {
+    "10": 112,
+    "11": 41,
+    "12": 135,
+    "3": 45,
+    "4": 48,
+    "5": 74,
+    "6": 89,
+    "7": 112,
+    "8": 225,
+    "9": 119
+  },
+  "source_collection_counts": {
+    "collection-replacements-round-001": 139,
+    "collection-replacements-round-002": 25,
+    "collection-replacements-round-003": 5,
+    "collection-replacements-round-004": 1,
+    "collection-round-000": 830
+  }
+}

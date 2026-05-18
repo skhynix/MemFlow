@@ -20,6 +20,7 @@ dev = [
 ]
 
 [project.optional-dependencies]
+benchmark = ["kaggle>=1.6.0"]
 ollama = ["ollama>=0.6.1"]
 memmachine = ["memmachine-client>=0.3.0"]
 openai = ["openai>=2.30.0"]

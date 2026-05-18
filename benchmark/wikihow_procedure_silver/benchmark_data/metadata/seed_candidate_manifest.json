@@ -1,0 +1,199 @@
+{
+  "builder": "scripts/build_default_silver_seed_candidates.py",
+  "builder_version": 1,
+  "category_distributions": {
+    "backup_query_seeds": {
+      "Arts and Entertainment": 14,
+      "Cars & Other Vehicles": 6,
+      "Computers and Electronics": 45,
+      "Education and Communications": 20,
+      "Family Life": 5,
+      "Finance and Business": 19,
+      "Food and Entertaining": 33,
+      "Health": 28,
+      "Hobbies and Crafts": 43,
+      "Holidays and Traditions": 2,
+      "Home and Garden": 24,
+      "Personal Care and Style": 16,
+      "Pets and Animals": 12,
+      "Philosophy and Religion": 2,
+      "Relationships": 7,
+      "Sports and Fitness": 9,
+      "Travel": 3,
+      "Work World": 4,
+      "Youth": 7,
+      "wikihow": 1
+    },
+    "candidate_pool": {
+      "Arts and Entertainment": 6285,
+      "Cars & Other Vehicles": 2624,
+      "Cleaning Heater Appliances": 1,
+      "Computers and Electronics": 20288,
+      "Education and Communications": 8983,
+      "Family Life": 2489,
+      "Finance and Business": 8539,
+      "Food and Entertaining": 14738,
+      "Health": 12361,
+      "Hobbies and Crafts": 13955,
+      "Holidays and Traditions": 1223,
+      "Home and Garden": 10605,
+      "Outdoor Shelters": 17,
+      "Paper Roses": 3,
+      "Personal Care and Style": 7350,
+      "Pets and Animals": 5647,
+      "Philosophy and Religion": 1181,
+      "Relationships": 3232,
+      "Screenplays": 4,
+      "Sports and Fitness": 4236,
+      "Travel": 1438,
+      "Work World": 2086,
+      "Youth": 3128,
+      "wikihow": 439
+    },
+    "sampled_query_seeds": {
+      "Arts and Entertainment": 48,
+      "Cars & Other Vehicles": 20,
+      "Computers and Electronics": 150,
+      "Education and Communications": 68,
+      "Family Life": 19,
+      "Finance and Business": 65,
+      "Food and Entertaining": 112,
+      "Health": 94,
+      "Hobbies and Crafts": 106,
+      "Holidays and Traditions": 9,
+      "Home and Garden": 81,
+      "Personal Care and Style": 56,
+      "Pets and Animals": 43,
+      "Philosophy and Religion": 9,
+      "Relationships": 24,
+      "Sports and Fitness": 32,
+      "Travel": 23,
+      "Work World": 15,
+      "Youth": 23,
+      "wikihow": 3
+    }
+  },
+  "counts": {
+    "backup_seed_count": 300,
+    "candidate_count": 130852,
+    "excluded_by_reason": {
+      "exact_duplicate_title": 560,
+      "near_duplicate_title": 745
+    },
+    "excluded_count": 1305,
+    "initially_eligible_count": 132157,
+    "procedures_read": 132157,
+    "sampled_query_seed_count": 1000
+  },
+  "deterministic": true,
+  "duplicate_detection": {
+    "exact_canonical_title_groups": 280,
+    "fuzzy_near_duplicate_groups": 332,
+    "fuzzy_scope": "within normalized_root_category",
+    "near_duplicate_threshold": 95
+  },
+  "outputs": {
+    "backup_query_seeds": {
+      "bytes": 336286,
+      "records": 300,
+      "sha256": "f8b4f0eba522f8e977f3cb8c90fd7caaad6da781fafa1abc9f83a03b98325016"
+    },
+    "excluded_seed_candidates": {
+      "bytes": 1928929,
+      "records": 1305,
+      "sha256": "fcca4774dd33f80ac6207c135eb59239db3c6e7a37dc29fdddc6d8522a3325bc"
+    },
+    "sampled_query_seeds": {
+      "bytes": 1114605,
+      "records": 1000,
+      "sha256": "6758153fbc0b44972de8bdaac4bd20c31b03acc588a01f07fe1ee2cbd58ac27b"
+    },
+    "seed_candidate_report": {
+      "bytes": 2468,
+      "records": 1,
+      "sha256": "10037cf800ef0368ddb8ef818b7f352a29218e987acd4baf3fe50bb80647e04a"
+    },
+    "seed_candidates": {
+      "bytes": 138294803,
+      "records": 130852,
+      "sha256": "87cfe307ae2ac89abff8353d72347593d1bff6ba0ae337e875ea4f3b0da722bc"
+    }
+  },
+  "quotas": {
+    "backup_query_seeds": {
+      "Arts and Entertainment": 14,
+      "Cars & Other Vehicles": 6,
+      "Cleaning Heater Appliances": 0,
+      "Computers and Electronics": 45,
+      "Education and Communications": 20,
+      "Family Life": 5,
+      "Finance and Business": 19,
+      "Food and Entertaining": 33,
+      "Health": 28,
+      "Hobbies and Crafts": 43,
+      "Holidays and Traditions": 2,
+      "Home and Garden": 24,
+      "Outdoor Shelters": 0,
+      "Paper Roses": 0,
+      "Personal Care and Style": 16,
+      "Pets and Animals": 12,
+      "Philosophy and Religion": 2,
+      "Relationships": 7,
+      "Screenplays": 0,
+      "Sports and Fitness": 9,
+      "Travel": 3,
+      "Work World": 4,
+      "Youth": 7,
+      "wikihow": 1
+    },
+    "sampled_query_seeds": {
+      "Arts and Entertainment": 48,
+      "Cars & Other Vehicles": 20,
+      "Cleaning Heater Appliances": 0,
+      "Computers and Electronics": 150,
+      "Education and Communications": 68,
+      "Family Life": 19,
+      "Finance and Business": 65,
+      "Food and Entertaining": 112,
+      "Health": 94,
+      "Hobbies and Crafts": 106,
+      "Holidays and Traditions": 9,
+      "Home and Garden": 81,
+      "Outdoor Shelters": 0,
+      "Paper Roses": 0,
+      "Personal Care and Style": 56,
+      "Pets and Animals": 43,
+      "Philosophy and Religion": 9,
+      "Relationships": 24,
+      "Screenplays": 0,
+      "Sports and Fitness": 32,
+      "Travel": 23,
+      "Work World": 15,
+      "Youth": 23,
+      "wikihow": 3
+    }
+  },
+  "schema_assumptions": [
+    "Procedure records are JSON objects with top-level id and title fields.",
+    "The normalized category path is read from metadata.normalized_categories when present.",
+    "The normalized root category is the first entry in metadata.normalized_categories.",
+    "The leaf category is read from metadata.normalized_category or the top-level category field.",
+    "Step count is read from total_steps, step_count, steps, tags like steps:N, or numbered content lines.",
+    "Summary text is read from metadata.main_task_summary or a leading Summary: block in content."
+  ],
+  "settings": {
+    "backup_count": 300,
+    "near_duplicate_threshold": 95,
+    "query_count": 1000,
+    "seed": 1729
+  },
+  "source": {
+    "builder_script": "build_wikihow_procedures.py",
+    "dataset": "paolop/human-instructions-dataset-updated-json-files",
+    "license": "CC-BY-NC-SA-4.0",
+    "procedures_path": "data/wikihow_procedures.jsonl",
+    "records": 132157,
+    "sha256": "d4364ff7dd35ceac71d0f7f86b5c1f2cae2de6120403fdcfc5ca36ec0bad0f8f",
+    "source_url": "https://www.kaggle.com/datasets/paolop/human-instructions-dataset-updated-json-files"
+  }
+}

@@ -1,0 +1,464 @@
+{
+  "schema_version": 1,
+  "description": "Explicit WikiHow category-label normalization decisions derived from the Turn 1 inventory and semantic review. Only category labels are normalized; source text fields are preserved.",
+  "source_inventory": {
+    "files": {
+      "categories.json": {
+        "sha256": "de9912c66bacd05b77e01eb1cbb51132a16c9da29553d8eb6f2de50cbd1e2c1b"
+      },
+      "category_clusters.jsonl": {
+        "sha256": "3815bcadc9df984f66b7d4650f5c21c60e4bc160554de697ed075c3e4491557d"
+      },
+      "category_labels.jsonl": {
+        "sha256": "d9fa9d4f5471791032b83b5adf72e512c3686e7918fc5d0edb3973a1f46d2498"
+      },
+      "category_paths.jsonl": {
+        "sha256": "af47f0aaa95bffa2c9a417ed01ff361aaa87637a4167a5bbca84fa493d33231e"
+      },
+      "summary.json": {
+        "sha256": "90751311a23d17ae214eb96e374d3adca215d8da9f203f74d3d21c3000d320c1"
+      }
+    },
+    "raw_records": 132533,
+    "unique_category_labels": 5300,
+    "unique_category_paths": 5291
+  },
+  "normalization_scope": {
+    "normalize_fields": [
+      "Categories"
+    ],
+    "preserve_fields_without_semantic_normalization": [
+      "MainTask",
+      "MainTaskSummary",
+      "Ingredients",
+      "Requirements",
+      "Tips",
+      "Steps[].Headline",
+      "Steps[].Description",
+      "Methods[].MethodName",
+      "Parts[].PartName",
+      "URL"
+    ]
+  },
+  "semantic_review": {
+    "chunk_strategy": "Grouped by category root/path family into 24 chunks of 156-250 labels, plus one cross-root lexical-hint review.",
+    "chunks_reviewed": 24,
+    "labels_reviewed": 5300,
+    "requested_model": "gpt-5.5",
+    "requested_reasoning_effort": "xhigh",
+    "cross_root_hints_reviewed": [
+      "basketball/basketballs",
+      "crab/crabs",
+      "python/pythons"
+    ]
+  },
+  "alias_map": {
+    "Face Packs": "Face Masks",
+    "Health and Mold Exposure": "Mold Exposure and Health",
+    "Scary Films": "Horror Films"
+  },
+  "aliases": [
+    {
+      "canonical_label": "Face Masks",
+      "label_occurrences": 1,
+      "raw_label": "Face Packs",
+      "records_affected": 1,
+      "reason": "Both labels denote facial mask or pack preparations under the same Facial Preparations scope; the Face Packs sample is a face-pack recipe matching the Face Masks category scope.",
+      "review_chunk": "chunk_05"
+    },
+    {
+      "canonical_label": "Mold Exposure and Health",
+      "label_occurrences": 1,
+      "raw_label": "Health and Mold Exposure",
+      "records_affected": 1,
+      "reason": "Both labels describe the health effects of mold exposure; the source labels differ by word order.",
+      "review_chunk": "chunk_08"
+    },
+    {
+      "canonical_label": "Horror Films",
+      "label_occurrences": 8,
+      "raw_label": "Scary Films",
+      "records_affected": 8,
+      "reason": "Both labels denote the same movie genre/category; samples for both concern scary or horror movies without a distinguishable scope difference.",
+      "review_chunk": "chunk_12"
+    }
+  ],
+  "kept_separate": [
+    {
+      "labels": [
+        "Basketball",
+        "Basketballs"
+      ],
+      "reason": "Basketball denotes the sport and related team/school/college category, while Basketballs denotes basketball gear/equipment.",
+      "review_chunk": "cross_root_hints"
+    },
+    {
+      "labels": [
+        "Crab",
+        "Crabs"
+      ],
+      "reason": "Crab denotes food and seafood recipe scope, while Crabs denotes animals/crustaceans as pets or wildlife.",
+      "review_chunk": "cross_root_hints"
+    },
+    {
+      "labels": [
+        "Python",
+        "Pythons"
+      ],
+      "reason": "Python denotes the programming language category, while Pythons denotes snake/reptile animal care scope.",
+      "review_chunk": "cross_root_hints"
+    },
+    {
+      "labels": [
+        "Games",
+        "Video Games"
+      ],
+      "reason": "Games is broader than Video Games.",
+      "review_chunk": "chunk_01"
+    },
+    {
+      "labels": [
+        "Video Games",
+        "PC Games",
+        "Online Games",
+        "Multi Platform Games"
+      ],
+      "reason": "These are hierarchical or platform/scope subdivisions, not aliases.",
+      "review_chunk": "chunk_01"
+    },
+    {
+      "labels": [
+        "Drawing Shapes",
+        "Drawing Shapes and Forms"
+      ],
+      "reason": "The labels are similar, but the paths show separate WikiHow categories with different article scopes.",
+      "review_chunk": "chunk_02"
+    },
+    {
+      "labels": [
+        "Knitting and Crochet",
+        "Knitting",
+        "Crochet"
+      ],
+      "reason": "Parent category and two distinct child craft scopes.",
+      "review_chunk": "chunk_02"
+    },
+    {
+      "labels": [
+        "Photography",
+        "Photographs"
+      ],
+      "reason": "Photography is the broad practice/category; Photographs covers photo objects and related handling.",
+      "review_chunk": "chunk_03"
+    },
+    {
+      "labels": [
+        "Curly Hair",
+        "Curling Hair"
+      ],
+      "reason": "Curly Hair is a hair texture category, while Curling Hair is the process of creating curls.",
+      "review_chunk": "chunk_04"
+    },
+    {
+      "labels": [
+        "Bleaching Hair",
+        "Lightening Hair Color",
+        "Dyeing Hair Blond"
+      ],
+      "reason": "These are related coloring scopes but not identical: bleaching is a method, lightening is broader, and dyeing blond is a target color category.",
+      "review_chunk": "chunk_04"
+    },
+    {
+      "labels": [
+        "Fake Tans",
+        "Self Tanner"
+      ],
+      "reason": "Fake Tans is the broader sunless/artificial tanning category, while Self Tanner is a narrower product/application subcategory.",
+      "review_chunk": "chunk_05"
+    },
+    {
+      "labels": [
+        "Footwear",
+        "Shoes"
+      ],
+      "reason": "Footwear includes shoes plus boots, sandals, slippers, high heels, and other footwear categories.",
+      "review_chunk": "chunk_06"
+    },
+    {
+      "labels": [
+        "Sympathy",
+        "Empathy"
+      ],
+      "reason": "Empathy appears as a narrower child category under Sympathy.",
+      "review_chunk": "chunk_07"
+    },
+    {
+      "labels": [
+        "Vegetarian Health",
+        "Vegetarian Diets"
+      ],
+      "reason": "Vegetarian Health and Vegetarian Diets occur in different branches and denote health guidance versus lifestyle diet category scope.",
+      "review_chunk": "chunk_07"
+    },
+    {
+      "labels": [
+        "Diabetes Mellitus",
+        "Diabetes Mellitus Type 2"
+      ],
+      "reason": "Parent disease category versus the specific type 2 subtype.",
+      "review_chunk": "chunk_08"
+    },
+    {
+      "labels": [
+        "Social Media",
+        "Social Networking Services",
+        "Social Bookmarking",
+        "Social Media Management Platforms"
+      ],
+      "reason": "These are related hierarchy levels or subareas, not the same scope.",
+      "review_chunk": "chunk_09"
+    },
+    {
+      "labels": [
+        "Programming",
+        "Web Programming",
+        "Markup Languages",
+        "HTML",
+        "CSS",
+        "JavaScript",
+        "Java"
+      ],
+      "reason": "These are adjacent programming or markup scopes but denote different hierarchy levels or different languages.",
+      "review_chunk": "chunk_09"
+    },
+    {
+      "labels": [
+        "Telephones",
+        "Cell Phones",
+        "Smartphones"
+      ],
+      "reason": "Related phone categories, but Telephones is broader and Cell Phones/Smartphones are distinct device scopes.",
+      "review_chunk": "chunk_10"
+    },
+    {
+      "labels": [
+        "Podcasts",
+        "Podcasting"
+      ],
+      "reason": "Near-synonymous wording, but the paths show a parent media/topic category and a more specific podcasting subcategory.",
+      "review_chunk": "chunk_10"
+    },
+    {
+      "labels": [
+        "Beatboxing and Rap",
+        "Rapping",
+        "Hip Hop Music"
+      ],
+      "reason": "Related and overlapping topics, but the labels represent different scopes.",
+      "review_chunk": "chunk_11"
+    },
+    {
+      "labels": [
+        "GIF",
+        "Animated GIF"
+      ],
+      "reason": "Animated GIF is shown as a narrower child category under GIF.",
+      "review_chunk": "chunk_12"
+    },
+    {
+      "labels": [
+        "Costumes",
+        "Cosplay"
+      ],
+      "reason": "Cosplay involves character/fandom portrayal, while Costumes is a broader costume-making and dressing category.",
+      "review_chunk": "chunk_12"
+    },
+    {
+      "labels": [
+        "Dog Behavior",
+        "Dog Behavioral Problems",
+        "Dog Training"
+      ],
+      "reason": "These are nested but distinct scopes: general behavior, problem behaviors, and training topics.",
+      "review_chunk": "chunk_13"
+    },
+    {
+      "labels": [
+        "Buns",
+        "Bread Rolls"
+      ],
+      "reason": "Both are baked bread products, but the taxonomy places them at different scopes.",
+      "review_chunk": "chunk_14"
+    },
+    {
+      "labels": [
+        "Vegetarian",
+        "Vegan"
+      ],
+      "reason": "Vegan is a stricter dietary scope nested under Vegetarian.",
+      "review_chunk": "chunk_14"
+    },
+    {
+      "labels": [
+        "Drinks",
+        "Alcoholic Drinks",
+        "Spirits and Liqueurs",
+        "Cocktails",
+        "Mixed Drink Shooters and Shots"
+      ],
+      "reason": "These are hierarchical beverage categories with different breadth.",
+      "review_chunk": "chunk_15"
+    },
+    {
+      "labels": [
+        "Cleaning",
+        "House Cleaning"
+      ],
+      "reason": "Cleaning is the broader housekeeping category, while House Cleaning is narrower.",
+      "review_chunk": "chunk_16"
+    },
+    {
+      "labels": [
+        "Drywall Plasterboard and Gyprock",
+        "Drywall"
+      ],
+      "reason": "The data shows Drywall as a child category under the broader Drywall Plasterboard and Gyprock category.",
+      "review_chunk": "chunk_16"
+    },
+    {
+      "labels": [
+        "Homework",
+        "Homework Skills"
+      ],
+      "reason": "Homework is broader; Homework Skills is nested beneath it with a narrower skill-focused scope.",
+      "review_chunk": "chunk_17"
+    },
+    {
+      "labels": [
+        "Language Translation",
+        "Language Interpretation"
+      ],
+      "reason": "Translation and interpretation are related language services but distinct scopes.",
+      "review_chunk": "chunk_17"
+    },
+    {
+      "labels": [
+        "Combat Sports",
+        "Martial Arts"
+      ],
+      "reason": "Combat Sports is a broader parent category that includes martial arts plus other fighting sports.",
+      "review_chunk": "chunk_18"
+    },
+    {
+      "labels": [
+        "Diving",
+        "Underwater Diving"
+      ],
+      "reason": "Diving is broader and also includes platform/acrobatics diving, while Underwater Diving is a specific subcategory.",
+      "review_chunk": "chunk_18"
+    },
+    {
+      "labels": [
+        "Finance and Business",
+        "Business"
+      ],
+      "reason": "Finance and Business is the root category, while Business is a narrower subcategory within it.",
+      "review_chunk": "chunk_19"
+    },
+    {
+      "labels": [
+        "Real Estate",
+        "Buying Property",
+        "Buying a House"
+      ],
+      "reason": "These form a hierarchy from general real estate to property buying to house buying.",
+      "review_chunk": "chunk_19"
+    },
+    {
+      "labels": [
+        "Youth Dating",
+        "Getting a Date (Youth)",
+        "First Dates"
+      ],
+      "reason": "These are nested but distinct scopes.",
+      "review_chunk": "chunk_20"
+    },
+    {
+      "labels": [
+        "Amphibian",
+        "Frogs",
+        "Toads",
+        "Newts and Salamanders"
+      ],
+      "reason": "Amphibian is the broader category; the others are taxonomic subcategories within it.",
+      "review_chunk": "chunk_20"
+    },
+    {
+      "labels": [
+        "Washington D.C. Travel",
+        "Washington Travel"
+      ],
+      "reason": "These denote different destinations: Washington, D.C. versus Washington state.",
+      "review_chunk": "chunk_21"
+    },
+    {
+      "labels": [
+        "New York Travel",
+        "New York City Travel"
+      ],
+      "reason": "New York Travel is broader state-level travel; New York City Travel is city-specific.",
+      "review_chunk": "chunk_21"
+    },
+    {
+      "labels": [
+        "Home Decorating",
+        "Home Decor"
+      ],
+      "reason": "Home Decorating is the broader parent category; Home Decor is a narrower subcategory within it.",
+      "review_chunk": "chunk_22"
+    },
+    {
+      "labels": [
+        "Ear Infections",
+        "Middle Ear Infections (Otitis Media)"
+      ],
+      "reason": "Middle ear infections are a specific subtype of ear infections.",
+      "review_chunk": "chunk_22"
+    },
+    {
+      "labels": [
+        "Decorating for Christmas",
+        "Christmas Decorations"
+      ],
+      "reason": "Decorating for Christmas covers the activity/theme broadly; Christmas Decorations is narrower for decoration items.",
+      "review_chunk": "chunk_23"
+    },
+    {
+      "labels": [
+        "National Days",
+        "National Days (USA)"
+      ],
+      "reason": "National Days is general, while National Days (USA) is region-specific.",
+      "review_chunk": "chunk_23"
+    },
+    {
+      "labels": [
+        "Etiquette",
+        "Manners"
+      ],
+      "reason": "Both concern social conduct, but the chunk treats them as distinct category scopes with different path labels.",
+      "review_chunk": "chunk_24"
+    },
+    {
+      "labels": [
+        "Hockey",
+        "Ice Hockey",
+        "Field Hockey",
+        "Roller Hockey"
+      ],
+      "reason": "Hockey is the broader parent category, while the others are sport-specific subcategories.",
+      "review_chunk": "chunk_24"
+    }
+  ],
+  "unresolved": []
+}

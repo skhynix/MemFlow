@@ -1,0 +1,346 @@
+{
+  "builder_version": 1,
+  "counts": {
+    "articles_read": 132533,
+    "category_alias_applications": 10,
+    "procedures": 132157,
+    "records_with_category_aliases": 10,
+    "skipped_missing_title": 0,
+    "skipped_too_few_steps": 376,
+    "total_steps": 1220265,
+    "trajectories": 132157
+  },
+  "deterministic": true,
+  "normalization": {
+    "assets": {
+      "category_aliases": {
+        "alias_count": 3,
+        "path": "data/normalization/category_aliases.json",
+        "schema_version": 1,
+        "sha256": "b50344cf18d1f51cf4565222684b65662a446c7c8dcfa33c5c1a99629e226753",
+        "unresolved_count": 0
+      }
+    }
+  },
+  "outputs": {
+    "procedures": {
+      "bytes": 744326869,
+      "records": 132157,
+      "sha256": "d4364ff7dd35ceac71d0f7f86b5c1f2cae2de6120403fdcfc5ca36ec0bad0f8f"
+    },
+    "trajectories": {
+      "bytes": 1363680844,
+      "records": 132157,
+      "sha256": "658032656db86ca494f48032a41d4a295cf42434387921d00d14e548785b9a28"
+    }
+  },
+  "raw_files": [
+    {
+      "articles_read": 5000,
+      "bytes": 31346236,
+      "category_alias_applications": 0,
+      "name": "wikiHow0.json",
+      "procedures": 4981,
+      "records_with_category_aliases": 0,
+      "sha256": "f3bfa22975d84b2fcb7f3e42dbcff756e373e306551118ad9166b0c3f4c79875",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 19
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 23329818,
+      "category_alias_applications": 0,
+      "name": "wikiHow1.json",
+      "procedures": 4972,
+      "records_with_category_aliases": 0,
+      "sha256": "7b558ed103be72aa6f841c4aab2e9f72742d58a80a3f887135171ee9eb865dd9",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 28
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 24003540,
+      "category_alias_applications": 0,
+      "name": "wikiHow2.json",
+      "procedures": 4988,
+      "records_with_category_aliases": 0,
+      "sha256": "615c02a700369e0d1dfe449158492ed640815d6ba029bb00da58068afa479cc5",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 12
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 29695114,
+      "category_alias_applications": 0,
+      "name": "wikiHow3.json",
+      "procedures": 4982,
+      "records_with_category_aliases": 0,
+      "sha256": "66458ed5303ae65812e5452bb1fb1a7f0120cafcabefac7055a8b9a79beb610f",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 18
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 30623413,
+      "category_alias_applications": 0,
+      "name": "wikiHow4.json",
+      "procedures": 4989,
+      "records_with_category_aliases": 0,
+      "sha256": "191b62e858124ee58973c84d9503423aafa5ee71c4e66194ce40397721f6e1a0",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 11
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 25640911,
+      "category_alias_applications": 1,
+      "name": "wikiHow5.json",
+      "procedures": 4974,
+      "records_with_category_aliases": 1,
+      "sha256": "f3556116d55b312bd4712fb8882a19c9bfb0691de6500464d6034b05aac40b9f",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 26
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 32838132,
+      "category_alias_applications": 0,
+      "name": "wikiHow6.json",
+      "procedures": 4995,
+      "records_with_category_aliases": 0,
+      "sha256": "f5f49dcad608877081ce29285541c10394bc6232710fbb096e1f1cc477fca705",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 5
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 33941785,
+      "category_alias_applications": 0,
+      "name": "wikiHow7.json",
+      "procedures": 4989,
+      "records_with_category_aliases": 0,
+      "sha256": "25c82b0b7f3080f76b6b7c9939dfdcb71d02d5135009edfe21705e05ecfd234d",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 11
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 29602063,
+      "category_alias_applications": 0,
+      "name": "wikiHow8.json",
+      "procedures": 4983,
+      "records_with_category_aliases": 0,
+      "sha256": "1cd18942d0ebe958facb7e4b8296dee1290d533f1bb8227b8113910a70afbd64",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 17
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 34357326,
+      "category_alias_applications": 0,
+      "name": "wikiHow9.json",
+      "procedures": 4987,
+      "records_with_category_aliases": 0,
+      "sha256": "ef51df1a109bb75dd55e3e35caddd215d761434b81310e22dd9fb72adfc705a6",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 13
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 34665048,
+      "category_alias_applications": 0,
+      "name": "wikiHow10.json",
+      "procedures": 4988,
+      "records_with_category_aliases": 0,
+      "sha256": "701e362ba093f4f6d799838495d43aed9ded90d5ab9ea5f17afa8244a95c3f0d",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 12
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 36811616,
+      "category_alias_applications": 1,
+      "name": "wikiHow11.json",
+      "procedures": 4994,
+      "records_with_category_aliases": 1,
+      "sha256": "0fb58c74aa101837914b4849afd81264232e40c9f2839714a73f2734fec87fb9",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 6
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 25623805,
+      "category_alias_applications": 0,
+      "name": "wikiHow12.json",
+      "procedures": 4992,
+      "records_with_category_aliases": 0,
+      "sha256": "b2768c54c4d16aebd428ecdfdf15e5c9184f7b5bf65446e332c89f35291729ae",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 8
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 28373220,
+      "category_alias_applications": 1,
+      "name": "wikiHow13.json",
+      "procedures": 4970,
+      "records_with_category_aliases": 1,
+      "sha256": "7aeca96f54c5cc703449d5e4b8dbe9adee85b85d1510574ef546463a1f354d3d",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 30
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 34279268,
+      "category_alias_applications": 0,
+      "name": "wikiHow14.json",
+      "procedures": 4990,
+      "records_with_category_aliases": 0,
+      "sha256": "11dcc3b40875299d5b7f70406cabb914d229e84c07172f3d48e90d3a92d64ac6",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 10
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 26083809,
+      "category_alias_applications": 0,
+      "name": "wikiHow15.json",
+      "procedures": 4988,
+      "records_with_category_aliases": 0,
+      "sha256": "9d11c4fb2f2f7f31d30b668b09f7e89b86724b1985b94edbff7140a5ea6198ea",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 12
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 29590569,
+      "category_alias_applications": 0,
+      "name": "wikiHow16.json",
+      "procedures": 4990,
+      "records_with_category_aliases": 0,
+      "sha256": "0dffc17e87e1669b887deca02e7f45ee74ce986d274d78529e2b3ff07e8357cd",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 10
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 26601999,
+      "category_alias_applications": 7,
+      "name": "wikiHow17.json",
+      "procedures": 4985,
+      "records_with_category_aliases": 7,
+      "sha256": "71fe63095a9f162eb1b1b5c064eecc31a331fd46936258365b4b5eaef17b57ae",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 15
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 32888153,
+      "category_alias_applications": 0,
+      "name": "wikiHow18.json",
+      "procedures": 4988,
+      "records_with_category_aliases": 0,
+      "sha256": "3394b115fa437c28bb2a9366a7642d5e4db0a98353fa1bdaf38a94907ac62367",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 12
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 31357297,
+      "category_alias_applications": 0,
+      "name": "wikiHow19.json",
+      "procedures": 4982,
+      "records_with_category_aliases": 0,
+      "sha256": "ec9a802d50f8b39cb614b014b42ce2af51cdb950cd6da594be2e4c147ae6e9ad",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 18
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 37766755,
+      "category_alias_applications": 0,
+      "name": "wikiHow20.json",
+      "procedures": 4995,
+      "records_with_category_aliases": 0,
+      "sha256": "ff82dd9d5b6e817ce6eb2c7bcf22cbdb47dc8ab242ae219c588ba55a3c28766e",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 5
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 32265211,
+      "category_alias_applications": 0,
+      "name": "wikiHow21.json",
+      "procedures": 4984,
+      "records_with_category_aliases": 0,
+      "sha256": "d09d8531db11a47a12efea6f83c879a9bacd00ca4a6a551c13a8c5438b1fb28c",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 16
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 33092121,
+      "category_alias_applications": 0,
+      "name": "wikiHow22.json",
+      "procedures": 4984,
+      "records_with_category_aliases": 0,
+      "sha256": "deabff85bb2eb5e6f5ba0eeff16a94737fbee131b861e919bf01dade39465eb3",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 16
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 30411621,
+      "category_alias_applications": 0,
+      "name": "wikiHow23.json",
+      "procedures": 4986,
+      "records_with_category_aliases": 0,
+      "sha256": "8dd14d3807a711847871479dfdfc464adffa4f3a9010c86b4a96e8a02998b780",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 14
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 34471749,
+      "category_alias_applications": 0,
+      "name": "wikiHow24.json",
+      "procedures": 4987,
+      "records_with_category_aliases": 0,
+      "sha256": "d797fb9e969b37791ff48ecb16bdf98d2edfe78c9de63057edf2a4c50a8e360e",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 13
+    },
+    {
+      "articles_read": 5000,
+      "bytes": 30909017,
+      "category_alias_applications": 0,
+      "name": "wikiHow25.json",
+      "procedures": 4988,
+      "records_with_category_aliases": 0,
+      "sha256": "369197a1895d1384f4549fd7acf1fc959ab7a34b8108ed476a9689e0021d4993",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 12
+    },
+    {
+      "articles_read": 2533,
+      "bytes": 13960952,
+      "category_alias_applications": 0,
+      "name": "wikiHow26.json",
+      "procedures": 2526,
+      "records_with_category_aliases": 0,
+      "sha256": "9a7f99f41a40fc40e56dfa809a551e425e84fdba584aa01eeb2e3c53f7823516",
+      "skipped_missing_title": 0,
+      "skipped_too_few_steps": 7
+    }
+  ],
+  "settings": {
+    "limit": null,
+    "min_steps": 3,
+    "shard_pattern": "wikiHow*.json"
+  },
+  "source": {
+    "dataset": "paolop/human-instructions-dataset-updated-json-files",
+    "license": "CC-BY-NC-SA-4.0",
+    "name": "human-instructions-dataset-updated-json-files"
+  }
+}

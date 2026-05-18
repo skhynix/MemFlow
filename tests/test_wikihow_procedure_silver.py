@@ -8,11 +8,16 @@ import math
 
 import pytest
 
+from benchmark import install_benchmark
 from benchmark.wikihow_procedure_silver.adapter import (
     RetrievedWikiHowProcedure,
     iter_wikihow_procedures,
     seed_wikihow_corpus,
     wikihow_record_to_procedure,
+)
+from benchmark.wikihow_procedure_silver.build_wikihow_procedures import (
+    DEFAULT_CATEGORY_ALIASES,
+    build_wikihow_procedures,
 )
 from benchmark.wikihow_procedure_silver.evaluation import (
     WikiHowBenchmarkQuery,
@@ -28,6 +33,16 @@ def _write_jsonl(path, records: list[dict]) -> None:
         "\n".join(json.dumps(record) for record in records) + "\n",
         encoding="utf-8",
     )
+
+
+def _sha256(path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 class FakeStore:
@@ -52,6 +67,94 @@ class FakeMemFlow:
 
     def add(self, procedure: Procedure) -> None:
         self.added.append(procedure)
+
+
+def test_wikihow_installer_without_raw_dir_reports_local_query_bank(capsys) -> None:
+    install_benchmark.install_wikihow_procedure_silver(raw_dir=None)
+
+    output = capsys.readouterr().out
+    assert "benchmark_data/query_bank.jsonl" in output
+    assert "Provide --raw-dir" in output
+
+
+def test_wikihow_builder_uses_temp_raw_shard_and_writes_manifest(tmp_path) -> None:
+    raw_dir = tmp_path / "raw"
+    output_dir = tmp_path / "data"
+    raw_dir.mkdir()
+    category_aliases = tmp_path / "category_aliases.json"
+    category_aliases.write_text(
+        json.dumps(
+            {
+                "alias_map": {"Raw Category": "Canonical Category"},
+                "schema_version": 1,
+                "unresolved": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (raw_dir / "wikiHow0.json").write_text(
+        json.dumps(
+            [
+                {
+                    "AuthorsCount": 2,
+                    "Categories": ["Root", "Raw Category"],
+                    "MainTask": "How to Brew Test Tea",
+                    "MainTaskSummary": "Make a reliable test cup.",
+                    "Steps": [
+                        {"Headline": "Heat water", "Description": "Use a kettle."},
+                        {"Headline": "Add leaves", "Description": "Measure tea."},
+                        {"Headline": "Steep", "Description": "Wait briefly."},
+                    ],
+                    "Time": "10 minutes",
+                    "URL": "https://example.test/tea",
+                    "Views": 42,
+                },
+                {
+                    "Categories": ["Root"],
+                    "MainTask": "Too Short",
+                    "Steps": [
+                        {"Headline": "Only one", "Description": "Skip me."},
+                    ],
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_wikihow_procedures(
+        input_dir=raw_dir,
+        output_dir=output_dir,
+        category_aliases=category_aliases,
+        expected_procedures_sha256=None,
+        expected_procedures_records=None,
+    )
+
+    procedures_path = output_dir / "wikihow_procedures.jsonl"
+    manifest_path = output_dir / "MANIFEST.json"
+    records = [json.loads(line) for line in procedures_path.read_text().splitlines()]
+    written_manifest = json.loads(manifest_path.read_text())
+
+    assert len(records) == 1
+    assert records[0]["title"] == "How to Brew Test Tea"
+    assert records[0]["category"] == "Canonical Category"
+    assert records[0]["metadata"]["category_normalization"]["aliases_applied"] == [
+        {"canonical_label": "Canonical Category", "raw_label": "Raw Category"}
+    ]
+    assert records[0]["tags"][-1] == "steps:3"
+    assert not (output_dir / "wikihow_trajectories.jsonl").exists()
+    assert manifest["counts"]["articles_read"] == 2
+    assert manifest["counts"]["procedures"] == 1
+    assert manifest["counts"]["skipped_too_few_steps"] == 1
+    assert written_manifest["outputs"]["procedures"]["sha256"] == _sha256(
+        procedures_path
+    )
+    assert written_manifest["verification"]["matched"] is True
+
+
+def test_wikihow_builder_default_category_alias_asset_is_vendored() -> None:
+    assert DEFAULT_CATEGORY_ALIASES.name == "category_aliases.json"
+    assert DEFAULT_CATEGORY_ALIASES.parent.name == "assets"
+    assert DEFAULT_CATEGORY_ALIASES.exists()
 
 
 def test_seed_wikihow_corpus_reuses_full_existing_corpus(tmp_path) -> None:

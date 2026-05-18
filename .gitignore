@@ -56,6 +56,11 @@ postgres_data/
 benchmark/results/
 results/
 
+# Local WikiHow benchmark corpus artifacts
+benchmark/wikihow_procedure_silver/.cache/
+benchmark/wikihow_procedure_silver/data/
+benchmark/wikihow_procedure_silver/raw/
+
 # Cloned external repositories
 benchmark/proced_mem_bench/Proced_mem_bench/
 

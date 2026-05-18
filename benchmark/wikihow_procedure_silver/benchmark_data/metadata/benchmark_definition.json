@@ -1,0 +1,54 @@
+{
+  "benchmark_name": "wikihow-procedure-silver-v1",
+  "definition_revision": "2026-05-20.per-query-source-holdout",
+  "deterministic": true,
+  "label_consistency_checks": {
+    "duplicate_source_procedure_ids": [],
+    "queries_with_any_query_source_as_relevant_id": 76,
+    "query_count": 1000,
+    "relevant_ids_missing_from_source_corpus": [],
+    "source_id_in_own_relevant_list_count": 0,
+    "source_ids_missing_from_source_corpus": [],
+    "unique_query_source_ids_used_as_relevant_ids_elsewhere": 75,
+    "unique_source_procedure_ids": 1000
+  },
+  "query_bank": {
+    "path": "benchmark_data/query_bank.jsonl",
+    "records": 1000,
+    "sha256": "90f64baf9f2c46e153df42dc820c6167d273c42c295b0f78d00d4116d7fe85ef",
+    "size_bytes": 3264545
+  },
+  "retrieval_corpus_policy": {
+    "do_not_use_global_source_holdout_for_v1": true,
+    "effective_corpus_size_per_query": 132156,
+    "global_source_holdout_note": "Some source_procedure_id values are valid relevant_procedure_ids for other queries in v1; globally removing all source IDs would invalidate those labels.",
+    "rule": "For each query, rank the full source corpus after excluding that query's source_procedure_id from the retrievable candidate set.",
+    "scope": "per_query",
+    "source_procedure_id_is_not_relevant_for_its_own_query": true,
+    "source_procedure_id_is_provenance_only": true
+  },
+  "scoring_policy": {
+    "relevance_field": "relevant_procedure_ids",
+    "relevance_type": "binary",
+    "source_procedure_id_filtering": "exclude the current query source before truncating to top-k and before metric computation"
+  },
+  "source_corpus": {
+    "builder_script": "build_wikihow_procedures.py",
+    "full_corpus_record_count": 132157,
+    "path": "data/wikihow_procedures.jsonl",
+    "records": 132157,
+    "sha256": "d4364ff7dd35ceac71d0f7f86b5c1f2cae2de6120403fdcfc5ca36ec0bad0f8f",
+    "size_bytes": 744326869,
+    "source_dataset": "paolop/human-instructions-dataset-updated-json-files",
+    "source_license": "CC-BY-NC-SA-4.0",
+    "source_url": "https://www.kaggle.com/datasets/paolop/human-instructions-dataset-updated-json-files"
+  },
+  "source_holdout": {
+    "holdout_scope": "per_query",
+    "path": "benchmark_data/metadata/source_holdout.jsonl",
+    "records": 1000,
+    "sha256": "755e375164bc825b5f492964177936368b4f0a30b97c875bab8f50bac02ef93d",
+    "size_bytes": 235095,
+    "unique_source_procedure_ids": 1000
+  }
+}
