@@ -4,11 +4,21 @@
 from __future__ import annotations
 
 import json
+import math
+
+import pytest
 
 from benchmark.wikihow_procedure_silver.adapter import (
+    RetrievedWikiHowProcedure,
     iter_wikihow_procedures,
     seed_wikihow_corpus,
     wikihow_record_to_procedure,
+)
+from benchmark.wikihow_procedure_silver.evaluation import (
+    WikiHowBenchmarkQuery,
+    compute_binary_ir_metrics,
+    evaluate_wikihow_queries,
+    load_wikihow_query_bank,
 )
 from memflow.models import Procedure
 
@@ -314,3 +324,104 @@ def test_wikihow_loader_and_conversion_preserve_procedure_fields(tmp_path) -> No
     assert stats.num_reused == 0
     assert stats.num_skipped == 1
     assert stats.category_counts == {"Food and Entertaining": 1}
+
+
+def test_wikihow_query_bank_loader_streams_jsonl_records(tmp_path) -> None:
+    query_bank_path = tmp_path / "query_bank.jsonl"
+    _write_jsonl(
+        query_bank_path,
+        [
+            {
+                "query_id": "q_001",
+                "query": "make a cup of tea",
+                "source_procedure_id": "wh_001",
+                "relevant_procedure_ids": ["wh_001", "wh_002"],
+                "source_metadata": {"category": "Food and Entertaining"},
+                "relevance_notes": {"reason": "same procedure"},
+                "rejected_close_candidates": ["wh_099"],
+            },
+            {
+                "query_id": "q_002",
+                "query": "repair a zipper",
+                "source_procedure_id": "wh_050",
+                "relevant_procedure_ids": ["wh_050"],
+                "source_metadata": {"category": "Clothing"},
+                "relevance_notes": None,
+                "rejected_close_candidates": [],
+            },
+        ],
+    )
+
+    queries = load_wikihow_query_bank(query_bank_path, max_queries=1)
+
+    assert len(queries) == 1
+    assert queries[0].query_id == "q_001"
+    assert queries[0].query == "make a cup of tea"
+    assert queries[0].source_procedure_id == "wh_001"
+    assert queries[0].relevant_procedure_ids == ["wh_001", "wh_002"]
+    assert queries[0].source_metadata == {"category": "Food and Entertaining"}
+    assert queries[0].rejected_close_candidates == ["wh_099"]
+
+
+def test_binary_ir_metrics_use_full_relevant_set_denominators() -> None:
+    metrics = compute_binary_ir_metrics(
+        retrieved_ids=["rel_a", "not_rel"],
+        relevant_ids=["rel_a", "rel_b", "rel_c"],
+        k_values=[1, 2, 3],
+    )
+
+    assert metrics["num_relevant"] == 3
+    assert metrics["num_relevant_retrieved"] == 1
+    assert metrics["hit_at_k"]["3"] == 1.0
+    assert metrics["precision_at_k"]["3"] == pytest.approx(1 / 3)
+    assert metrics["recall_at_k"]["2"] == pytest.approx(1 / 3)
+    assert metrics["average_precision"] == pytest.approx(1 / 3)
+    assert metrics["reciprocal_rank"] == 1.0
+
+    ideal_dcg_at_3 = 1.0 + (1.0 / math.log2(3)) + (1.0 / math.log2(4))
+    assert metrics["ndcg_at_k"]["3"] == pytest.approx(1.0 / ideal_dcg_at_3)
+
+
+def test_evaluation_stratifies_by_source_normalized_root_category() -> None:
+    class FakeRetrieval:
+        def retrieve(self, query: str, k: int = 5):
+            return [
+                RetrievedWikiHowProcedure(
+                    procedure_id="rel_a",
+                    title="Relevant A",
+                    category="Cleaning Your Computer",
+                    tags=[],
+                    score=1.0,
+                )
+            ]
+
+    queries = [
+        WikiHowBenchmarkQuery(
+            query_id="q_001",
+            query="clean my laptop keys",
+            source_procedure_id="source_a",
+            relevant_procedure_ids=["rel_a"],
+            source_metadata={
+                "source_normalized_root_category": "Computers and Electronics"
+            },
+            relevance_notes=[],
+            rejected_close_candidates=[],
+        )
+    ]
+
+    result = evaluate_wikihow_queries(
+        retrieval_system=FakeRetrieval(),
+        queries=queries,
+        k_values=[1],
+        top_k=1,
+    )
+
+    assert set(result.source_category_stratified_metrics) == {
+        "Computers and Electronics"
+    }
+    assert (
+        result.source_category_stratified_metrics["Computers and Electronics"][
+            "hit_at_k"
+        ]["1"]
+        == 1.0
+    )
