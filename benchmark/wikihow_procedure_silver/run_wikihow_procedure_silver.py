@@ -66,10 +66,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--user-id", default="benchmark")
     parser.add_argument("--k-values", nargs="+", type=int, default=[1, 3, 5, 10])
-    parser.add_argument("--query-bank-path", required=True)
+    parser.add_argument("--query-bank-path")
     parser.add_argument("--corpus-path", required=True)
     parser.add_argument("--results-dir", default="results")
     parser.add_argument("--results-filename")
+    parser.add_argument(
+        "--seed-only",
+        action="store_true",
+        help="Seed or reuse the WikiHow corpus and skip query evaluation.",
+    )
     parser.add_argument(
         "--clear-existing",
         action="store_true",
@@ -83,7 +88,10 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         help="Evaluate only the first N query-bank records for smoke tests.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.seed_only and not args.query_bank_path:
+        parser.error("--query-bank-path is required unless --seed-only is set")
+    return args
 
 
 def _normalized_k_values(raw_values: list[int]) -> list[int]:
@@ -128,6 +136,23 @@ def _print_summary(
         )
 
 
+def _print_seed_summary(
+    backend: str,
+    corpus_size: int,
+    execution_time: float,
+    seed_stats: dict[str, Any],
+) -> None:
+    print("\n=== WikiHow Procedure Silver Seed Summary ===")
+    print("Mode: seed-only")
+    print(f"Backend: {backend}")
+    print(f"Corpus size: {corpus_size}")
+    print(f"Seeded: {seed_stats.get('num_seeded', 0)}")
+    print(f"Reused: {seed_stats.get('num_reused', 0)}")
+    print(f"Skipped: {seed_stats.get('num_skipped', 0)}")
+    print(f"Deleted: {seed_stats.get('num_deleted', 0)}")
+    print(f"Execution time (s): {execution_time:.3f}")
+
+
 def main() -> None:
     # Load .env file before parsing args.
     # Priority: CLI (execution params only) > env > .env > hardcoded default
@@ -137,9 +162,9 @@ def main() -> None:
     args = _parse_args()
 
     k_values = _normalized_k_values(args.k_values)
-    if not k_values:
+    if not args.seed_only and not k_values:
         raise ValueError("--k-values must contain at least one positive integer")
-    top_k = max(k_values)
+    top_k = max(k_values) if k_values else None
 
     backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
     llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
@@ -157,6 +182,58 @@ def main() -> None:
     )
     corpus_size = seed_stats.active_corpus_size
 
+    if args.seed_only:
+        elapsed = time.perf_counter() - start
+        seed_stats_payload = seed_stats.to_dict()
+        results_payload = {
+            "benchmark_name": "wikihow_procedure_silver_v1",
+            "run_mode": "seed_only",
+            "system_name": "memflow_seed_wikihow_procedure_silver",
+            "system_info": {
+                "method": "memflow.add",
+                "backend": backend,
+                "user_id": args.user_id,
+                "corpus_size": corpus_size,
+                "llm_provider": llm_provider,
+                "llm_model": llm_model,
+            },
+            "settings": {
+                "user_id": args.user_id,
+                "corpus_path": args.corpus_path,
+                "results_dir": args.results_dir,
+                "results_filename": args.results_filename,
+                "seed_only": args.seed_only,
+                "clear_existing": args.clear_existing,
+                "backend": backend,
+                "llm_provider": llm_provider,
+                "llm_model": llm_model,
+                "llm_api_base": os.environ.get("LLM_API_BASE"),
+                "data_dir": os.environ.get("MEMFLOW_DATA_DIR"),
+                "memmachine_base_url": os.environ.get("MEMMACHINE_BASE_URL"),
+                "memmachine_org_id": os.environ.get("MEMMACHINE_ORG_ID"),
+                "memmachine_project": os.environ.get("MEMMACHINE_PROJECT"),
+                "memmachine_api_key": os.environ.get("MEMMACHINE_API_KEY"),
+            },
+            "corpus_stats": seed_stats_payload,
+            "execution_time_seconds": elapsed,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        results_dir = Path(args.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+        output_path = _results_path(results_dir, args.results_filename)
+        output_path.write_text(json.dumps(results_payload, indent=2), encoding="utf-8")
+
+        _print_seed_summary(
+            backend=backend,
+            corpus_size=corpus_size,
+            execution_time=elapsed,
+            seed_stats=seed_stats_payload,
+        )
+        print(f"\nSaved results: {output_path}")
+        return
+
+    assert top_k is not None
     retrieval_system = MemFlowWikiHowAdapter(
         memflow=memflow,
         user_id=args.user_id,
@@ -195,8 +272,10 @@ def main() -> None:
             "corpus_path": args.corpus_path,
             "results_dir": args.results_dir,
             "results_filename": args.results_filename,
+            "seed_only": args.seed_only,
             "clear_existing": args.clear_existing,
             "max_queries": args.max_queries,
+            "source_holdout_policy": "per_query_source_procedure_id",
             "backend": backend,
             "llm_provider": llm_provider,
             "llm_model": llm_model,
@@ -212,6 +291,7 @@ def main() -> None:
             "num_queries_total": query_bank_total,
             "num_queries_evaluated": len(queries),
             "max_queries": args.max_queries,
+            "source_holdout_scope": "per_query",
         },
         "overall_metrics": eval_result.overall_metrics,
         "source_category_stratified_metrics": (

@@ -57,12 +57,32 @@ path and a reminder that the corpus must be built from the Kaggle raw files.
 
 ## Run
 
+To seed or reuse the corpus without running evaluation, use `--seed-only`.
+This does not require a query bank path:
+
+```bash
+uv run benchmark/wikihow_procedure_silver/run_wikihow_procedure_silver.py \
+  --corpus-path benchmark/wikihow_procedure_silver/data/wikihow_procedures.jsonl \
+  --results-dir benchmark/results \
+  --seed-only
+```
+
+The seed-only result JSON records the backend settings, corpus stats, and
+elapsed time, but does not include query metrics.
+
+To run the full benchmark, pass both the corpus and query bank:
+
 ```bash
 uv run benchmark/wikihow_procedure_silver/run_wikihow_procedure_silver.py \
   --corpus-path benchmark/wikihow_procedure_silver/data/wikihow_procedures.jsonl \
   --query-bank-path benchmark/wikihow_procedure_silver/benchmark_data/query_bank.jsonl \
   --results-dir benchmark/results
 ```
+
+During evaluation, the runner treats each query's `source_procedure_id` as
+provenance only. It excludes that source procedure from the retrievable
+candidates before top-k truncation and metric computation, matching the
+Procedure Silver v1 per-query source holdout definition.
 
 By default, seeding reuses existing WikiHow procedures for the selected
 `--user-id`: the runner lists existing procedure IDs and only calls

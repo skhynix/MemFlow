@@ -40,7 +40,9 @@ class CorpusSeedStats:
         return self.num_seeded + self.num_reused
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["active_corpus_size"] = self.active_corpus_size
+        return payload
 
 
 @dataclass
@@ -234,11 +236,20 @@ class MemFlowWikiHowAdapter:
             "llm_model": self.llm_model,
         }
 
-    def retrieve(self, query: str, k: int = 5) -> list[RetrievedWikiHowProcedure]:
-        search_results = self.memflow.search(query, user_id=self.user_id, top_k=k)
+    def retrieve(
+        self,
+        query: str,
+        k: int = 5,
+        exclude_procedure_ids: set[str] | None = None,
+    ) -> list[RetrievedWikiHowProcedure]:
+        excluded = exclude_procedure_ids or set()
+        fetch_k = k + len(excluded)
+        search_results = self.memflow.search(query, user_id=self.user_id, top_k=fetch_k)
         retrieved: list[RetrievedWikiHowProcedure] = []
         for result in search_results:
             procedure = result.procedure
+            if procedure.id in excluded:
+                continue
             score = float(result.score) if result.score is not None else 0.0
             retrieved.append(
                 RetrievedWikiHowProcedure(
@@ -249,4 +260,4 @@ class MemFlowWikiHowAdapter:
                     score=score,
                 )
             )
-        return retrieved
+        return retrieved[:k]

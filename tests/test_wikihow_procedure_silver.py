@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 
 import pytest
 
 from benchmark import install_benchmark
+from benchmark.wikihow_procedure_silver import (
+    run_wikihow_procedure_silver as wikihow_runner,
+)
 from benchmark.wikihow_procedure_silver.adapter import (
+    MemFlowWikiHowAdapter,
     RetrievedWikiHowProcedure,
     iter_wikihow_procedures,
     seed_wikihow_corpus,
@@ -25,7 +30,7 @@ from benchmark.wikihow_procedure_silver.evaluation import (
     evaluate_wikihow_queries,
     load_wikihow_query_bank,
 )
-from memflow.models import Procedure
+from memflow.models import Procedure, SearchResult
 
 
 def _write_jsonl(path, records: list[dict]) -> None:
@@ -67,6 +72,16 @@ class FakeMemFlow:
 
     def add(self, procedure: Procedure) -> None:
         self.added.append(procedure)
+
+
+class FakeSearchMemFlow:
+    def __init__(self, results: list[SearchResult]) -> None:
+        self.results = results
+        self.search_calls: list[dict] = []
+
+    def search(self, query: str, user_id: str, top_k: int) -> list[SearchResult]:
+        self.search_calls.append({"query": query, "user_id": user_id, "top_k": top_k})
+        return self.results[:top_k]
 
 
 def test_wikihow_installer_without_raw_dir_reports_local_query_bank(capsys) -> None:
@@ -155,6 +170,91 @@ def test_wikihow_builder_default_category_alias_asset_is_vendored() -> None:
     assert DEFAULT_CATEGORY_ALIASES.name == "category_aliases.json"
     assert DEFAULT_CATEGORY_ALIASES.parent.name == "assets"
     assert DEFAULT_CATEGORY_ALIASES.exists()
+
+
+def test_wikihow_runner_allows_seed_only_without_query_bank(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_wikihow_procedure_silver.py",
+            "--corpus-path",
+            "wikihow_procedures.jsonl",
+            "--seed-only",
+        ],
+    )
+
+    args = wikihow_runner._parse_args()
+
+    assert args.seed_only is True
+    assert args.query_bank_path is None
+    assert args.corpus_path == "wikihow_procedures.jsonl"
+
+
+def test_wikihow_runner_requires_query_bank_for_evaluation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_wikihow_procedure_silver.py",
+            "--corpus-path",
+            "wikihow_procedures.jsonl",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        wikihow_runner._parse_args()
+
+
+def test_wikihow_runner_seed_only_skips_query_evaluation(tmp_path, monkeypatch) -> None:
+    corpus_path = tmp_path / "wikihow_procedures.jsonl"
+    results_dir = tmp_path / "results"
+    _write_jsonl(
+        corpus_path,
+        [
+            {
+                "id": "wh_001",
+                "title": "How to Brew Tea",
+                "content": "1. Heat water\n2. Steep leaves",
+                "category": "Food and Entertaining",
+            }
+        ],
+    )
+    memflow = FakeMemFlow()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("seed-only mode must not evaluate queries")
+
+    monkeypatch.setattr(wikihow_runner, "_load_env_file", lambda: None)
+    monkeypatch.setattr(wikihow_runner, "MemFlow", lambda: memflow)
+    monkeypatch.setattr(wikihow_runner, "count_query_bank_records", fail_if_called)
+    monkeypatch.setattr(wikihow_runner, "load_wikihow_query_bank", fail_if_called)
+    monkeypatch.setattr(wikihow_runner, "evaluate_wikihow_queries", fail_if_called)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_wikihow_procedure_silver.py",
+            "--corpus-path",
+            str(corpus_path),
+            "--seed-only",
+            "--results-dir",
+            str(results_dir),
+            "--results-filename",
+            "seed_only",
+        ],
+    )
+
+    wikihow_runner.main()
+
+    payload = json.loads((results_dir / "seed_only.json").read_text())
+    assert payload["run_mode"] == "seed_only"
+    assert payload["system_info"]["method"] == "memflow.add"
+    assert payload["settings"]["seed_only"] is True
+    assert payload["corpus_stats"]["num_seeded"] == 1
+    assert payload["corpus_stats"]["active_corpus_size"] == 1
+    assert "overall_metrics" not in payload
+    assert [proc.id for proc in memflow.added] == ["wh_001"]
 
 
 def test_seed_wikihow_corpus_reuses_full_existing_corpus(tmp_path) -> None:
@@ -429,6 +529,53 @@ def test_wikihow_loader_and_conversion_preserve_procedure_fields(tmp_path) -> No
     assert stats.category_counts == {"Food and Entertaining": 1}
 
 
+def test_wikihow_adapter_excludes_query_source_and_refills_top_k() -> None:
+    source_proc = Procedure(
+        id="source_a",
+        title="Source Procedure",
+        content="source",
+        user_id="bench-user",
+    )
+    rel_proc = Procedure(
+        id="rel_a",
+        title="Relevant Procedure",
+        content="relevant",
+        user_id="bench-user",
+    )
+    next_proc = Procedure(
+        id="next_a",
+        title="Next Procedure",
+        content="next",
+        user_id="bench-user",
+    )
+    memflow = FakeSearchMemFlow(
+        results=[
+            SearchResult(procedure=source_proc, score=0.99),
+            SearchResult(procedure=rel_proc, score=0.90),
+            SearchResult(procedure=next_proc, score=0.80),
+        ]
+    )
+    adapter = MemFlowWikiHowAdapter(
+        memflow=memflow,
+        user_id="bench-user",
+        corpus_size=3,
+        backend="pgvector",
+        llm_provider="ollama",
+        llm_model="test-model",
+    )
+
+    results = adapter.retrieve(
+        "find the source task",
+        k=2,
+        exclude_procedure_ids={"source_a"},
+    )
+
+    assert memflow.search_calls == [
+        {"query": "find the source task", "user_id": "bench-user", "top_k": 3}
+    ]
+    assert [result.procedure_id for result in results] == ["rel_a", "next_a"]
+
+
 def test_wikihow_query_bank_loader_streams_jsonl_records(tmp_path) -> None:
     query_bank_path = tmp_path / "query_bank.jsonl"
     _write_jsonl(
@@ -487,7 +634,12 @@ def test_binary_ir_metrics_use_full_relevant_set_denominators() -> None:
 
 def test_evaluation_stratifies_by_source_normalized_root_category() -> None:
     class FakeRetrieval:
-        def retrieve(self, query: str, k: int = 5):
+        def retrieve(
+            self,
+            query: str,
+            k: int = 5,
+            exclude_procedure_ids: set[str] | None = None,
+        ):
             return [
                 RetrievedWikiHowProcedure(
                     procedure_id="rel_a",
@@ -528,3 +680,73 @@ def test_evaluation_stratifies_by_source_normalized_root_category() -> None:
         ]["1"]
         == 1.0
     )
+
+
+def test_evaluation_applies_per_query_source_holdout() -> None:
+    class FakeRetrieval:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def retrieve(
+            self,
+            query: str,
+            k: int = 5,
+            exclude_procedure_ids: set[str] | None = None,
+        ):
+            self.calls.append(
+                {
+                    "query": query,
+                    "k": k,
+                    "exclude_procedure_ids": set(exclude_procedure_ids or set()),
+                }
+            )
+            candidates = [
+                RetrievedWikiHowProcedure(
+                    procedure_id="source_a",
+                    title="Source",
+                    category="Cleaning Your Computer",
+                    tags=[],
+                    score=1.0,
+                ),
+                RetrievedWikiHowProcedure(
+                    procedure_id="rel_a",
+                    title="Relevant A",
+                    category="Cleaning Your Computer",
+                    tags=[],
+                    score=0.9,
+                ),
+            ]
+            return [
+                item
+                for item in candidates
+                if item.procedure_id not in (exclude_procedure_ids or set())
+            ][:k]
+
+    retrieval = FakeRetrieval()
+    queries = [
+        WikiHowBenchmarkQuery(
+            query_id="q_001",
+            query="clean my laptop keys",
+            source_procedure_id="source_a",
+            relevant_procedure_ids=["rel_a"],
+            source_metadata={},
+        )
+    ]
+
+    result = evaluate_wikihow_queries(
+        retrieval_system=retrieval,
+        queries=queries,
+        k_values=[1],
+        top_k=1,
+    )
+
+    assert retrieval.calls == [
+        {
+            "query": "clean my laptop keys",
+            "k": 1,
+            "exclude_procedure_ids": {"source_a"},
+        }
+    ]
+    assert result.query_results[0]["heldout_procedure_ids"] == ["source_a"]
+    assert result.query_results[0]["retrieved"][0]["procedure_id"] == "rel_a"
+    assert result.overall_metrics["hit_at_k"]["1"] == 1.0

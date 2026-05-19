@@ -229,6 +229,11 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _source_holdout_ids(query: WikiHowBenchmarkQuery) -> set[str]:
+    source_id = str(query.source_procedure_id).strip()
+    return {source_id} if source_id else set()
+
+
 def evaluate_wikihow_queries(
     retrieval_system: Any,
     queries: list[WikiHowBenchmarkQuery],
@@ -243,7 +248,12 @@ def evaluate_wikihow_queries(
     print(f"Starting WikiHow Procedure Silver evaluation of {total} queries...")
 
     for index, query in enumerate(queries, start=1):
-        retrieved = retrieval_system.retrieve(query.query, k=top_k)
+        heldout_ids = _source_holdout_ids(query)
+        retrieved = retrieval_system.retrieve(
+            query.query,
+            k=top_k,
+            exclude_procedure_ids=heldout_ids,
+        )
         retrieved_ids = [str(item.procedure_id) for item in retrieved]
 
         metrics = compute_binary_ir_metrics(
@@ -273,6 +283,7 @@ def evaluate_wikihow_queries(
                 "source_procedure_id": query.source_procedure_id,
                 "relevant_procedure_ids": query.relevant_procedure_ids,
                 "source_metadata": query.source_metadata,
+                "heldout_procedure_ids": sorted(heldout_ids),
                 "relevance_notes": query.relevance_notes,
                 "rejected_close_candidates": query.rejected_close_candidates,
                 "retrieved": retrieved_payload,
