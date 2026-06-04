@@ -368,7 +368,7 @@ def run_repl(
 
     while state["running"]:
         try:
-            message = read_input("> ")
+            message = read_input("\n> ")
         except EOFError:
             print(file=output)
             break
