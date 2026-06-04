@@ -62,6 +62,13 @@ def _strip_surrounding_blank_lines(text: str) -> str:
     return "\n".join(lines)
 
 
+def _grey(text: str) -> str:
+    """Wrap text with ANSI grey color codes."""
+    GREY = "\033[90m"
+    RESET = "\033[0m"
+    return f"{GREY}{text}{RESET}"
+
+
 class StatusLine:
     """Show transient progress while a synchronous chat() call is running."""
 
@@ -419,15 +426,15 @@ def run_repl(
         print(response, file=output)
 
         if state["verbose"]:
-            print(
-                format_verbose_trace(
-                    result,
-                    user_id=state["user_id"],
-                    allow_execute=state["allow_execute"],
-                    history_count=len(history),
-                ),
-                file=output,
+            trace_output = format_verbose_trace(
+                result,
+                user_id=state["user_id"],
+                allow_execute=state["allow_execute"],
+                history_count=len(history),
             )
+            if getattr(output, "isatty", lambda: False)():
+                trace_output = _grey(trace_output)
+            print(trace_output, file=output)
 
         if use_history:
             history.append({"role": "user", "content": message})
