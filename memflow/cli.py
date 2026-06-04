@@ -42,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Do not pass prior turns back into chat().",
     )
+    parser.add_argument(
+        "-p",
+        "--prompt",
+        metavar="TEXT",
+        help="Process a single prompt and exit.",
+    )
     return parser
 
 
@@ -352,6 +358,65 @@ def _handle_command(
     return False
 
 
+def run_single_prompt(
+    manager: "MemFlow | None" = None,
+    *,
+    manager_factory: Callable[[], "MemFlow"] | None = None,
+    prompt: str = "",
+    user_id: str = "default",
+    verbose: bool = False,
+    allow_execute: bool = False,
+    use_history: bool = True,
+    output: TextIO = sys.stdout,
+) -> int:
+    """Process a single prompt and exit immediately."""
+    context: list[dict] | None = None
+    init_error: str | None = None
+    result: dict | None = None
+
+    if manager is None:
+        if manager_factory is None:
+            from memflow.manager import MemFlow
+
+            manager_factory = MemFlow
+        try:
+            manager = manager_factory()
+        except ModuleNotFoundError as exc:
+            init_error = f"Unable to initialize MemFlow: missing optional dependency '{exc.name}'."
+        except Exception as exc:
+            init_error = f"Unable to initialize MemFlow: {exc}"
+
+    if init_error is not None:
+        print(init_error, file=output)
+        return 1
+
+    with StatusLine(output):
+        result = manager.chat(
+            prompt,
+            user_id=user_id,
+            history=context,
+            allow_execute=allow_execute,
+        )
+
+    response = _strip_surrounding_blank_lines(result.get("response", ""))
+    print(response, file=output)
+    print(file=output)
+
+    if verbose:
+        trace_output = format_verbose_trace(
+            result,
+            user_id=user_id,
+            allow_execute=allow_execute,
+            history_count=0,
+        )
+        if getattr(output, "isatty", lambda: False)():
+            trace_output = _grey(trace_output)
+        print(trace_output, file=output)
+        print(file=output)
+
+    return 0
+
+
 def run_repl(
     manager: "MemFlow | None" = None,
     *,
@@ -445,6 +510,17 @@ def run_repl(
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.prompt is not None:
+        return run_single_prompt(
+            manager_factory=_create_manager,
+            prompt=args.prompt,
+            user_id=args.user_id,
+            verbose=args.verbose,
+            allow_execute=args.execute,
+            use_history=not args.no_history,
+        )
+
     return run_repl(
         manager_factory=_create_manager,
         user_id=args.user_id,
