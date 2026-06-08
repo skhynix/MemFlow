@@ -60,9 +60,85 @@ class FakeStore:
             return list(self.existing)
         return [proc for proc in self.existing if proc.user_id == user_id]
 
-    def delete(self, procedure_id: str) -> bool:
-        self.deleted.append(procedure_id)
-        return True
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> None | int:
+        if isinstance(procedure, list):
+            self.existing.extend(procedure)
+            return len(procedure)
+        else:
+            self.existing.append(procedure)
+            return None
+
+    def search(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        from memflow.models import SearchResult
+
+        if isinstance(query, list):
+            all_results = []
+            for q in query:
+                results = []
+                for proc in self.existing:
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    results.append(SearchResult(procedure=proc, score=0.9))
+                all_results.append(results[:top_k])
+            return all_results
+        else:
+            results = []
+            for proc in self.existing:
+                if user_id and proc.user_id != user_id:
+                    continue
+                results.append(SearchResult(procedure=proc, score=0.9))
+            return results[:top_k]
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        import asyncio
+
+        return await asyncio.to_thread(self.search, query, top_k, user_id)
+
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int:
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                self.deleted.append(i)
+                num_deleted += 1
+            return num_deleted
+        else:
+            self.deleted.append(id)
+            return True
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int:
+        import asyncio
+
+        return await asyncio.to_thread(self.delete, id)
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None:
+        return self.add(procedure, batch_size)
 
 
 class FakeMemFlow:
@@ -70,8 +146,25 @@ class FakeMemFlow:
         self.store = FakeStore(existing=existing)
         self.added: list[Procedure] = []
 
-    def add(self, procedure: Procedure) -> None:
-        self.added.append(procedure)
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        user_id: str = "default",
+        batch_size: int = 50,
+    ) -> dict | None:
+        if isinstance(procedure, list):
+            for proc in procedure:
+                proc.user_id = user_id
+                self.added.append(proc)
+            return {
+                "num_seeded": len(procedure),
+                "num_skipped": 0,
+                "total": len(procedure),
+            }
+        else:
+            procedure.user_id = user_id
+            self.added.append(procedure)
+            return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
 
 
 class FakeSearchMemFlow:
@@ -650,6 +743,25 @@ def test_evaluation_stratifies_by_source_normalized_root_category() -> None:
                 )
             ]
 
+        def retrieve_batch(
+            self,
+            queries: list[tuple[str, set[str]]],
+            k: int = 5,
+        ):
+            results = []
+            for query, exclude in queries:
+                result = [
+                    RetrievedWikiHowProcedure(
+                        procedure_id="rel_a",
+                        title="Relevant A",
+                        category="Cleaning Your Computer",
+                        tags=[],
+                        score=1.0,
+                    )
+                ]
+                results.append(result)
+            return results
+
     queries = [
         WikiHowBenchmarkQuery(
             query_id="q_001",
@@ -721,6 +833,44 @@ def test_evaluation_applies_per_query_source_holdout() -> None:
                 for item in candidates
                 if item.procedure_id not in (exclude_procedure_ids or set())
             ][:k]
+
+        def retrieve_batch(
+            self,
+            queries: list[tuple[str, set[str]]],
+            k: int = 5,
+        ):
+            results = []
+            for query, exclude in queries:
+                self.calls.append(
+                    {
+                        "query": query,
+                        "k": k,
+                        "exclude_procedure_ids": set(exclude or set()),
+                    }
+                )
+                candidates = [
+                    RetrievedWikiHowProcedure(
+                        procedure_id="source_a",
+                        title="Source",
+                        category="Cleaning Your Computer",
+                        tags=[],
+                        score=1.0,
+                    ),
+                    RetrievedWikiHowProcedure(
+                        procedure_id="rel_a",
+                        title="Relevant A",
+                        category="Cleaning Your Computer",
+                        tags=[],
+                        score=0.9,
+                    ),
+                ]
+                result = [
+                    item
+                    for item in candidates
+                    if item.procedure_id not in (exclude or set())
+                ][:k]
+                results.append(result)
+            return results
 
     retrieval = FakeRetrieval()
     queries = [
