@@ -196,11 +196,13 @@ class MemFlow:
         max_steps_per_iteration: int | None = None,
         max_plan_iterations: int | None = None,
         use_env: bool = True,
+        sync_mode: bool = False,
     ) -> None:
         # Track which components are explicitly provided (should not be overwritten by .env)
         llm_provided = llm is not None
         store_provided = store is not None
         bypass_provided = bypass is not None
+        self._sync_mode = sync_mode
 
         # Load .env file first (if enabled) so environment variables are available
         if use_env:
@@ -305,17 +307,38 @@ class MemFlow:
     def add(
         self,
         messages: str | list[dict] | None = None,
-        procedure: Procedure | None = None,
+        procedure: Procedure | list[Procedure] | None = None,
         user_id: str = "default",
+        batch_size: int = 50,
     ) -> dict:
-        """Store a procedure.
+        """Store a procedure or procedures.
 
-        Path 1 — direct: pass a Procedure object via `procedure=`.
+        Path 1 — direct: pass a Procedure object or list via `procedure=`.
         Path 2 — extract: pass conversation text/messages via `messages=`.
+
+        Args:
+            messages: Conversation text/messages for extraction
+            procedure: Single Procedure or list of Procedures
+            user_id: User ID for the procedure(s)
+            batch_size: Batch size for multiple procedures (default: 50)
+
+        Returns:
+            dict with event info for single, dict with counts for batch
         """
         if procedure is not None:
-            self.store.add(procedure)
-            return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
+            if isinstance(procedure, list):
+                # Batch add
+                total = len(procedure)
+                num_seeded = self.store.add(procedure, batch_size=batch_size)
+                return {
+                    "num_seeded": num_seeded,
+                    "num_skipped": total - num_seeded,
+                    "total": total,
+                }
+            else:
+                # Single add
+                self.store.add(procedure)
+                return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
 
         if messages is None:
             raise ValueError("Either 'messages' or 'procedure' must be provided")
@@ -743,53 +766,197 @@ class MemFlow:
 
     def search(
         self,
-        query: str,
+        query: str | list[str],
         user_id: str | None = None,
         top_k: int = 5,
-    ) -> list[SearchResult]:
-        """Retrieve relevant procedures by similarity."""
-        return self.store.search(query, top_k=top_k, user_id=user_id)
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Retrieve relevant procedures by similarity.
+
+        Args:
+            query: Single query string or list of queries
+            user_id: User ID for filtering
+            top_k: Number of results per query
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        if isinstance(query, list):
+            return self.store.search(query, top_k=top_k, user_id=user_id)
+        else:
+            return self.store.search(query, top_k=top_k, user_id=user_id)
+
+    # ------------------------------------------------------------------
+    # search_async - Async search for single or multiple queries
+    # ------------------------------------------------------------------
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        user_id: str | None = None,
+        top_k: int = 5,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Retrieve relevant procedures by similarity asynchronously.
+
+        Args:
+            query: Single query string or list of queries
+            user_id: User ID for filtering
+            top_k: Number of results per query
+            max_concurrency: Max concurrent requests (default: 50)
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        if isinstance(query, list):
+            return await self.store.search_async(
+                query, top_k=top_k, user_id=user_id, max_concurrency=max_concurrency
+            )
+        else:
+            import asyncio
+
+            return await asyncio.to_thread(self.search, query, user_id, top_k)
 
     # ------------------------------------------------------------------
     # delete
     # ------------------------------------------------------------------
 
-    def delete(self, id: str, user_id: str | None = None) -> dict:
-        """Delete a stored procedure by exact id within the optional user scope."""
-        proc = None
-        for candidate in self.store.list_all(user_id=user_id):
-            if candidate.id == id:
-                proc = candidate
-                break
+    def delete(
+        self,
+        id: str | list[str],
+        user_id: str | None = None,
+    ) -> dict:
+        """Delete a stored procedure or procedures by exact id.
 
-        if proc is None:
+        Args:
+            id: Single ID or list of IDs
+            user_id: User ID for filtering
+
+        Returns:
+            dict with event info for single, dict with counts for batch
+        """
+        if isinstance(id, list):
+            # Batch delete
+            total = len(id)
+            num_deleted = self.store.delete_batch(id)
             return {
-                "id": id,
-                "event": "DELETE",
-                "deleted": False,
-                "error": "not_found",
+                "num_deleted": num_deleted,
+                "num_failed": total - num_deleted,
+                "total": total,
             }
+        else:
+            # Single delete
+            proc = None
+            for candidate in self.store.list_all(user_id=user_id):
+                if candidate.id == id:
+                    proc = candidate
+                    break
 
-        try:
-            deleted = self.store.delete(proc.id)
-        except Exception:
-            deleted = False
+            if proc is None:
+                return {
+                    "id": id,
+                    "event": "DELETE",
+                    "deleted": False,
+                    "error": "not_found",
+                }
 
-        if deleted:
+            try:
+                deleted = self.store.delete(proc.id)
+            except Exception:
+                deleted = False
+
+            if deleted:
+                return {
+                    "id": proc.id,
+                    "title": proc.title,
+                    "event": "DELETE",
+                    "deleted": True,
+                }
+
             return {
                 "id": proc.id,
                 "title": proc.title,
                 "event": "DELETE",
-                "deleted": True,
+                "deleted": False,
+                "error": "delete_failed",
             }
 
-        return {
-            "id": proc.id,
-            "title": proc.title,
-            "event": "DELETE",
-            "deleted": False,
-            "error": "delete_failed",
-        }
+    # ------------------------------------------------------------------
+    # delete_async - Async delete for single or multiple procedures
+    # ------------------------------------------------------------------
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> dict:
+        """Delete a stored procedure or procedures asynchronously.
+
+        Args:
+            id: Single ID or list of IDs
+            user_id: User ID for filtering
+            max_concurrency: Max concurrent operations (default: 50)
+
+        Returns:
+            dict with event info for single, dict with counts for batch
+        """
+
+        if isinstance(id, list):
+            # Batch async delete
+            total = len(id)
+            num_deleted = await self.store.delete_async(
+                id, max_concurrency=max_concurrency
+            )
+            return {
+                "num_deleted": num_deleted,
+                "num_failed": total - num_deleted,
+                "total": total,
+            }
+        else:
+            # Single async delete
+            result = await self.store.delete_async(id, user_id=user_id)
+            return {
+                "id": id,
+                "event": "DELETE",
+                "deleted": result,
+            }
+
+    # ------------------------------------------------------------------
+    # add_async - Async add for single or multiple procedures
+    # ------------------------------------------------------------------
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        user_id: str = "default",
+        max_concurrency: int = 50,
+    ) -> dict | None:
+        """Add a procedure or procedures asynchronously.
+
+        Args:
+            procedure: Single Procedure or list of Procedures
+            user_id: User ID for the procedure(s)
+            max_concurrency: Max concurrent operations (default: 50)
+
+        Returns:
+            None for single, dict with counts for batch
+        """
+
+        if isinstance(procedure, list):
+            # Batch async add
+            total = len(procedure)
+            num_seeded = await self.store.add_async(
+                procedure, max_concurrency=max_concurrency
+            )
+            return {
+                "num_seeded": num_seeded,
+                "num_skipped": total - num_seeded,
+                "total": total,
+            }
+        else:
+            # Single async add
+            await self.store.add_async(procedure)
+            return None
 
     # ------------------------------------------------------------------
     # plan

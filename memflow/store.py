@@ -48,21 +48,52 @@ class BaseStore(ABC):
     """Abstract base for all storage backends."""
 
     @abstractmethod
-    def add(self, procedure: Procedure) -> None: ...
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> None | int: ...
 
     @abstractmethod
     def search(
         self,
-        query: str,
+        query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-    ) -> list[SearchResult]: ...
+    ) -> list[SearchResult] | list[list[SearchResult]]: ...
+
+    @abstractmethod
+    def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None: ...
+
+    @abstractmethod
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]: ...
+
+    @abstractmethod
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int: ...
 
     @abstractmethod
     def get(self, id: str) -> Procedure | None: ...
 
     @abstractmethod
-    def delete(self, id: str) -> bool: ...
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int: ...
 
     @abstractmethod
     def list_all(self, user_id: str | None = None) -> list[Procedure]: ...
@@ -79,33 +110,96 @@ class EmulatedStore(BaseStore):
     def __init__(self) -> None:
         self._store: dict[str, Procedure] = {}
 
-    def add(self, procedure: Procedure) -> None:
-        self._store[procedure.id] = procedure
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> None | int:
+        if isinstance(procedure, list):
+            for proc in procedure:
+                self._store[proc.id] = proc
+            return len(procedure)
+        else:
+            self._store[procedure.id] = procedure
+            return None
 
     def search(
         self,
-        query: str,
+        query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-    ) -> list[SearchResult]:
-        results = []
-        for proc in self._store.values():
-            if user_id and proc.user_id != user_id:
-                continue
-            score = _text_score(proc.title + " " + proc.content, query)
-            if score > 0:
-                results.append(SearchResult(procedure=proc, score=score))
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:top_k]
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        if isinstance(query, list):
+            all_results = []
+            for q in query:
+                results = []
+                for proc in self._store.values():
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    score = _text_score(proc.title + " " + proc.content, q)
+                    if score > 0:
+                        results.append(SearchResult(procedure=proc, score=score))
+                results.sort(key=lambda r: r.score, reverse=True)
+                all_results.append(results[:top_k])
+            return all_results
+        else:
+            results = []
+            for proc in self._store.values():
+                if user_id and proc.user_id != user_id:
+                    continue
+                score = _text_score(proc.title + " " + proc.content, query)
+                if score > 0:
+                    results.append(SearchResult(procedure=proc, score=score))
+            results.sort(key=lambda r: r.score, reverse=True)
+            return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
         return self._store.get(id)
 
-    def delete(self, id: str) -> bool:
-        if id in self._store:
-            del self._store[id]
-            return True
-        return False
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int:
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                if i in self._store:
+                    del self._store[i]
+                    num_deleted += 1
+            return num_deleted
+        else:
+            if id in self._store:
+                del self._store[id]
+                return True
+            return False
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        import asyncio
+
+        return await asyncio.to_thread(self.search, query, top_k, user_id)
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None:
+        return self.add(procedure, batch_size)
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int:
+        import asyncio
+
+        return await asyncio.to_thread(self.delete, id)
 
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         procs = list(self._store.values())
@@ -205,26 +299,50 @@ class FileStore(BaseStore):
                 procs.append(proc)
         return procs
 
-    def add(self, procedure: Procedure) -> None:
-        self._path(procedure.id).write_text(
-            self._serialize(procedure), encoding="utf-8"
-        )
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> None | int:
+        if isinstance(procedure, list):
+            for proc in procedure:
+                self._path(proc.id).write_text(self._serialize(proc), encoding="utf-8")
+            return len(procedure)
+        else:
+            self._path(procedure.id).write_text(
+                self._serialize(procedure), encoding="utf-8"
+            )
+            return None
 
     def search(
         self,
-        query: str,
+        query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-    ) -> list[SearchResult]:
-        results = []
-        for proc in self._load_all():
-            if user_id and proc.user_id != user_id:
-                continue
-            score = _text_score(proc.title + " " + proc.content, query)
-            if score > 0:
-                results.append(SearchResult(procedure=proc, score=score))
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:top_k]
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        if isinstance(query, list):
+            all_results = []
+            for q in query:
+                results = []
+                for proc in self._load_all():
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    score = _text_score(proc.title + " " + proc.content, q)
+                    if score > 0:
+                        results.append(SearchResult(procedure=proc, score=score))
+                results.sort(key=lambda r: r.score, reverse=True)
+                all_results.append(results[:top_k])
+            return all_results
+        else:
+            results = []
+            for proc in self._load_all():
+                if user_id and proc.user_id != user_id:
+                    continue
+                score = _text_score(proc.title + " " + proc.content, query)
+                if score > 0:
+                    results.append(SearchResult(procedure=proc, score=score))
+            results.sort(key=lambda r: r.score, reverse=True)
+            return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
         path = self._path(id)
@@ -232,12 +350,52 @@ class FileStore(BaseStore):
             return None
         return self._deserialize(path.read_text(encoding="utf-8"))
 
-    def delete(self, id: str) -> bool:
-        path = self._path(id)
-        if path.exists():
-            path.unlink()
-            return True
-        return False
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int:
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                path = self._path(i)
+                if path.exists():
+                    path.unlink()
+                    num_deleted += 1
+            return num_deleted
+        else:
+            path = self._path(id)
+            if path.exists():
+                path.unlink()
+                return True
+            return False
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        import asyncio
+
+        return await asyncio.to_thread(self.search, query, top_k, user_id)
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None:
+        return self.add(procedure, batch_size)
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int:
+        import asyncio
+
+        return await asyncio.to_thread(self.delete, id)
 
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         procs = self._load_all()
@@ -435,39 +593,76 @@ class MemMachineStore(BaseStore):
         )
         return proc, ep_id
 
-    def add(self, procedure: Procedure) -> None:
-        result = self._get_memory().add(
-            content=self._to_text(procedure),
-            metadata=self._to_metadata(procedure),
-        )
-        if isinstance(result, dict):
-            ep_id = str(result.get("id", procedure.id))
-        elif result is not None:
-            ep_id = str(getattr(result, "id", procedure.id))
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> None | int:
+        if isinstance(procedure, list):
+            for proc in procedure:
+                result = self._get_memory().add(
+                    content=self._to_text(proc),
+                    metadata=self._to_metadata(proc),
+                )
+                if isinstance(result, dict):
+                    ep_id = str(result.get("id", proc.id))
+                elif result is not None:
+                    ep_id = str(getattr(result, "id", proc.id))
+                else:
+                    ep_id = proc.id
+                self._index[proc.id] = ep_id
+            return len(procedure)
         else:
-            ep_id = procedure.id
-        self._index[procedure.id] = ep_id
+            result = self._get_memory().add(
+                content=self._to_text(procedure),
+                metadata=self._to_metadata(procedure),
+            )
+            if isinstance(result, dict):
+                ep_id = str(result.get("id", procedure.id))
+            elif result is not None:
+                ep_id = str(getattr(result, "id", procedure.id))
+            else:
+                ep_id = procedure.id
+            self._index[procedure.id] = ep_id
+            return None
 
     def search(
         self,
-        query: str,
+        query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-    ) -> list[SearchResult]:
-        raw = self._get_memory().search(query=query, limit=top_k * 3)
-        results = []
-
-        for item in self._extract_episodes(raw):
-            score = float(item.score) if item.score is not None else 0.0
-            proc, ep_id = self._parse_item(item)
-            if proc is None:
-                continue
-            if ep_id:
-                self._index[proc.id] = ep_id
-            if user_id and proc.user_id != user_id:
-                continue
-            results.append(SearchResult(procedure=proc, score=score))
-        return results[:top_k]
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        if isinstance(query, list):
+            all_results = []
+            for q in query:
+                raw = self._get_memory().search(query=q, limit=top_k * 3)
+                results = []
+                for item in self._extract_episodes(raw):
+                    score = float(item.score) if item.score is not None else 0.0
+                    proc, ep_id = self._parse_item(item)
+                    if proc is None:
+                        continue
+                    if ep_id:
+                        self._index[proc.id] = ep_id
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    results.append(SearchResult(procedure=proc, score=score))
+                all_results.append(results[:top_k])
+            return all_results
+        else:
+            raw = self._get_memory().search(query=query, limit=top_k * 3)
+            results = []
+            for item in self._extract_episodes(raw):
+                score = float(item.score) if item.score is not None else 0.0
+                proc, ep_id = self._parse_item(item)
+                if proc is None:
+                    continue
+                if ep_id:
+                    self._index[proc.id] = ep_id
+                if user_id and proc.user_id != user_id:
+                    continue
+                results.append(SearchResult(procedure=proc, score=score))
+            return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
         for proc in self.list_all():
@@ -475,18 +670,65 @@ class MemMachineStore(BaseStore):
                 return proc
         return None
 
-    def delete(self, id: str) -> bool:
-        if id not in self._index:
-            self.list_all()  # hydrate index
-        ep_id = self._index.get(id)
-        if not ep_id:
-            return False
-        try:
-            self._get_memory().delete(ep_id)
-            self._index.pop(id, None)
-            return True
-        except Exception:
-            return False
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int:
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                if i not in self._index:
+                    self.list_all()  # hydrate index
+                ep_id = self._index.get(i)
+                if not ep_id:
+                    continue
+                try:
+                    self._get_memory().delete(ep_id)
+                    self._index.pop(i, None)
+                    num_deleted += 1
+                except Exception:
+                    pass
+            return num_deleted
+        else:
+            if id not in self._index:
+                self.list_all()  # hydrate index
+            ep_id = self._index.get(id)
+            if not ep_id:
+                return False
+            try:
+                self._get_memory().delete(ep_id)
+                self._index.pop(id, None)
+                return True
+            except Exception:
+                return False
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        import asyncio
+
+        return await asyncio.to_thread(self.search, query, top_k, user_id)
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None:
+        return self.add(procedure, batch_size)
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int:
+        import asyncio
+
+        return await asyncio.to_thread(self.delete, id)
 
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         raw = self._get_memory().search(query="", limit=10_000)
@@ -695,17 +937,208 @@ class PgVectorStore(BaseStore):
                 emb = [x / norm for x in emb]
             return emb
 
+    async def _compute_emb_async(self, text: str) -> list[float]:
+        """Compute embedding vector asynchronously using httpx.AsyncClient.
+
+        Uses native async HTTP requests instead of asyncio.to_thread() for better
+        I/O performance. Thread pool is not blocked during HTTP wait time.
+        """
+        import httpx
+
+        config = self._get_emb_config()
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                payload = {
+                    "model": config["model"],
+                    "input": text,
+                    "encoding_format": "float",
+                }
+                response = await client.post(
+                    url, headers=headers, json=payload, timeout=30.0
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data["data"][0]["embedding"]
+        except Exception as exc:
+            logger.warning(
+                "Async embedding API failed (%s: %s); falling back to hash-based embedding.",
+                type(exc).__name__,
+                exc,
+            )
+            # Fallback: hash-based pseudo-embedding
+            emb = [0.0] * config["dim"]
+            words = text.lower().split()
+            for word in words:
+                word_hash = hashlib.md5(word.encode()).hexdigest()
+                for i in range(min(len(word_hash), config["dim"])):
+                    val = (int(word_hash[i % len(word_hash)], 16) - 8) / 8.0
+                    emb[i] += val / len(words)
+            norm = sum(x * x for x in emb) ** 0.5
+            if norm > 0:
+                emb = [x / norm for x in emb]
+            return emb
+
+    async def _compute_embs_batch_async(
+        self,
+        texts: list[str],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> list[list[float]]:
+        """Compute embeddings for multiple texts in parallel batches.
+
+        Uses _compute_emb_async() with Semaphore for concurrency control.
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        semaphore = Semaphore(max_concurrency)
+
+        async def compute_single(text: str) -> list[float]:
+            async with semaphore:
+                return await self._compute_emb_async(text)
+
+        # Process in batches for memory efficiency
+        all_embs = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            batch_embs = await asyncio.gather(*[compute_single(text) for text in batch])
+            all_embs.extend(batch_embs)
+        return all_embs
+
+    def _compute_embs_batch(
+        self,
+        texts: list[str],
+        batch_size: int = 50,
+    ) -> list[list[float]]:
+        """Compute embeddings for multiple texts in batches (sync version).
+
+        Uses batch API calls to reduce HTTP overhead.
+        """
+        config = self._get_emb_config()
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json",
+        }
+
+        all_embeddings = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            try:
+                payload = {
+                    "model": config["model"],
+                    "input": batch,
+                    "encoding_format": "float",
+                }
+                response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+                response.raise_for_status()
+                data = response.json()
+                batch_embeddings = [item["embedding"] for item in data["data"]]
+                all_embeddings.extend(batch_embeddings)
+            except Exception as exc:
+                logger.warning(
+                    "Batch embedding API failed (%s: %s); falling back to individual embedding.",
+                    type(exc).__name__,
+                    exc,
+                )
+                # Fallback: compute individually
+                for text in batch:
+                    all_embeddings.append(self._compute_emb(text))
+
+        return all_embeddings
+
     def _to_text(self, procedure: Procedure) -> str:
         """Convert procedure to text for embedding."""
         return f"# {procedure.title}\n\n{procedure.content}"
 
-    def add(self, procedure: Procedure) -> None:
-        """Add a procedure to the store."""
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+    ) -> int | None:
+        """Add a procedure or procedures.
 
-        text_content = self._to_text(procedure)
-        emb = self._compute_emb(text_content)
+        Args:
+            procedure: Single Procedure or list of Procedures
+            batch_size: Batch size for multiple procedures (default: 50)
 
-        # Convert embedding to PostgreSQL vector literal format: "[0.1,0.2,...]"
+        Returns:
+            None for single, number of inserted procedures for batch
+        """
+        if isinstance(procedure, list):
+            if not procedure:
+                return 0
+            texts = [self._to_text(proc) for proc in procedure]
+            embeddings = self._compute_embs_batch(texts, batch_size=batch_size)
+            num_inserted = 0
+            for proc, emb in zip(procedure, embeddings):
+                try:
+                    self._insert_procedure(proc, emb)
+                    num_inserted += 1
+                except Exception:
+                    pass
+            return num_inserted
+        else:
+            text_content = self._to_text(procedure)
+            emb = self._compute_emb(text_content)
+            self._insert_procedure(procedure, emb)
+            return None
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 50,
+        max_concurrency: int = 50,
+    ) -> int | None:
+        """Add a procedure or procedures asynchronously.
+
+        Args:
+            procedure: Single Procedure or list of Procedures
+            batch_size: Batch size for embedding (default: 50)
+            max_concurrency: Max concurrent operations (default: 50)
+
+        Returns:
+            None for single, number of inserted procedures for batch
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(procedure, list):
+            if not procedure:
+                return 0
+            texts = [self._to_text(proc) for proc in procedure]
+            embeddings = await self._compute_embs_batch_async(
+                texts, batch_size, max_concurrency
+            )
+            semaphore = Semaphore(max_concurrency)
+
+            async def insert_single(proc: Procedure, emb: list[float]) -> bool:
+                async with semaphore:
+                    try:
+                        await asyncio.to_thread(self._insert_procedure, proc, emb)
+                        return True
+                    except Exception:
+                        return False
+
+            tasks = [
+                insert_single(proc, emb) for proc, emb in zip(procedure, embeddings)
+            ]
+            results = await asyncio.gather(*tasks)
+            return sum(results)
+        else:
+            text_content = self._to_text(procedure)
+            emb = await self._compute_emb_async(text_content)
+            self._insert_procedure(procedure, emb)
+            return None
+
+    def _insert_procedure(self, procedure: Procedure, emb: list[float]) -> None:
+        """Insert a procedure with pre-computed embedding."""
         emb_str = "[" + ",".join(str(v) for v in emb) + "]"
 
         with self._engine.connect() as conn:
@@ -736,15 +1169,13 @@ class PgVectorStore(BaseStore):
             )
             conn.commit()
 
-    def search(
+    def _search_with_emb(
         self,
-        query: str,
-        top_k: int = 5,
+        query_emb: list[float],
+        top_k: int,
         user_id: str | None = None,
     ) -> list[SearchResult]:
-        """Search for procedures by semantic similarity."""
-        query_emb = self._compute_emb(query)
-        # Convert embedding to PostgreSQL vector literal format: "[0.1,0.2,...]"
+        """Search using pre-computed query embedding."""
         emb_str = "[" + ",".join(str(v) for v in query_emb) + "]"
 
         with self._engine.connect() as conn:
@@ -755,7 +1186,6 @@ class PgVectorStore(BaseStore):
                 filter_clause = ""
                 params = {"emb": emb_str, "limit": top_k}
 
-            # Use CAST for the vector type
             query_sql = text(f"""
                 SELECT id, user_id, title, content, category, tags, created_at,
                        1 - (emb <=> CAST(:emb AS vector)) AS score
@@ -788,6 +1218,74 @@ class PgVectorStore(BaseStore):
 
         return results
 
+    def search(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search for procedures by semantic similarity.
+
+        Args:
+            query: Single query string or list of queries
+            top_k: Number of results per query
+            user_id: User ID for filtering
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        if isinstance(query, list):
+            query_embs = self._compute_embs_batch(query)
+            results = []
+            for query_emb in query_embs:
+                search_results = self._search_with_emb(query_emb, top_k, user_id)
+                results.append(search_results)
+            return results
+        else:
+            query_emb = self._compute_emb(query)
+            return self._search_with_emb(query_emb, top_k, user_id)
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        max_concurrency: int = 50,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search for procedures by semantic similarity asynchronously.
+
+        Args:
+            query: Single query string or list of queries
+            top_k: Number of results per query
+            user_id: User ID for filtering
+            max_concurrency: Max concurrent requests (default: 50)
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(query, list):
+            query_embs = await self._compute_embs_batch_async(
+                query, max_concurrency=max_concurrency
+            )
+            semaphore = Semaphore(max_concurrency)
+
+            async def search_single(query_emb: list[float]) -> list[SearchResult]:
+                async with semaphore:
+                    return await asyncio.to_thread(
+                        self._search_with_emb, query_emb, top_k, user_id
+                    )
+
+            tasks = [search_single(qe) for qe in query_embs]
+            return await asyncio.gather(*tasks)
+        else:
+            query_emb = await self._compute_emb_async(query)
+            return await asyncio.to_thread(
+                self._search_with_emb, query_emb, top_k, user_id
+            )
+
     def get(self, id: str) -> Procedure | None:
         """Get a procedure by ID."""
         with self._engine.connect() as conn:
@@ -818,20 +1316,70 @@ class PgVectorStore(BaseStore):
             created_at=row.created_at,
         )
 
-    def delete(self, id: str) -> bool:
-        """Delete a procedure by ID."""
-        try:
-            with self._engine.connect() as conn:
-                result = conn.execute(
-                    text("""
-                    DELETE FROM procedures WHERE id = :id
-                """),
-                    {"id": id},
-                )
-                conn.commit()
-                return result.rowcount > 0
-        except Exception:
-            return False
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> bool | int:
+        """Delete a procedure or procedures by ID.
+
+        Args:
+            id: Single ID or list of IDs
+
+        Returns:
+            bool for single (success), int for batch (num deleted)
+        """
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                if self.delete(i):
+                    num_deleted += 1
+            return num_deleted
+        else:
+            try:
+                with self._engine.connect() as conn:
+                    result = conn.execute(
+                        text("""
+                        DELETE FROM procedures WHERE id = :id
+                    """),
+                        {"id": id},
+                    )
+                    conn.commit()
+                    return result.rowcount > 0
+            except Exception:
+                return False
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_concurrency: int = 50,
+    ) -> bool | int:
+        """Delete a procedure or procedures asynchronously.
+
+        Args:
+            id: Single ID or list of IDs
+            max_concurrency: Max concurrent operations (default: 50)
+
+        Returns:
+            bool for single (success), int for batch (num deleted)
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(id, list):
+            semaphore = Semaphore(max_concurrency)
+
+            async def delete_single(i: str) -> bool:
+                async with semaphore:
+                    try:
+                        return await asyncio.to_thread(self.delete, i)
+                    except Exception:
+                        return False
+
+            tasks = [delete_single(i) for i in id]
+            results = await asyncio.gather(*tasks)
+            return sum(results)
+        else:
+            return await asyncio.to_thread(self.delete, id)
 
     def list_all(self, user_id: str | None = None) -> list[Procedure]:
         """List all procedures."""
