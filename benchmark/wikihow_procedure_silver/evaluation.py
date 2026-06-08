@@ -234,26 +234,37 @@ def _source_holdout_ids(query: WikiHowBenchmarkQuery) -> set[str]:
     return {source_id} if source_id else set()
 
 
-def evaluate_wikihow_queries(
+async def evaluate_wikihow_queries_async(
     retrieval_system: Any,
     queries: list[WikiHowBenchmarkQuery],
     k_values: list[int],
     top_k: int,
+    max_concurrency: int = 64,
 ) -> WikiHowEvaluationResult:
+    """Evaluate retrieval performance using async batch processing.
+
+    Uses retrieval_system.retrieve_batch_async() for parallel query execution.
+    """
+
     query_results: list[dict[str, Any]] = []
     all_metrics: list[dict[str, Any]] = []
     by_source_category: dict[str, list[dict[str, Any]]] = {}
 
     total = len(queries)
-    print(f"Starting WikiHow Procedure Silver evaluation of {total} queries...")
+    print(f"Starting WikiHow Procedure Silver evaluation of {total} queries (async)...")
 
-    for index, query in enumerate(queries, start=1):
-        heldout_ids = _source_holdout_ids(query)
-        retrieved = retrieval_system.retrieve(
-            query.query,
-            k=top_k,
-            exclude_procedure_ids=heldout_ids,
-        )
+    # Prepare batch queries: (query_string, exclude_procedure_ids)
+    batch_queries = [(query.query, _source_holdout_ids(query)) for query in queries]
+
+    # Execute batch retrieval asynchronously
+    all_retrieved = await retrieval_system.retrieve_batch_async(
+        queries=batch_queries,
+        k=top_k,
+        max_concurrency=max_concurrency,
+    )
+
+    # Process results
+    for index, (query, retrieved) in enumerate(zip(queries, all_retrieved), start=1):
         retrieved_ids = [str(item.procedure_id) for item in retrieved]
 
         metrics = compute_binary_ir_metrics(
@@ -283,7 +294,93 @@ def evaluate_wikihow_queries(
                 "source_procedure_id": query.source_procedure_id,
                 "relevant_procedure_ids": query.relevant_procedure_ids,
                 "source_metadata": query.source_metadata,
-                "heldout_procedure_ids": sorted(heldout_ids),
+                "heldout_procedure_ids": sorted(_source_holdout_ids(query)),
+                "relevance_notes": query.relevance_notes,
+                "rejected_close_candidates": query.rejected_close_candidates,
+                "retrieved": retrieved_payload,
+                "metrics": {
+                    **metrics,
+                    "num_retrieved": len(retrieved_payload),
+                },
+            }
+        )
+
+        if index % max(1, total // 10) == 0 or index == total:
+            pct = (index / total) * 100 if total else 100.0
+            print(f"\rProgress: {index}/{total} ({pct:.1f}%)", end="", flush=True)
+
+    print()
+
+    return WikiHowEvaluationResult(
+        overall_metrics=aggregate_query_metrics(all_metrics, k_values),
+        source_category_stratified_metrics={
+            category: aggregate_query_metrics(metrics, k_values)
+            for category, metrics in sorted(by_source_category.items())
+        },
+        query_results=query_results,
+    )
+
+
+def evaluate_wikihow_queries(
+    retrieval_system: Any,
+    queries: list[WikiHowBenchmarkQuery],
+    k_values: list[int],
+    top_k: int,
+) -> WikiHowEvaluationResult:
+    """Evaluate retrieval performance using batch embedding (sync version).
+
+    Uses retrieval_system.retrieve_batch() for efficient batch processing.
+    """
+    query_results: list[dict[str, Any]] = []
+    all_metrics: list[dict[str, Any]] = []
+    by_source_category: dict[str, list[dict[str, Any]]] = {}
+
+    total = len(queries)
+    print(
+        f"Starting WikiHow Procedure Silver evaluation of {total} queries (sync batch)..."
+    )
+
+    # Prepare batch queries: (query_string, exclude_procedure_ids)
+    batch_queries = [(query.query, _source_holdout_ids(query)) for query in queries]
+
+    # Execute batch retrieval with batch embedding
+    all_retrieved = retrieval_system.retrieve_batch(
+        queries=batch_queries,
+        k=top_k,
+    )
+
+    # Process results
+    for index, (query, retrieved) in enumerate(zip(queries, all_retrieved), start=1):
+        retrieved_ids = [str(item.procedure_id) for item in retrieved]
+
+        metrics = compute_binary_ir_metrics(
+            retrieved_ids=retrieved_ids,
+            relevant_ids=query.relevant_procedure_ids,
+            k_values=k_values,
+        )
+        all_metrics.append(metrics)
+        by_source_category.setdefault(_source_category(query), []).append(metrics)
+
+        retrieved_payload = [
+            {
+                "rank": rank,
+                "procedure_id": item.procedure_id,
+                "title": item.title,
+                "category": item.category,
+                "tags": item.tags,
+                "score": _safe_float(item.score),
+            }
+            for rank, item in enumerate(retrieved, start=1)
+        ]
+
+        query_results.append(
+            {
+                "query_id": query.query_id,
+                "query": query.query,
+                "source_procedure_id": query.source_procedure_id,
+                "relevant_procedure_ids": query.relevant_procedure_ids,
+                "source_metadata": query.source_metadata,
+                "heldout_procedure_ids": sorted(_source_holdout_ids(query)),
                 "relevance_notes": query.relevance_notes,
                 "rejected_close_candidates": query.rejected_close_candidates,
                 "retrieved": retrieved_payload,

@@ -142,8 +142,19 @@ def seed_wikihow_corpus(
     user_id: str,
     corpus_path: str | Path,
     clear_existing: bool = False,
+    batch_size: int = 100,
 ) -> CorpusSeedStats:
-    """Seed WikiHow procedures into MemFlow via memflow.add(procedure=...)."""
+    """Seed WikiHow procedures into MemFlow using batch embedding.
+
+    Uses memflow.add() with list for efficient batch processing.
+
+    Args:
+        memflow: MemFlow instance
+        user_id: User ID for procedures
+        corpus_path: Path to JSONL corpus file
+        clear_existing: Whether to clear existing procedures first
+        batch_size: Number of procedures to add in each batch
+    """
     corpus_path = Path(corpus_path)
     if not corpus_path.exists():
         raise FileNotFoundError(f"Corpus path not found: {corpus_path}")
@@ -170,6 +181,9 @@ def seed_wikihow_corpus(
 
     categories: Counter[str] = Counter()
     print("Streaming procedures from JSONL...")
+
+    # Collect procedures to seed
+    procedures_to_seed: list[Procedure] = []
     for record in iter_wikihow_procedures(corpus_path):
         stats.num_records += 1
         if not record.id:
@@ -182,17 +196,25 @@ def seed_wikihow_corpus(
             continue
 
         procedure = wikihow_record_to_procedure(record, user_id=user_id)
-        memflow.add(procedure=procedure)
-        if not clear_existing:
-            existing_ids.add(procedure.id)
-        stats.num_seeded += 1
+        procedures_to_seed.append(procedure)
 
-        if stats.num_seeded % 1000 == 0:
+        # Add in batches
+        if len(procedures_to_seed) >= batch_size:
+            result = memflow.add(procedure=procedures_to_seed, user_id=user_id)
+            stats.num_seeded += result.get("num_seeded", 0)
+            stats.num_skipped += result.get("num_skipped", 0)
             print(
                 f"\r  Seeded {stats.num_seeded} procedures ({stats.num_reused} reused)",
                 end="",
                 flush=True,
             )
+            procedures_to_seed = []
+
+    # Add remaining procedures
+    if procedures_to_seed:
+        result = memflow.add(procedure=procedures_to_seed, user_id=user_id)
+        stats.num_seeded += result.get("num_seeded", 0)
+        stats.num_skipped += result.get("num_skipped", 0)
 
     stats.category_counts = dict(sorted(categories.items()))
     print()
@@ -242,6 +264,10 @@ class MemFlowWikiHowAdapter:
         k: int = 5,
         exclude_procedure_ids: set[str] | None = None,
     ) -> list[RetrievedWikiHowProcedure]:
+        """Retrieve results for a single query (sync version).
+
+        For async processing, use retrieve_async() or retrieve_batch_async().
+        """
         excluded = exclude_procedure_ids or set()
         fetch_k = k + len(excluded)
         search_results = self.memflow.search(query, user_id=self.user_id, top_k=fetch_k)
@@ -261,3 +287,94 @@ class MemFlowWikiHowAdapter:
                 )
             )
         return retrieved[:k]
+
+    def retrieve_batch(
+        self,
+        queries: list[tuple[str, set[str]]],
+        k: int = 5,
+    ) -> list[list[RetrievedWikiHowProcedure]]:
+        """Retrieve results for multiple queries using batch embedding (sync version).
+
+        Uses memflow.search() with list for efficient batch processing.
+        For async processing, use retrieve_batch_async().
+        """
+        query_strings = [q for q, _ in queries]
+        exclude_map = {i: excl for i, (_, excl) in enumerate(queries)}
+
+        # Use search with list (auto-detects batch)
+        all_results = self.memflow.search(
+            query=query_strings,
+            user_id=self.user_id,
+            top_k=k + max(len(excl) for excl in exclude_map.values())
+            if exclude_map
+            else k,
+        )
+
+        # Filter excluded results
+        final_results = []
+        for i, results in enumerate(all_results):
+            excluded = exclude_map.get(i, set())
+            filtered = []
+            for result in results:
+                if result.procedure.id not in excluded:
+                    score = float(result.score) if result.score is not None else 0.0
+                    filtered.append(
+                        RetrievedWikiHowProcedure(
+                            procedure_id=result.procedure.id,
+                            title=result.procedure.title,
+                            category=result.procedure.category,
+                            tags=list(result.procedure.tags),
+                            score=score,
+                        )
+                    )
+            final_results.append(filtered[:k])
+
+        return final_results
+
+    async def retrieve_async(
+        self,
+        query: str,
+        k: int = 5,
+        exclude_procedure_ids: set[str] | None = None,
+    ) -> list[RetrievedWikiHowProcedure]:
+        """Retrieve results for a single query asynchronously."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.retrieve, query, k=k, exclude_procedure_ids=exclude_procedure_ids
+        )
+
+    async def retrieve_batch_async(
+        self,
+        queries: list[tuple[str, set[str]]],
+        k: int = 5,
+        max_concurrency: int = 64,
+    ) -> list[list[RetrievedWikiHowProcedure]]:
+        """Retrieve results for multiple queries in parallel.
+
+        Args:
+            queries: List of (query_string, exclude_procedure_ids) tuples
+            k: Number of results to return per query
+            max_concurrency: Maximum concurrent requests
+
+        Returns:
+            List of retrieved results for each query
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        semaphore = Semaphore(max_concurrency)
+
+        async def retrieve_single(
+            query: str, exclude_procedure_ids: set[str]
+        ) -> list[RetrievedWikiHowProcedure]:
+            async with semaphore:
+                return await asyncio.to_thread(
+                    self.retrieve,
+                    query,
+                    k=k,
+                    exclude_procedure_ids=exclude_procedure_ids,
+                )
+
+        tasks = [retrieve_single(query, exclude_ids) for query, exclude_ids in queries]
+        return await asyncio.gather(*tasks)
