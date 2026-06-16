@@ -609,6 +609,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "psycopg2-binary" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "sqlalchemy" },
 ]
 
@@ -645,6 +646,7 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "psycopg2-binary", specifier = ">=2.9" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
 ]
 provides-extras = ["benchmark", "ollama", "memmachine", "openai"]

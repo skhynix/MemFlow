@@ -79,7 +79,14 @@ class TestProcedure:
         """Test skill search text includes supported skill metadata."""
         proc = Procedure(
             title="commit-craft",
-            content="# Commit Craft\n\nSplit commits carefully.",
+            content=(
+                "---\n"
+                "name: commit-craft\n"
+                "unknown_hint: not boosted\n"
+                "---\n"
+                "# Commit Craft\n\n"
+                "Split commits carefully."
+            ),
             category="development",
             tags=["git", "commits"],
             metadata={
@@ -102,6 +109,7 @@ class TestProcedure:
         assert "*.py" in text
         assert "commit-craft/SKILL.md" in text
         assert "not boosted" not in text
+        assert "Split commits carefully." in text
 
 
 class TestStepResult:

@@ -38,6 +38,16 @@ def _text_list(value: Any) -> str:
     return str(value)
 
 
+def _markdown_body_without_frontmatter(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "".join(lines[index + 1 :])
+    return text
+
+
 def skill_search_text(procedure: Procedure) -> str:
     """Return full-body-derived text used to index and rank a skill."""
     skill = procedure.metadata.get("skill", {})
@@ -53,7 +63,7 @@ def skill_search_text(procedure: Procedure) -> str:
         _text_list(skill.get("file_patterns", [])),
         _text_list(skill.get("tools", [])),
         skill.get("relative_path", ""),
-        procedure.content,
+        _markdown_body_without_frontmatter(procedure.content),
     ]
     return "\n".join(str(part) for part in parts if part)
 

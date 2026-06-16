@@ -16,9 +16,11 @@ Public API:
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -40,6 +42,7 @@ from memflow.prompts import (
     EXTRACTION_PROMPT,
     INTENT_CLASSIFICATION_PROMPT,
 )
+from memflow.skills import load_skill
 from memflow.store import (
     BaseStore,
     EmulatedStore,
@@ -48,6 +51,81 @@ from memflow.store import (
     MemMachineStore,
     PgVectorStore,
 )
+
+
+def _skill_api_payload(procedure: Procedure, event: str, **extra: object) -> dict:
+    skill = procedure.metadata.get("skill", {})
+    if not isinstance(skill, dict):
+        skill = {}
+    governance = procedure.metadata.get("governance", {})
+    if not isinstance(governance, dict):
+        governance = {}
+    warnings = governance.get("warnings", [])
+    if not isinstance(warnings, list):
+        warnings = [str(warnings)] if warnings else []
+
+    payload = {
+        "id": procedure.id,
+        "title": procedure.title,
+        "kind": procedure.kind,
+        "sha256": skill.get("sha256"),
+        "governance": {
+            "trust_state": governance.get("trust_state"),
+            "mode": governance.get("mode"),
+            "warnings": warnings,
+        },
+        "source_path": procedure.source_path,
+        "root_path": skill.get("root_path"),
+        "event": event,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _mark_stale_skill(
+    procedure: Procedure,
+    warning: str,
+) -> tuple[Procedure, bool]:
+    metadata = (
+        copy.deepcopy(procedure.metadata)
+        if isinstance(procedure.metadata, dict)
+        else {}
+    )
+    governance = metadata.setdefault("governance", {})
+    if not isinstance(governance, dict):
+        governance = {}
+        metadata["governance"] = governance
+
+    warnings = governance.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    changed = warning not in warnings
+    if changed:
+        warnings.append(warning)
+    governance["warnings"] = warnings
+
+    skill = metadata.setdefault("skill", {})
+    if isinstance(skill, dict) and skill.get("stale") is not True:
+        skill["stale"] = True
+        changed = True
+
+    if not changed:
+        return procedure, False
+    return replace(procedure, metadata=metadata), True
+
+
+def _skill_source_candidate(path: Path) -> str:
+    if path.name == "SKILL.md":
+        return str(path.resolve(strict=False))
+    return str((path / "SKILL.md").resolve(strict=False))
 
 
 def _strip_surrounding_blank_lines(text: str) -> str:
@@ -344,6 +422,129 @@ class MemFlow:
             raise ValueError("Either 'messages' or 'procedure' must be provided")
 
         return self._extract_and_store(messages, user_id)
+
+    def add_skill(
+        self,
+        path: str | Path,
+        user_id: str = "default",
+        source: str = "local",
+        trust_state: str | None = None,
+    ) -> dict:
+        """Index a skill directory or direct SKILL.md path."""
+        procedure = load_skill(
+            path, user_id=user_id, source=source, trust_state=trust_state
+        )
+        self.store.add(procedure)
+        return _skill_api_payload(procedure, "ADD_SKILL")
+
+    def sync_skill(self, path_or_id: str | Path) -> dict:
+        """Refresh a skill record from its canonical SKILL.md source."""
+        existing = self.store.get(str(path_or_id))
+        path = Path(path_or_id).expanduser()
+        if existing is None:
+            resolved = _skill_source_candidate(path)
+            for proc in self.store.list_all(kind="skill"):
+                if proc.source_path == resolved:
+                    existing = proc
+                    break
+        if existing is not None:
+            if not existing.source_path:
+                warning = (
+                    f"Skill source path is missing for stored skill {existing.id}."
+                )
+                stale_proc, metadata_updated = _mark_stale_skill(existing, warning)
+                if metadata_updated:
+                    self.store.add(stale_proc)
+                return _skill_api_payload(
+                    stale_proc,
+                    "STALE_SYNC_SKILL",
+                    status="stale",
+                    warning=warning,
+                    metadata_updated=metadata_updated,
+                )
+            path = Path(existing.source_path)
+            if not path.exists():
+                warning = f"SKILL.md source file is missing: {path}"
+                stale_proc, metadata_updated = _mark_stale_skill(existing, warning)
+                if metadata_updated:
+                    self.store.add(stale_proc)
+                return _skill_api_payload(
+                    stale_proc,
+                    "STALE_SYNC_SKILL",
+                    status="stale",
+                    warning=warning,
+                    metadata_updated=metadata_updated,
+                )
+
+            stored_skill = existing.metadata.get("skill", {})
+            stored_sha256 = (
+                stored_skill.get("sha256") if isinstance(stored_skill, dict) else None
+            )
+            current_sha256 = _sha256_path(path)
+            is_stale = (
+                isinstance(stored_skill, dict) and stored_skill.get("stale") is True
+            )
+            if stored_sha256 == current_sha256 and not is_stale:
+                return _skill_api_payload(
+                    existing,
+                    "NOOP_SYNC_SKILL",
+                    status="noop",
+                    reason="sha256_unchanged",
+                )
+
+            governance = existing.metadata.get("governance", {})
+            if not isinstance(governance, dict):
+                governance = {}
+            source = str(governance.get("source") or "local")
+            trust_state = governance.get("trust_state")
+            procedure = load_skill(
+                path,
+                user_id=existing.user_id,
+                source=source,
+                trust_state=trust_state,
+            )
+            procedure.created_at = existing.created_at
+        else:
+            procedure = load_skill(path)
+
+        self.store.add(procedure)
+        return _skill_api_payload(procedure, "SYNC_SKILL")
+
+    def list_skills(
+        self,
+        user_id: str | None = None,
+        trust_state: str | None = None,
+    ) -> list[Procedure]:
+        """List indexed skills, optionally filtered by trust state."""
+        skills = self.store.list_all(user_id=user_id, kind="skill")
+        if trust_state is None:
+            return skills
+        return [
+            proc
+            for proc in skills
+            if proc.metadata.get("governance", {}).get("trust_state") == trust_state
+        ]
+
+    def search_skills(
+        self,
+        query: str,
+        user_id: str | None = None,
+        top_k: int = 5,
+    ) -> list[SearchResult]:
+        """Search indexed skills."""
+        return self.search(query, user_id=user_id, top_k=top_k, kind="skill")
+
+    def get_skill(
+        self,
+        id_or_name: str,
+        include_content: bool = True,
+    ) -> Procedure | None:
+        """Return a skill by id, title, or frontmatter name."""
+        for proc in self.store.list_all(kind="skill"):
+            skill = proc.metadata.get("skill", {})
+            if id_or_name in (proc.id, proc.title, skill.get("name")):
+                return proc if include_content else replace(proc, content="")
+        return None
 
     def _extract_and_store(
         self,
