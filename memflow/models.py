@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 
 @dataclass
@@ -22,7 +23,46 @@ class Procedure:
     user_id: str = "default"
     category: str = "general"
     tags: list[str] = field(default_factory=list)
+    kind: str = "skill"
+    source_path: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+def _text_list(value: Any) -> str:
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def skill_search_text(procedure: Procedure) -> str:
+    """Return full-body-derived text used to index and rank a skill."""
+    skill = procedure.metadata.get("skill", {})
+    if not isinstance(skill, dict):
+        skill = {}
+    parts = [
+        procedure.title,
+        skill.get("name", ""),
+        skill.get("description", ""),
+        procedure.category,
+        _text_list(procedure.tags),
+        _text_list(skill.get("aliases", [])),
+        _text_list(skill.get("file_patterns", [])),
+        _text_list(skill.get("tools", [])),
+        skill.get("relative_path", ""),
+        procedure.content,
+    ]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def procedure_search_text(procedure: Procedure) -> str:
+    """Return the canonical text used for procedure embeddings/search."""
+    if procedure.kind == "skill":
+        return skill_search_text(procedure)
+    return f"# {procedure.title}\n\n{procedure.content}"
 
 
 @dataclass

@@ -11,6 +11,8 @@ from memflow.models import (
     StepResult,
     StepType,
     TaskPlan,
+    procedure_search_text,
+    skill_search_text,
 )
 
 
@@ -26,7 +28,11 @@ class TestProcedure:
         assert proc.user_id == "default"
         assert proc.category == "general"
         assert proc.tags == []
+        assert proc.kind == "skill"
+        assert proc.source_path is None
+        assert proc.metadata == {}
         assert proc.created_at is not None
+        assert proc.updated_at is not None
 
     def test_procedure_full(self):
         """Test creating a procedure with all fields."""
@@ -36,20 +42,66 @@ class TestProcedure:
             user_id="user123",
             category="workflow",
             tags=["tag1", "tag2"],
+            kind="procedure",
+            source_path="/tmp/source.md",
+            metadata={"key": "value"},
             created_at="2026-03-31T10:00:00",
+            updated_at="2026-04-01T10:00:00",
         )
         assert proc.title == "Full Procedure"
         assert proc.content == "1. First\n2. Second"
         assert proc.user_id == "user123"
         assert proc.category == "workflow"
         assert proc.tags == ["tag1", "tag2"]
+        assert proc.kind == "procedure"
+        assert proc.source_path == "/tmp/source.md"
+        assert proc.metadata == {"key": "value"}
         assert proc.created_at == "2026-03-31T10:00:00"
+        assert proc.updated_at == "2026-04-01T10:00:00"
 
     def test_procedure_unique_ids(self):
         """Test that each procedure gets a unique ID."""
         proc1 = Procedure(title="Test 1", content="1. Step")
         proc2 = Procedure(title="Test 2", content="1. Step")
         assert proc1.id != proc2.id
+
+    def test_procedure_search_text_for_regular_procedure(self):
+        """Test regular procedure search text remains title plus content."""
+        proc = Procedure(
+            title="Deploy guide",
+            content="1. Run deploy.sh",
+            kind="procedure",
+        )
+
+        assert procedure_search_text(proc) == "# Deploy guide\n\n1. Run deploy.sh"
+
+    def test_skill_search_text_includes_materialized_metadata(self):
+        """Test skill search text includes supported skill metadata."""
+        proc = Procedure(
+            title="commit-craft",
+            content="# Commit Craft\n\nSplit commits carefully.",
+            category="development",
+            tags=["git", "commits"],
+            metadata={
+                "skill": {
+                    "name": "commit-craft",
+                    "description": "Split code changes into coherent commits.",
+                    "aliases": ["patch series"],
+                    "file_patterns": ["*.py"],
+                    "tools": ["git"],
+                    "relative_path": "commit-craft/SKILL.md",
+                    "frontmatter": {"custom": "not boosted"},
+                }
+            },
+        )
+
+        text = skill_search_text(proc)
+        assert "Split code changes into coherent commits." in text
+        assert "git commits" in text
+        assert "patch series" in text
+        assert "*.py" in text
+        assert "commit-craft/SKILL.md" in text
+        assert "not boosted" not in text
 
 
 class TestStepResult:

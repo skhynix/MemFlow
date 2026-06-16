@@ -104,6 +104,44 @@ class TestEmulatedStore:
         results = store.search("deploy", top_k=3)
         assert len(results) == 3
 
+    def test_kind_filter_for_search_and_list_all(self):
+        """Test kind filtering on in-memory records."""
+        store = EmulatedStore()
+        skill = Procedure(title="Deploy skill", content="deploy with skill")
+        proc = Procedure(
+            title="Deploy procedure",
+            content="deploy with procedure",
+            kind="procedure",
+        )
+        store.add([skill, proc])
+
+        assert [r.procedure.id for r in store.search("deploy")] == [skill.id]
+        assert [r.procedure.id for r in store.search("deploy", kind="procedure")] == [
+            proc.id
+        ]
+        assert {r.procedure.id for r in store.search("deploy", kind=None)} == {
+            skill.id,
+            proc.id,
+        }
+        assert [p.id for p in store.list_all(kind="procedure")] == [proc.id]
+
+    def test_batch_search_respects_kind_filter(self):
+        """Test kind filtering on batch search."""
+        store = EmulatedStore()
+        store.add(Procedure(title="Git skill", content="commit split"))
+        store.add(
+            Procedure(
+                title="Git procedure",
+                content="commit split",
+                kind="procedure",
+            )
+        )
+
+        results = store.search(["commit", "split"], kind="procedure")
+        assert len(results) == 2
+        assert all(len(batch) == 1 for batch in results)
+        assert all(batch[0].procedure.kind == "procedure" for batch in results)
+
 
 class TestFileStore:
     """Tests for file-based store."""
@@ -187,6 +225,84 @@ class TestFileStore:
         store.delete(proc.id)
         assert not os.path.exists(filepath)
 
+    def test_round_trips_skill_fields(self, temp_dir):
+        """Test FileStore persists the expanded Procedure fields."""
+        store = FileStore(file_dir=temp_dir)
+        proc = Procedure(
+            id="skill-id",
+            title="commit-craft",
+            content="---\nname: commit-craft\n---\n# Body",
+            user_id="user1",
+            category="development",
+            tags=["git"],
+            kind="skill",
+            source_path="/tmp/commit-craft/SKILL.md",
+            metadata={"skill": {"name": "commit-craft"}},
+            created_at="2026-06-01T10:00:00",
+            updated_at="2026-06-02T10:00:00",
+        )
+
+        store.add(proc)
+        retrieved = store.get(proc.id)
+
+        assert retrieved.kind == "skill"
+        assert retrieved.source_path == "/tmp/commit-craft/SKILL.md"
+        assert retrieved.metadata == {"skill": {"name": "commit-craft"}}
+        assert retrieved.updated_at == "2026-06-02T10:00:00"
+
+    def test_round_trips_raw_skill_content_exactly(self, temp_dir):
+        """Test raw SKILL.md snapshots keep frontmatter-like text and final newlines."""
+        store = FileStore(file_dir=temp_dir)
+        original = "---\nname: commit-craft\n---\n# Body\n\nKeep the final newline.\n"
+        proc = Procedure(
+            id="skill-raw-id",
+            title="commit-craft",
+            content=original,
+            user_id="user1",
+            category="skill",
+            tags=["git"],
+            kind="skill",
+            source_path="/tmp/commit-craft/SKILL.md",
+            metadata={
+                "skill": {
+                    "name": "commit-craft",
+                    "frontmatter": {"description": "contains --- marker"},
+                    "sha256": "abc",
+                }
+            },
+            created_at="2026-06-01T10:00:00",
+            updated_at="2026-06-02T10:00:00",
+        )
+
+        store.add(proc)
+        retrieved = store.get(proc.id)
+
+        assert retrieved.content == original
+
+    def test_legacy_files_default_new_fields(self, temp_dir):
+        """Test old FileStore records load with compatible defaults."""
+        path = Path(temp_dir) / "legacy.md"
+        path.write_text(
+            "---\n"
+            "id: legacy\n"
+            "user_id: default\n"
+            "category: general\n"
+            "tags: []\n"
+            "created_at: 2026-06-01T10:00:00\n"
+            "---\n"
+            "# Legacy\n\n"
+            "1. Step\n",
+            encoding="utf-8",
+        )
+        store = FileStore(file_dir=temp_dir)
+
+        proc = store.get("legacy")
+
+        assert proc.kind == "skill"
+        assert proc.source_path is None
+        assert proc.metadata == {}
+        assert proc.updated_at == proc.created_at
+
 
 class TestMemMachineStore:
     """Tests for MemMachine store (mocked)."""
@@ -237,10 +353,82 @@ class TestMemMachineStore:
             store.add(proc)
 
         mock_memory.add.assert_called_once()
+        metadata = mock_memory.add.call_args.kwargs["metadata"]
+        assert metadata["kind"] == "skill"
+        assert metadata["metadata"] == "{}"
         # Verify procedure can be retrieved (indirectly confirms index population)
         retrieved = store.get("proc-id-123")
         assert retrieved is not None
         assert retrieved.title == "Test"
+
+    def test_round_trips_expanded_metadata(self, memmachine_mock):
+        """Test MemMachineStore persists the expanded Procedure fields."""
+        mock_client, mock_memory, mock_module = memmachine_mock
+
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-id-1",
+                content="# Commit Craft\n\nraw skill text",
+                metadata={
+                    "mm_type": "procedural",
+                    "record_id": "skill-id",
+                    "user_id": "default",
+                    "category": "development",
+                    "tags": '["git"]',
+                    "kind": "skill",
+                    "source_path": "/tmp/commit-craft/SKILL.md",
+                    "metadata": '{"skill": {"name": "commit-craft"}}',
+                    "created_at": "2026-06-01T10:00:00",
+                    "updated_at": "2026-06-02T10:00:00",
+                },
+            )
+        )
+
+        with patch.dict("sys.modules", {"memmachine_client": mock_module}):
+            store = MemMachineStore()
+            procs = store.list_all(kind="skill")
+
+        assert len(procs) == 1
+        assert procs[0].kind == "skill"
+        assert procs[0].source_path == "/tmp/commit-craft/SKILL.md"
+        assert procs[0].metadata == {"skill": {"name": "commit-craft"}}
+        assert procs[0].updated_at == "2026-06-02T10:00:00"
+
+    def test_search_filters_by_kind(self, memmachine_mock):
+        """Test MemMachineStore applies kind filters client-side."""
+        mock_client, mock_memory, mock_module = memmachine_mock
+
+        mock_memory.search.return_value = self._search_result(
+            self._episode(
+                id="mm-skill",
+                content="# Skill\n\ncommit split",
+                metadata={
+                    "mm_type": "procedural",
+                    "record_id": "skill-id",
+                    "kind": "skill",
+                    "tags": "[]",
+                },
+                score=0.9,
+            ),
+            self._episode(
+                id="mm-procedure",
+                content="# Procedure\n\ncommit split",
+                metadata={
+                    "mm_type": "procedural",
+                    "record_id": "procedure-id",
+                    "kind": "procedure",
+                    "tags": "[]",
+                },
+                score=0.8,
+            ),
+        )
+
+        with patch.dict("sys.modules", {"memmachine_client": mock_module}):
+            store = MemMachineStore()
+            results = store.search("commit", kind="procedure")
+
+        assert len(results) == 1
+        assert results[0].procedure.id == "procedure-id"
 
     def test_search(self, memmachine_mock):
         """Test searching procedures."""
@@ -402,6 +590,16 @@ class TestPgVectorStore:
 
             # Verify register_vector was called with raw_conn
             mock_register.assert_called_once_with(mock_raw_conn)
+            executed_sql = "\n".join(
+                str(call.args[0]) for call in mock_conn.execute.call_args_list
+            )
+            assert "kind TEXT NOT NULL DEFAULT 'skill'" in executed_sql
+            assert "source_path TEXT" in executed_sql
+            assert "metadata JSONB NOT NULL DEFAULT '{}'" in executed_sql
+            assert "updated_at TEXT NOT NULL" in executed_sql
+            assert "idx_procedures_kind" in executed_sql
+            assert "idx_procedures_user_kind" in executed_sql
+            assert "idx_procedures_source_path" in executed_sql
 
     def test_compute_emb_warns_on_hash_fallback(self, caplog):
         """Test embedding failures are visible when fallback is used."""
@@ -418,6 +616,78 @@ class TestPgVectorStore:
         assert len(emb) == 8
         assert "RuntimeError: boom" in caplog.text
         assert "falling back to hash-based pseudo-embedding" in caplog.text
+
+    def test_to_text_uses_skill_search_text(self):
+        """Test PgVector embedding input uses skill-aware search text."""
+        store = object.__new__(PgVectorStore)
+        proc = Procedure(
+            title="commit-craft",
+            content="# Body",
+            metadata={
+                "skill": {
+                    "description": "Split commits",
+                    "aliases": ["patch series"],
+                }
+            },
+        )
+
+        text = store._to_text(proc)
+
+        assert "Split commits" in text
+        assert "patch series" in text
+
+    def test_insert_persists_expanded_fields(self):
+        """Test PgVector insert includes expanded Procedure fields."""
+        store = object.__new__(PgVectorStore)
+        mock_engine = MagicMock()
+        mock_conn = MagicMock()
+        mock_engine.connect.return_value.__enter__.return_value = mock_conn
+        store._engine = mock_engine
+        proc = Procedure(
+            id="skill-id",
+            title="commit-craft",
+            content="raw",
+            category="development",
+            tags=["git"],
+            source_path="/tmp/commit-craft/SKILL.md",
+            metadata={"skill": {"name": "commit-craft"}},
+            created_at="2026-06-01T10:00:00",
+            updated_at="2026-06-02T10:00:00",
+        )
+
+        store._insert_procedure(proc, [0.1, 0.2])
+
+        sql = str(mock_conn.execute.call_args.args[0])
+        params = mock_conn.execute.call_args.args[1]
+        assert "kind, source_path" in sql
+        assert params["kind"] == "skill"
+        assert params["source_path"] == "/tmp/commit-craft/SKILL.md"
+        assert params["metadata"] == '{"skill": {"name": "commit-craft"}}'
+        assert params["updated_at"] == "2026-06-02T10:00:00"
+
+    def test_procedure_from_row_round_trips_expanded_fields(self):
+        """Test PgVector row hydration restores expanded Procedure fields."""
+        row = SimpleNamespace(
+            id="skill-id",
+            user_id="default",
+            title="commit-craft",
+            content="raw",
+            category="development",
+            tags='["git"]',
+            kind="skill",
+            source_path="/tmp/commit-craft/SKILL.md",
+            metadata={"skill": {"name": "commit-craft"}},
+            created_at="2026-06-01T10:00:00",
+            updated_at="2026-06-02T10:00:00",
+        )
+
+        proc = PgVectorStore._procedure_from_row(row)
+
+        assert proc.tags == ["git"]
+        assert proc.kind == "skill"
+        assert proc.source_path == "/tmp/commit-craft/SKILL.md"
+        assert proc.metadata == {"skill": {"name": "commit-craft"}}
+        assert proc.updated_at == "2026-06-02T10:00:00"
 
 
 class TestMemMachineBypass:

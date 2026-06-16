@@ -65,4 +65,5 @@ class Learner:
             content=data.get("content", ""),
             user_id=user_id,
             category=data.get("category", "workflow"),
+            kind="procedure",
         )

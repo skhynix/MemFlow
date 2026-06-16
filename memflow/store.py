@@ -28,7 +28,7 @@ import httpx
 from pgvector.psycopg2 import register_vector
 from sqlalchemy import create_engine, text
 
-from memflow.models import Procedure, SearchResult
+from memflow.models import Procedure, SearchResult, procedure_search_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,60 @@ def _text_score(text: str, query: str) -> float:
     if not query_words:
         return 0.0
     return len(text_words & query_words) / len(query_words)
+
+
+def _matches_filters(
+    procedure: Procedure,
+    user_id: str | None = None,
+    kind: str | None = None,
+) -> bool:
+    if user_id and procedure.user_id != user_id:
+        return False
+    if kind is not None and procedure.kind != kind:
+        return False
+    return True
+
+
+def _metadata_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _metadata_scalar(value: str) -> str:
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, str) else value
+    except Exception:
+        return value
+
+
+def _is_raw_skill_snapshot(procedure: Procedure) -> bool:
+    if procedure.kind != "skill":
+        return False
+    skill = procedure.metadata.get("skill")
+    if not isinstance(skill, dict) or not skill:
+        return False
+    return bool(skill.get("sha256") or procedure.source_path)
+
+
+def _split_file_record(text: str) -> tuple[str, str] | None:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return None
+
+    offset = len(lines[0])
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return text[len(lines[0]) : offset], text[offset + len(line) :]
+        offset += len(line)
+    return None
 
 
 class BaseStore(ABC):
@@ -60,6 +114,7 @@ class BaseStore(ABC):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]: ...
 
     @abstractmethod
@@ -76,6 +131,7 @@ class BaseStore(ABC):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]: ...
 
@@ -96,7 +152,9 @@ class BaseStore(ABC):
     ) -> bool | int: ...
 
     @abstractmethod
-    def list_all(self, user_id: str | None = None) -> list[Procedure]: ...
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]: ...
 
 
 class EmulatedStore(BaseStore):
@@ -128,15 +186,16 @@ class EmulatedStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         if isinstance(query, list):
             all_results = []
             for q in query:
                 results = []
                 for proc in self._store.values():
-                    if user_id and proc.user_id != user_id:
+                    if not _matches_filters(proc, user_id=user_id, kind=kind):
                         continue
-                    score = _text_score(proc.title + " " + proc.content, q)
+                    score = _text_score(procedure_search_text(proc), q)
                     if score > 0:
                         results.append(SearchResult(procedure=proc, score=score))
                 results.sort(key=lambda r: r.score, reverse=True)
@@ -145,9 +204,9 @@ class EmulatedStore(BaseStore):
         else:
             results = []
             for proc in self._store.values():
-                if user_id and proc.user_id != user_id:
+                if not _matches_filters(proc, user_id=user_id, kind=kind):
                     continue
-                score = _text_score(proc.title + " " + proc.content, query)
+                score = _text_score(procedure_search_text(proc), query)
                 if score > 0:
                     results.append(SearchResult(procedure=proc, score=score))
             results.sort(key=lambda r: r.score, reverse=True)
@@ -178,11 +237,12 @@ class EmulatedStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         import asyncio
 
-        return await asyncio.to_thread(self.search, query, top_k, user_id)
+        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
 
     async def add_async(
         self,
@@ -201,10 +261,11 @@ class EmulatedStore(BaseStore):
 
         return await asyncio.to_thread(self.delete, id)
 
-    def list_all(self, user_id: str | None = None) -> list[Procedure]:
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]:
         procs = list(self._store.values())
-        if user_id:
-            procs = [p for p in procs if p.user_id == user_id]
+        procs = [p for p in procs if _matches_filters(p, user_id=user_id, kind=kind)]
         return procs
 
 
@@ -219,7 +280,11 @@ class FileStore(BaseStore):
         user_id: <user>
         category: <category>
         tags: ["tag1", "tag2"]
+        kind: skill
+        source_path: /path/to/SKILL.md
+        metadata: '{"skill": {...}}'
         created_at: <iso-timestamp>
+        updated_at: <iso-timestamp>
         ---
         # <title>
 
@@ -236,39 +301,74 @@ class FileStore(BaseStore):
         return self._dir / f"{id}.md"
 
     def _serialize(self, procedure: Procedure) -> str:
-        return (
+        content_format = "raw" if _is_raw_skill_snapshot(procedure) else "titled"
+        header = (
             "---\n"
             f"id: {procedure.id}\n"
+            f"title: {json.dumps(procedure.title, ensure_ascii=False)}\n"
             f"user_id: {procedure.user_id}\n"
             f"category: {procedure.category}\n"
             f"tags: {json.dumps(procedure.tags, ensure_ascii=False)}\n"
+            f"kind: {procedure.kind}\n"
+            f"content_format: {content_format}\n"
+            f"source_path: {procedure.source_path or ''}\n"
+            f"metadata: {json.dumps(procedure.metadata, ensure_ascii=False)}\n"
             f"created_at: {procedure.created_at}\n"
+            f"updated_at: {procedure.updated_at}\n"
             "---\n"
-            f"# {procedure.title}\n"
-            "\n"
-            f"{procedure.content}\n"
         )
+        if content_format == "raw":
+            return header + procedure.content
+        return header + f"# {procedure.title}\n\n{procedure.content}\n"
 
     def _deserialize(self, text: str) -> Procedure | None:
-        if not text.startswith("---"):
+        record = _split_file_record(text)
+        if record is None:
             return None
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return None
+        frontmatter, body = record
 
         meta: dict[str, str] = {}
-        for line in parts[1].strip().splitlines():
+        for line in frontmatter.strip().splitlines():
             if ": " in line:
                 k, v = line.split(": ", 1)
                 meta[k.strip()] = v.strip()
 
-        body = parts[2].strip()
+        content_format = meta.get("content_format")
+        title = _metadata_scalar(meta.get("title", ""))
+        if content_format == "raw":
+            metadata = _metadata_json(meta.get("metadata", "{}"))
+            skill = metadata.get("skill", {})
+            if not title and isinstance(skill, dict):
+                title = str(skill.get("name") or "")
+            try:
+                tags = json.loads(meta.get("tags", "[]"))
+            except Exception:
+                tags = []
+            source_path = meta.get("source_path") or None
+            created_at = meta.get("created_at", "")
+            updated_at = meta.get("updated_at") or created_at
+
+            return Procedure(
+                id=meta.get("id", ""),
+                title=title,
+                content=body,
+                user_id=meta.get("user_id", "default"),
+                category=meta.get("category", "general"),
+                tags=tags,
+                kind=meta.get("kind", "skill"),
+                source_path=source_path,
+                metadata=metadata,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+
+        body = body.strip()
         lines = body.splitlines()
-        title = ""
         content_start = 0
         for i, line in enumerate(lines):
             if line.startswith("# "):
-                title = line[2:].strip()
+                if not title:
+                    title = line[2:].strip()
                 content_start = i + 1
                 break
 
@@ -280,6 +380,10 @@ class FileStore(BaseStore):
             tags = json.loads(meta.get("tags", "[]"))
         except Exception:
             tags = []
+        metadata = _metadata_json(meta.get("metadata", "{}"))
+        source_path = meta.get("source_path") or None
+        created_at = meta.get("created_at", "")
+        updated_at = meta.get("updated_at") or created_at
 
         return Procedure(
             id=meta.get("id", ""),
@@ -288,7 +392,11 @@ class FileStore(BaseStore):
             user_id=meta.get("user_id", "default"),
             category=meta.get("category", "general"),
             tags=tags,
-            created_at=meta.get("created_at", ""),
+            kind=meta.get("kind", "skill"),
+            source_path=source_path,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
     def _load_all(self) -> list[Procedure]:
@@ -319,15 +427,16 @@ class FileStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         if isinstance(query, list):
             all_results = []
             for q in query:
                 results = []
                 for proc in self._load_all():
-                    if user_id and proc.user_id != user_id:
+                    if not _matches_filters(proc, user_id=user_id, kind=kind):
                         continue
-                    score = _text_score(proc.title + " " + proc.content, q)
+                    score = _text_score(procedure_search_text(proc), q)
                     if score > 0:
                         results.append(SearchResult(procedure=proc, score=score))
                 results.sort(key=lambda r: r.score, reverse=True)
@@ -336,9 +445,9 @@ class FileStore(BaseStore):
         else:
             results = []
             for proc in self._load_all():
-                if user_id and proc.user_id != user_id:
+                if not _matches_filters(proc, user_id=user_id, kind=kind):
                     continue
-                score = _text_score(proc.title + " " + proc.content, query)
+                score = _text_score(procedure_search_text(proc), query)
                 if score > 0:
                     results.append(SearchResult(procedure=proc, score=score))
             results.sort(key=lambda r: r.score, reverse=True)
@@ -374,11 +483,12 @@ class FileStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         import asyncio
 
-        return await asyncio.to_thread(self.search, query, top_k, user_id)
+        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
 
     async def add_async(
         self,
@@ -397,10 +507,11 @@ class FileStore(BaseStore):
 
         return await asyncio.to_thread(self.delete, id)
 
-    def list_all(self, user_id: str | None = None) -> list[Procedure]:
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]:
         procs = self._load_all()
-        if user_id:
-            procs = [p for p in procs if p.user_id == user_id]
+        procs = [p for p in procs if _matches_filters(p, user_id=user_id, kind=kind)]
         return procs
 
 
@@ -460,6 +571,7 @@ class MemMachineBypass:
                     content=content,
                     user_id=user_id,
                     category="procedural",
+                    kind="procedure",
                 )
                 self._pgvector_store.add(proc)
         else:
@@ -526,7 +638,9 @@ class MemMachineStore(BaseStore):
             if v is None:
                 continue
             result[k] = (
-                json.dumps(v, ensure_ascii=False) if isinstance(v, list) else str(v)
+                json.dumps(v, ensure_ascii=False)
+                if isinstance(v, (dict, list))
+                else str(v)
             )
         return result
 
@@ -541,7 +655,11 @@ class MemMachineStore(BaseStore):
                 "user_id": procedure.user_id,
                 "category": procedure.category,
                 "tags": procedure.tags,
+                "kind": procedure.kind,
+                "source_path": procedure.source_path,
+                "metadata": procedure.metadata,
                 "created_at": procedure.created_at,
+                "updated_at": procedure.updated_at,
             }
         )
 
@@ -581,6 +699,10 @@ class MemMachineStore(BaseStore):
             tags = json.loads(meta.get("tags", "[]"))
         except Exception:
             tags = []
+        metadata = _metadata_json(meta.get("metadata", "{}"))
+        source_path = meta.get("source_path") or None
+        created_at = meta.get("created_at", "")
+        updated_at = meta.get("updated_at") or created_at
 
         proc = Procedure(
             id=meta.get("record_id", ep_id),
@@ -589,7 +711,11 @@ class MemMachineStore(BaseStore):
             user_id=meta.get("user_id", "default"),
             category=meta.get("category", "general"),
             tags=tags,
-            created_at=meta.get("created_at", ""),
+            kind=meta.get("kind", "skill"),
+            source_path=source_path,
+            metadata=metadata,
+            created_at=created_at,
+            updated_at=updated_at,
         )
         return proc, ep_id
 
@@ -631,6 +757,7 @@ class MemMachineStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         if isinstance(query, list):
             all_results = []
@@ -644,7 +771,7 @@ class MemMachineStore(BaseStore):
                         continue
                     if ep_id:
                         self._index[proc.id] = ep_id
-                    if user_id and proc.user_id != user_id:
+                    if not _matches_filters(proc, user_id=user_id, kind=kind):
                         continue
                     results.append(SearchResult(procedure=proc, score=score))
                 all_results.append(results[:top_k])
@@ -659,7 +786,7 @@ class MemMachineStore(BaseStore):
                     continue
                 if ep_id:
                     self._index[proc.id] = ep_id
-                if user_id and proc.user_id != user_id:
+                if not _matches_filters(proc, user_id=user_id, kind=kind):
                     continue
                 results.append(SearchResult(procedure=proc, score=score))
             return results[:top_k]
@@ -707,11 +834,12 @@ class MemMachineStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         import asyncio
 
-        return await asyncio.to_thread(self.search, query, top_k, user_id)
+        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
 
     async def add_async(
         self,
@@ -730,7 +858,9 @@ class MemMachineStore(BaseStore):
 
         return await asyncio.to_thread(self.delete, id)
 
-    def list_all(self, user_id: str | None = None) -> list[Procedure]:
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]:
         raw = self._get_memory().search(query="", limit=10_000)
         procs = []
 
@@ -740,7 +870,7 @@ class MemMachineStore(BaseStore):
                 continue
             if ep_id:
                 self._index[proc.id] = ep_id
-            if user_id and proc.user_id != user_id:
+            if not _matches_filters(proc, user_id=user_id, kind=kind):
                 continue
             procs.append(proc)
         return procs
@@ -769,7 +899,11 @@ class PgVectorStore(BaseStore):
             content TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT 'general',
             tags JSONB NOT NULL DEFAULT '[]',
+            kind TEXT NOT NULL DEFAULT 'skill',
+            source_path TEXT,
+            metadata JSONB NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
             emb vector(2560)
         );
         CREATE INDEX IF NOT EXISTS idx_procedures_emb
@@ -851,17 +985,64 @@ class PgVectorStore(BaseStore):
                         content TEXT NOT NULL,
                         category TEXT NOT NULL DEFAULT 'general',
                         tags JSONB NOT NULL DEFAULT '[]'::jsonb,
+                        kind TEXT NOT NULL DEFAULT 'skill',
+                        source_path TEXT,
+                        metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                         created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
                         emb vector({self._emb_dim})
                     )
                 """)
                 )
 
-                # Add emb column if table exists but column is missing (migration)
+                # Add missing columns if the table already exists (migration).
+                conn.execute(
+                    text("""
+                    ALTER TABLE procedures
+                    ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'skill'
+                """)
+                )
+                conn.execute(
+                    text("""
+                    ALTER TABLE procedures
+                    ADD COLUMN IF NOT EXISTS source_path TEXT
+                """)
+                )
+                conn.execute(
+                    text("""
+                    ALTER TABLE procedures
+                    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                """)
+                )
+                conn.execute(
+                    text("""
+                    ALTER TABLE procedures
+                    ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''
+                """)
+                )
                 conn.execute(
                     text(f"""
                     ALTER TABLE procedures
                     ADD COLUMN IF NOT EXISTS emb vector({self._emb_dim})
+                """)
+                )
+
+                conn.execute(
+                    text("""
+                    CREATE INDEX IF NOT EXISTS idx_procedures_kind
+                    ON procedures (kind)
+                """)
+                )
+                conn.execute(
+                    text("""
+                    CREATE INDEX IF NOT EXISTS idx_procedures_user_kind
+                    ON procedures (user_id, kind)
+                """)
+                )
+                conn.execute(
+                    text("""
+                    CREATE INDEX IF NOT EXISTS idx_procedures_source_path
+                    ON procedures (source_path)
                 """)
                 )
 
@@ -1055,7 +1236,7 @@ class PgVectorStore(BaseStore):
 
     def _to_text(self, procedure: Procedure) -> str:
         """Convert procedure to text for embedding."""
-        return f"# {procedure.title}\n\n{procedure.content}"
+        return procedure_search_text(procedure)
 
     def add(
         self,
@@ -1145,15 +1326,26 @@ class PgVectorStore(BaseStore):
             # Use CAST for the vector type - the ::vector syntax doesn't work with parameters
             conn.execute(
                 text("""
-                INSERT INTO procedures (id, user_id, title, content, category, tags, created_at, emb)
-                VALUES (:id, :user_id, :title, :content, :category, :tags, :created_at, CAST(:emb AS vector))
+                INSERT INTO procedures (
+                    id, user_id, title, content, category, tags, kind, source_path,
+                    metadata, created_at, updated_at, emb
+                )
+                VALUES (
+                    :id, :user_id, :title, :content, :category, :tags, :kind,
+                    :source_path, :metadata, :created_at, :updated_at,
+                    CAST(:emb AS vector)
+                )
                 ON CONFLICT (id) DO UPDATE SET
                     user_id = EXCLUDED.user_id,
                     title = EXCLUDED.title,
                     content = EXCLUDED.content,
                     category = EXCLUDED.category,
                     tags = EXCLUDED.tags,
+                    kind = EXCLUDED.kind,
+                    source_path = EXCLUDED.source_path,
+                    metadata = EXCLUDED.metadata,
                     created_at = EXCLUDED.created_at,
+                    updated_at = EXCLUDED.updated_at,
                     emb = EXCLUDED.emb
             """),
                 {
@@ -1163,31 +1355,62 @@ class PgVectorStore(BaseStore):
                     "content": procedure.content,
                     "category": procedure.category,
                     "tags": json.dumps(procedure.tags),
+                    "kind": procedure.kind,
+                    "source_path": procedure.source_path,
+                    "metadata": json.dumps(procedure.metadata),
                     "created_at": procedure.created_at,
+                    "updated_at": procedure.updated_at,
                     "emb": emb_str,
                 },
             )
             conn.commit()
+
+    @staticmethod
+    def _procedure_from_row(row: Any) -> Procedure:
+        try:
+            tags = json.loads(row.tags) if isinstance(row.tags, str) else row.tags
+        except Exception:
+            tags = []
+
+        return Procedure(
+            id=row.id,
+            user_id=row.user_id,
+            title=row.title,
+            content=row.content,
+            category=row.category,
+            tags=tags or [],
+            kind=getattr(row, "kind", "skill") or "skill",
+            source_path=getattr(row, "source_path", None) or None,
+            metadata=_metadata_json(getattr(row, "metadata", {}) or {}),
+            created_at=row.created_at,
+            updated_at=getattr(row, "updated_at", "") or row.created_at,
+        )
 
     def _search_with_emb(
         self,
         query_emb: list[float],
         top_k: int,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult]:
         """Search using pre-computed query embedding."""
         emb_str = "[" + ",".join(str(v) for v in query_emb) + "]"
 
         with self._engine.connect() as conn:
+            filters = []
+            params = {"emb": emb_str, "limit": top_k}
             if user_id:
-                filter_clause = "AND user_id = :user_id"
-                params = {"emb": emb_str, "user_id": user_id, "limit": top_k}
-            else:
-                filter_clause = ""
-                params = {"emb": emb_str, "limit": top_k}
+                filters.append("user_id = :user_id")
+                params["user_id"] = user_id
+            if kind is not None:
+                filters.append("kind = :kind")
+                params["kind"] = kind
+            filter_clause = "AND " + " AND ".join(filters) if filters else ""
 
             query_sql = text(f"""
-                SELECT id, user_id, title, content, category, tags, created_at,
+                SELECT
+                    id, user_id, title, content, category, tags, kind, source_path,
+                    metadata, created_at, updated_at,
                        1 - (emb <=> CAST(:emb AS vector)) AS score
                 FROM procedures
                 WHERE TRUE {filter_clause}
@@ -1200,20 +1423,7 @@ class PgVectorStore(BaseStore):
 
         results = []
         for row in rows:
-            try:
-                tags = json.loads(row.tags) if isinstance(row.tags, str) else row.tags
-            except Exception:
-                tags = []
-
-            proc = Procedure(
-                id=row.id,
-                user_id=row.user_id,
-                title=row.title,
-                content=row.content,
-                category=row.category,
-                tags=tags,
-                created_at=row.created_at,
-            )
+            proc = self._procedure_from_row(row)
             results.append(SearchResult(procedure=proc, score=float(row.score)))
 
         return results
@@ -1223,6 +1433,7 @@ class PgVectorStore(BaseStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity.
 
@@ -1238,18 +1449,19 @@ class PgVectorStore(BaseStore):
             query_embs = self._compute_embs_batch(query)
             results = []
             for query_emb in query_embs:
-                search_results = self._search_with_emb(query_emb, top_k, user_id)
+                search_results = self._search_with_emb(query_emb, top_k, user_id, kind)
                 results.append(search_results)
             return results
         else:
             query_emb = self._compute_emb(query)
-            return self._search_with_emb(query_emb, top_k, user_id)
+            return self._search_with_emb(query_emb, top_k, user_id, kind)
 
     async def search_async(
         self,
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity asynchronously.
@@ -1275,7 +1487,7 @@ class PgVectorStore(BaseStore):
             async def search_single(query_emb: list[float]) -> list[SearchResult]:
                 async with semaphore:
                     return await asyncio.to_thread(
-                        self._search_with_emb, query_emb, top_k, user_id
+                        self._search_with_emb, query_emb, top_k, user_id, kind
                     )
 
             tasks = [search_single(qe) for qe in query_embs]
@@ -1283,7 +1495,7 @@ class PgVectorStore(BaseStore):
         else:
             query_emb = await self._compute_emb_async(query)
             return await asyncio.to_thread(
-                self._search_with_emb, query_emb, top_k, user_id
+                self._search_with_emb, query_emb, top_k, user_id, kind
             )
 
     def get(self, id: str) -> Procedure | None:
@@ -1291,7 +1503,9 @@ class PgVectorStore(BaseStore):
         with self._engine.connect() as conn:
             result = conn.execute(
                 text("""
-                SELECT id, user_id, title, content, category, tags, created_at
+                SELECT
+                    id, user_id, title, content, category, tags, kind, source_path,
+                    metadata, created_at, updated_at
                 FROM procedures WHERE id = :id
             """),
                 {"id": id},
@@ -1301,20 +1515,7 @@ class PgVectorStore(BaseStore):
         if row is None:
             return None
 
-        try:
-            tags = json.loads(row.tags) if isinstance(row.tags, str) else row.tags
-        except Exception:
-            tags = []
-
-        return Procedure(
-            id=row.id,
-            user_id=row.user_id,
-            title=row.title,
-            content=row.content,
-            category=row.category,
-            tags=tags,
-            created_at=row.created_at,
-        )
+        return self._procedure_from_row(row)
 
     def delete(
         self,
@@ -1381,42 +1582,29 @@ class PgVectorStore(BaseStore):
         else:
             return await asyncio.to_thread(self.delete, id)
 
-    def list_all(self, user_id: str | None = None) -> list[Procedure]:
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]:
         """List all procedures."""
         with self._engine.connect() as conn:
+            filters = []
+            params: dict[str, Any] = {}
             if user_id:
-                result = conn.execute(
-                    text("""
-                    SELECT id, user_id, title, content, category, tags, created_at
-                    FROM procedures WHERE user_id = :user_id
-                """),
-                    {"user_id": user_id},
-                )
-            else:
-                result = conn.execute(
-                    text("""
-                    SELECT id, user_id, title, content, category, tags, created_at
-                    FROM procedures
-                """)
-                )
+                filters.append("user_id = :user_id")
+                params["user_id"] = user_id
+            if kind is not None:
+                filters.append("kind = :kind")
+                params["kind"] = kind
+            filter_clause = "WHERE " + " AND ".join(filters) if filters else ""
+            result = conn.execute(
+                text(f"""
+                SELECT
+                    id, user_id, title, content, category, tags, kind, source_path,
+                    metadata, created_at, updated_at
+                FROM procedures {filter_clause}
+            """),
+                params,
+            )
             rows = result.fetchall()
 
-        procs = []
-        for row in rows:
-            try:
-                tags = json.loads(row.tags) if isinstance(row.tags, str) else row.tags
-            except Exception:
-                tags = []
-
-            procs.append(
-                Procedure(
-                    id=row.id,
-                    user_id=row.user_id,
-                    title=row.title,
-                    content=row.content,
-                    category=row.category,
-                    tags=tags,
-                    created_at=row.created_at,
-                )
-            )
-        return procs
+        return [self._procedure_from_row(row) for row in rows]

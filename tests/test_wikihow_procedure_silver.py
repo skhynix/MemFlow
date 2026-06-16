@@ -55,10 +55,15 @@ class FakeStore:
         self.existing = existing or []
         self.deleted: list[str] = []
 
-    def list_all(self, user_id: str | None = None) -> list[Procedure]:
-        if user_id is None:
-            return list(self.existing)
-        return [proc for proc in self.existing if proc.user_id == user_id]
+    def list_all(
+        self, user_id: str | None = None, kind: str | None = None
+    ) -> list[Procedure]:
+        procs = list(self.existing)
+        if user_id is not None:
+            procs = [proc for proc in procs if proc.user_id == user_id]
+        if kind is not None:
+            procs = [proc for proc in procs if proc.kind == kind]
+        return procs
 
     def add(
         self,
@@ -77,6 +82,7 @@ class FakeStore:
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         from memflow.models import SearchResult
 
@@ -87,6 +93,8 @@ class FakeStore:
                 for proc in self.existing:
                     if user_id and proc.user_id != user_id:
                         continue
+                    if kind is not None and proc.kind != kind:
+                        continue
                     results.append(SearchResult(procedure=proc, score=0.9))
                 all_results.append(results[:top_k])
             return all_results
@@ -94,6 +102,8 @@ class FakeStore:
             results = []
             for proc in self.existing:
                 if user_id and proc.user_id != user_id:
+                    continue
+                if kind is not None and proc.kind != kind:
                     continue
                 results.append(SearchResult(procedure=proc, score=0.9))
             return results[:top_k]
@@ -103,11 +113,12 @@ class FakeStore:
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         import asyncio
 
-        return await asyncio.to_thread(self.search, query, top_k, user_id)
+        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
 
     def delete(
         self,
@@ -172,8 +183,16 @@ class FakeSearchMemFlow:
         self.results = results
         self.search_calls: list[dict] = []
 
-    def search(self, query: str, user_id: str, top_k: int) -> list[SearchResult]:
-        self.search_calls.append({"query": query, "user_id": user_id, "top_k": top_k})
+    def search(
+        self,
+        query: str,
+        user_id: str,
+        top_k: int,
+        kind: str | None = "skill",
+    ) -> list[SearchResult]:
+        self.search_calls.append(
+            {"query": query, "user_id": user_id, "top_k": top_k, "kind": kind}
+        )
         return self.results[:top_k]
 
 
@@ -468,7 +487,9 @@ def test_seed_wikihow_corpus_raises_when_reuse_listing_fails(tmp_path) -> None:
     )
 
     class FailingStore(FakeStore):
-        def list_all(self, user_id: str | None = None) -> list[Procedure]:
+        def list_all(
+            self, user_id: str | None = None, kind: str | None = None
+        ) -> list[Procedure]:
             raise ValueError("store unavailable")
 
     memflow = FakeMemFlow()
@@ -664,7 +685,12 @@ def test_wikihow_adapter_excludes_query_source_and_refills_top_k() -> None:
     )
 
     assert memflow.search_calls == [
-        {"query": "find the source task", "user_id": "bench-user", "top_k": 3}
+        {
+            "query": "find the source task",
+            "user_id": "bench-user",
+            "top_k": 3,
+            "kind": "procedure",
+        }
     ]
     assert [result.procedure_id for result in results] == ["rel_a", "next_a"]
 

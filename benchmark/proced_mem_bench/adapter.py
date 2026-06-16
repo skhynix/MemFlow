@@ -97,6 +97,7 @@ def trajectory_to_procedure(traj: Any, user_id: str) -> Procedure:
         user_id=user_id,
         category="alfworld",
         tags=["agentinstruct", f"source:{meta.source}", f"steps:{meta.total_steps}"],
+        kind="procedure",
     )
 
 
@@ -244,7 +245,9 @@ class MemFlowRetrievalAdapter(RetrievalSystem):
 
     def retrieve(self, query: str, k: int = 5) -> list[RetrievedTrajectory]:
         # Required benchmark path: use MemFlow.search directly.
-        search_results = self.memflow.search(query, user_id=self.user_id, top_k=k)
+        search_results = self.memflow.search(
+            query, user_id=self.user_id, top_k=k, kind="procedure"
+        )
         return [
             self._to_retrieved_trajectory(
                 result.procedure.id,

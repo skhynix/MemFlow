@@ -25,6 +25,7 @@ def adapter_module(monkeypatch: pytest.MonkeyPatch):
         user_id: str = "default"
         category: str = "general"
         tags: list[str] = field(default_factory=list)
+        kind: str = "skill"
 
     class MemFlow:
         pass
@@ -106,6 +107,7 @@ def test_trajectory_to_procedure_formats_steps_attribute(adapter_module) -> None
         "1. Action: go to diningtable 1\n"
         "2. Action: take laptop 1 from diningtable 1"
     )
+    assert procedure.kind == "procedure"
 
 
 def test_trajectory_to_procedure_formats_state_action_pairs_attribute(
@@ -138,3 +140,4 @@ def test_trajectory_to_procedure_formats_state_action_pairs_attribute(
         "1. Action: go to diningtable 1\n"
         "2. Action: take laptop 1 from diningtable 1"
     )
+    assert procedure.kind == "procedure"

@@ -118,6 +118,7 @@ def wikihow_record_to_procedure(
         user_id=user_id,
         category=normalized.category,
         tags=list(normalized.tags),
+        kind="procedure",
     )
 
 
@@ -270,7 +271,9 @@ class MemFlowWikiHowAdapter:
         """
         excluded = exclude_procedure_ids or set()
         fetch_k = k + len(excluded)
-        search_results = self.memflow.search(query, user_id=self.user_id, top_k=fetch_k)
+        search_results = self.memflow.search(
+            query, user_id=self.user_id, top_k=fetch_k, kind="procedure"
+        )
         retrieved: list[RetrievedWikiHowProcedure] = []
         for result in search_results:
             procedure = result.procedure
@@ -308,6 +311,7 @@ class MemFlowWikiHowAdapter:
             top_k=k + max(len(excl) for excl in exclude_map.values())
             if exclude_map
             else k,
+            kind="procedure",
         )
 
         # Filter excluded results

@@ -395,6 +395,7 @@ class MemFlow:
             content=data.get("content", ""),
             user_id=user_id,
             category=data.get("category", "general"),
+            kind="procedure",
         )
         self.store.add(proc)
         return {
@@ -546,7 +547,7 @@ class MemFlow:
         self, message: str, user_id: str | None, history: list[dict] | None
     ) -> dict:
         """Handle SEARCH intent - retrieve and respond."""
-        results = self.search(message, user_id=user_id, top_k=3)
+        results = self.search(message, user_id=user_id, top_k=3, kind=None)
 
         if results:
             procedures_text = "\n\n".join(
@@ -680,7 +681,7 @@ class MemFlow:
     ) -> dict:
         """Handle CONVERSATION intent - respond naturally."""
         # Search for relevant context
-        results = self.search(message, user_id=user_id, top_k=2)
+        results = self.search(message, user_id=user_id, top_k=2, kind=None)
 
         response = self._generate_chat_response(message, results)
         return {"response": response, "intent": "CONVERSATION"}
@@ -752,7 +753,7 @@ class MemFlow:
 
         for proc in explicit_procs:
             add_candidate(proc)
-        for result in self.search(message, user_id=user_id, top_k=top_k):
+        for result in self.search(message, user_id=user_id, top_k=top_k, kind=None):
             add_candidate(result.procedure)
         if not candidates:
             for proc in self.store.list_all(user_id=user_id):
@@ -769,6 +770,7 @@ class MemFlow:
         query: str | list[str],
         user_id: str | None = None,
         top_k: int = 5,
+        kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity.
 
@@ -776,14 +778,15 @@ class MemFlow:
             query: Single query string or list of queries
             user_id: User ID for filtering
             top_k: Number of results per query
+            kind: Record kind filter. Use None to search all records.
 
         Returns:
             Single list for single query, list of lists for batch
         """
         if isinstance(query, list):
-            return self.store.search(query, top_k=top_k, user_id=user_id)
+            return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
         else:
-            return self.store.search(query, top_k=top_k, user_id=user_id)
+            return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
 
     # ------------------------------------------------------------------
     # search_async - Async search for single or multiple queries
@@ -794,6 +797,7 @@ class MemFlow:
         query: str | list[str],
         user_id: str | None = None,
         top_k: int = 5,
+        kind: str | None = "skill",
         max_concurrency: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity asynchronously.
@@ -802,6 +806,7 @@ class MemFlow:
             query: Single query string or list of queries
             user_id: User ID for filtering
             top_k: Number of results per query
+            kind: Record kind filter. Use None to search all records.
             max_concurrency: Max concurrent requests (default: 50)
 
         Returns:
@@ -809,12 +814,16 @@ class MemFlow:
         """
         if isinstance(query, list):
             return await self.store.search_async(
-                query, top_k=top_k, user_id=user_id, max_concurrency=max_concurrency
+                query,
+                top_k=top_k,
+                user_id=user_id,
+                kind=kind,
+                max_concurrency=max_concurrency,
             )
         else:
             import asyncio
 
-            return await asyncio.to_thread(self.search, query, user_id, top_k)
+            return await asyncio.to_thread(self.search, query, user_id, top_k, kind)
 
     # ------------------------------------------------------------------
     # delete
@@ -985,7 +994,7 @@ class MemFlow:
         Returns:
             TaskPlan with steps to execute.
         """
-        results = self.search(task, user_id=user_id)
+        results = self.search(task, user_id=user_id, kind=None)
         context = (
             "\n\n---\n\n".join(
                 f"### {r.procedure.title}\n{r.procedure.content}" for r in results
@@ -1133,7 +1142,7 @@ class MemFlow:
           5. Repeat until all steps done or max attempts reached
         """
         # Retrieve context
-        results = self.search(task, user_id=user_id)
+        results = self.search(task, user_id=user_id, kind=None)
         context = (
             "\n\n---\n\n".join(
                 f"### {r.procedure.title}\n{r.procedure.content}" for r in results

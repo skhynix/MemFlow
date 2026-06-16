@@ -349,6 +349,27 @@ class TestMemFlowSearch:
 
         assert len(results) == 3
 
+    def test_search_kind_filter(self, fake_llm):
+        """Test MemFlow.search passes kind filters to the store."""
+        store = EmulatedStore()
+        skill = Procedure(title="Deploy skill", content="deploy")
+        procedure = Procedure(
+            title="Deploy procedure",
+            content="deploy",
+            kind="procedure",
+        )
+        store.add([skill, procedure])
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        assert [r.procedure.id for r in manager.search("deploy")] == [skill.id]
+        assert [r.procedure.id for r in manager.search("deploy", kind="procedure")] == [
+            procedure.id
+        ]
+        assert {r.procedure.id for r in manager.search("deploy", kind=None)} == {
+            skill.id,
+            procedure.id,
+        }
+
 
 class TestMemFlowDelete:
     """Tests for MemFlow.delete()."""
