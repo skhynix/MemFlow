@@ -837,7 +837,7 @@ class MemFlow:
         if isinstance(id, list):
             # Batch delete
             total = len(id)
-            num_deleted = self.store.delete_batch(id)
+            num_deleted = self.store.delete(id)
             return {
                 "num_deleted": num_deleted,
                 "num_failed": total - num_deleted,

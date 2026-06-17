@@ -383,6 +383,28 @@ class TestMemFlowDelete:
             "error": "not_found",
         }
 
+    def test_delete_batch_removes_multiple_procedures(self, fake_llm):
+        """Test deleting multiple procedures by ID."""
+        store = EmulatedStore()
+        kept = Procedure(title="Keep", content="1. Keep")
+        deleted = [
+            Procedure(title="Deploy guide", content="1. Deploy"),
+            Procedure(title="Rollback guide", content="1. Roll back"),
+        ]
+        store.add([kept, *deleted])
+        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+
+        result = manager.delete([deleted[0].id, deleted[1].id, "missing-id"])
+
+        assert result == {
+            "num_deleted": 2,
+            "num_failed": 1,
+            "total": 3,
+        }
+        assert store.get(deleted[0].id) is None
+        assert store.get(deleted[1].id) is None
+        assert store.get(kept.id) is kept
+
     def test_delete_respects_user_scope(self, fake_llm):
         """Test scoped delete does not remove another user's procedure."""
         store = EmulatedStore()
