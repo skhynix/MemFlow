@@ -5,9 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
-from memflow.claude_hook import load_hook_config, run_hook
+import pytest
+
+from memflow.claude_hook import default_manager_factory, load_hook_config, run_hook
 from memflow.manager import MemFlow
+from memflow.models import SearchResult
+from memflow.skills import load_skill
 from memflow.store import EmulatedStore
 
 
@@ -175,6 +180,110 @@ def test_memflow_errors_fail_open(tmp_path):
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "fail_open"
     assert audit["warnings"] == ["RuntimeError"]
+
+
+def test_default_factory_avoids_optional_llm_dependencies(monkeypatch, tmp_path):
+    import memflow.manager as manager_module
+
+    def fail_if_llm_factory_is_used(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hook retrieval path should not construct an LLM")
+
+    monkeypatch.setattr(
+        manager_module.LLMFactory, "create", fail_if_llm_factory_is_used
+    )
+    monkeypatch.setenv("MEMFLOW_BACKEND", "emulated")
+    config = load_hook_config(tmp_path / "missing-config.json")
+    config["memflow"]["env_file"] = str(tmp_path / "missing.env")
+
+    manager = default_manager_factory(config)
+
+    assert isinstance(manager.store, EmulatedStore)
+    with pytest.raises(RuntimeError, match="does not support LLM calls"):
+        manager.llm.generate([])
+
+
+def test_retrieval_timeout_fails_open(tmp_path):
+    class SlowManager:
+        def search_skills(self, query, user_id=None, top_k=5):
+            del query, user_id, top_k
+            time.sleep(1)
+            return []
+
+    config_path = _config_path(tmp_path, retrieval={"timeout_ms": 50})
+
+    output = run_hook(
+        _hook_input("split commits"),
+        config_path=config_path,
+        manager_factory=lambda _config: SlowManager(),
+    )
+
+    assert output == ""
+    audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert audit["status"] == "fail_open"
+    assert audit["warnings"] == ["RetrievalTimeoutError"]
+
+
+def test_manager_initialization_timeout_fails_open(tmp_path):
+    class EmptyManager:
+        def search_skills(self, query, user_id=None, top_k=5):
+            del query, user_id, top_k
+            return []
+
+    def slow_factory(_config):
+        time.sleep(1)
+        return EmptyManager()
+
+    config_path = _config_path(tmp_path, retrieval={"timeout_ms": 50})
+
+    output = run_hook(
+        _hook_input("split commits"),
+        config_path=config_path,
+        manager_factory=slow_factory,
+    )
+
+    assert output == ""
+    audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert audit["status"] == "fail_open"
+    assert audit["warnings"] == ["RetrievalTimeoutError"]
+
+
+def test_full_search_results_do_not_hydrate_skills(tmp_path):
+    root = tmp_path / "complete-skill"
+    _write_skill(
+        root,
+        "---\n"
+        "name: complete-skill\n"
+        "description: Complete result.\n"
+        "---\n"
+        "# Complete Skill\n\ncomplete result split commits\n",
+    )
+    procedure = load_skill(root, trust_state="trusted")
+
+    class FullResultManager:
+        get_skill_calls = 0
+
+        def search_skills(self, query, user_id=None, top_k=5):
+            del query, user_id, top_k
+            return [SearchResult(procedure=procedure, score=0.9)]
+
+        def get_skill(self, id_or_name, include_content=True):
+            del id_or_name, include_content
+            self.get_skill_calls += 1
+            raise AssertionError("complete search results should not be hydrated")
+
+    manager = FullResultManager()
+    config_path = _config_path(tmp_path)
+
+    output = run_hook(
+        _hook_input("complete result split commits"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert '<skill rank="1" name="complete-skill"' in context
+    assert manager.get_skill_calls == 0
 
 
 def test_audit_logging_errors_fail_open(tmp_path, fake_llm):

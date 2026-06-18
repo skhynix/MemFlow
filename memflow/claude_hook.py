@@ -9,20 +9,25 @@ import argparse
 import copy
 import hashlib
 import json
+import signal
 import sys
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TextIO
 from xml.sax.saxutils import escape
 
+from memflow.llm import BaseLLM
 from memflow.models import Procedure, SearchResult
 from memflow.skills import parse_skill_frontmatter, render_skill_for_injection
 
 ADAPTER_NAME = "claude-code-user-prompt-submit"
 DEFAULT_CONFIG_PATH = ".memflow/claude-hook.json"
+DEFAULT_RETRIEVAL_TIMEOUT_MS = 2000
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": "memflow.claude_hook.v1",
@@ -41,6 +46,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "candidate_k": 20,
         "min_score": 0.2,
         "include_cwd_in_query": True,
+        "timeout_ms": DEFAULT_RETRIEVAL_TIMEOUT_MS,
     },
     "rendering": {
         "max_chars": 6000,
@@ -92,6 +98,18 @@ class RenderResult:
 
 
 ManagerFactory = Callable[[dict[str, Any]], Any]
+
+
+class RetrievalTimeoutError(TimeoutError):
+    """Raised when MemFlow skill retrieval exceeds the hook timeout."""
+
+
+class _HookRetrievalOnlyLLM(BaseLLM):
+    """LLM placeholder for hook paths that only need store-backed retrieval."""
+
+    def generate(self, messages: list[dict]) -> str:
+        del messages
+        raise RuntimeError("Claude hook skill retrieval does not support LLM calls")
 
 
 def _deep_merge(default: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -151,6 +169,11 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
         retrieval.get("min_score"), default_retrieval["min_score"]
     )
     retrieval["include_cwd_in_query"] = bool(retrieval.get("include_cwd_in_query"))
+    retrieval["timeout_ms"] = _as_int(
+        retrieval.get("timeout_ms"),
+        DEFAULT_RETRIEVAL_TIMEOUT_MS,
+        minimum=0,
+    )
 
     rendering = config.setdefault("rendering", {})
     default_rendering = DEFAULT_CONFIG["rendering"]
@@ -183,7 +206,7 @@ def default_manager_factory(config: dict[str, Any]) -> Any:
         env_file = memflow_config.get("env_file")
         if env_file:
             _load_env_file(str(env_file))
-    return MemFlow(use_env=True)
+    return MemFlow(llm=_HookRetrievalOnlyLLM(), use_env=True)
 
 
 def parse_hook_input(stdin_text: str) -> HookInput:
@@ -241,6 +264,42 @@ def retrieve_skill_candidates(
     return candidates, warnings
 
 
+@contextmanager
+def retrieval_timeout(timeout_ms: int):
+    """Raise RetrievalTimeoutError when retrieval exceeds timeout_ms.
+
+    Claude hooks run on the prompt path, so the runtime CLI uses SIGALRM on
+    Unix to fail open instead of waiting indefinitely on a store call.
+    """
+    if (
+        timeout_ms <= 0
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "SIGALRM")
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def raise_timeout(_signum, _frame):
+        raise RetrievalTimeoutError("MemFlow skill retrieval timed out")
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_ms / 1000)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                previous_timer[0],
+                previous_timer[1],
+            )
+
+
 def _candidate_from_result(
     manager: Any,
     result: SearchResult,
@@ -250,9 +309,10 @@ def _candidate_from_result(
         return None
 
     procedure = result.procedure
-    hydrated = manager.get_skill(procedure.id, include_content=True)
-    if hydrated is not None:
-        procedure = hydrated
+    if not _has_complete_skill_snapshot(procedure):
+        hydrated = manager.get_skill(procedure.id, include_content=True)
+        if hydrated is not None:
+            procedure = hydrated
 
     governance = procedure.metadata.get("governance", {})
     if not isinstance(governance, dict):
@@ -279,6 +339,17 @@ def _candidate_from_result(
         trust_mode=trust_mode if trust_mode == "instruction" else "data",
         trust_state=trust_state,
         warnings=warnings,
+    )
+
+
+def _has_complete_skill_snapshot(procedure: Procedure) -> bool:
+    if not procedure.content:
+        return False
+    skill = procedure.metadata.get("skill", {})
+    if not isinstance(skill, dict) or not skill:
+        return False
+    return bool(
+        procedure.source_path or skill.get("source_path") or skill.get("sha256")
     )
 
 
@@ -651,11 +722,14 @@ def run_hook(
                 return ""
             return ""
 
-        factory = manager_factory or default_manager_factory
-        manager = factory(config)
-        candidates, selection_warnings = retrieve_skill_candidates(
-            manager, query, config
-        )
+        retrieval_config = config.get("retrieval", {})
+        timeout_ms = int(retrieval_config.get("timeout_ms", 0))
+        with retrieval_timeout(timeout_ms):
+            factory = manager_factory or default_manager_factory
+            manager = factory(config)
+            candidates, selection_warnings = retrieve_skill_candidates(
+                manager, query, config
+            )
         render_result = render_selected_skills(candidates, config, trace_id=trace_id)
         selected_skills = [
             _selected_skill_metadata(rendered) for rendered in render_result.skills
