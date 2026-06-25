@@ -19,7 +19,7 @@ from memflow.claude_hook import (
 )
 from memflow.manager import MemFlow
 from memflow.models import SearchResult
-from memflow.skill_context import SkillContextRequest
+from memflow.skill_context import SkillContextRequest, SkillContextSelector
 from memflow.skills import load_skill
 from memflow.store import EmulatedStore
 
@@ -186,6 +186,80 @@ def test_run_hook_uses_skill_context_request_for_query_and_user_id(tmp_path):
     ]
 
 
+def test_skill_context_selector_filters_dedupes_and_ranks_candidates(tmp_path):
+    root = tmp_path / "selector-skill"
+    _write_skill(
+        root,
+        "---\n"
+        "name: selector-skill\n"
+        "description: Exercise selector policy.\n"
+        "---\n"
+        "# Selector Skill\n\nselector policy split commits\n",
+    )
+    procedure = load_skill(root, trust_state="trusted")
+
+    class SearchManager:
+        def __init__(self):
+            self.calls = []
+            self.get_skill_calls = 0
+
+        def search_skills(self, query, user_id=None, top_k=5):
+            self.calls.append(
+                {
+                    "query": query,
+                    "user_id": user_id,
+                    "top_k": top_k,
+                }
+            )
+            return [
+                SearchResult(procedure=procedure, score=0.3),
+                SearchResult(procedure=procedure, score=0.8),
+                SearchResult(procedure=procedure, score=0.1),
+            ]
+
+        def get_skill(self, id_or_name, include_content=True):
+            del id_or_name, include_content
+            self.get_skill_calls += 1
+            raise AssertionError("complete selector results should not be hydrated")
+
+    config = load_hook_config(
+        _config_path(
+            tmp_path,
+            retrieval={
+                "candidate_k": 4,
+                "min_score": 0.2,
+                "include_cwd_in_query": True,
+            },
+        )
+    )
+    request = SkillContextRequest(
+        prompt="selector policy split commits",
+        cwd="/work/project",
+        agent="claude-code",
+        adapter=ADAPTER_NAME,
+        session_id="session-123",
+        transcript_path="/tmp/transcript.jsonl",
+        user_id="alice",
+        project_scope="/work/project",
+    )
+    manager = SearchManager()
+
+    candidates, warnings = SkillContextSelector(config).select(manager, request)
+
+    assert [candidate.score for candidate in candidates] == [0.8]
+    assert candidates[0].procedure.id == procedure.id
+    assert warnings == ["filtered_or_deduped_candidates"]
+    assert manager.calls == [
+        {
+            "query": "selector policy split commits\n"
+            "Current working directory: /work/project",
+            "user_id": "alice",
+            "top_k": 4,
+        }
+    ]
+    assert manager.get_skill_calls == 0
+
+
 def test_valid_hook_input_returns_parseable_claude_json(tmp_path, fake_llm):
     manager = _manager_with_skill(tmp_path, fake_llm)
     config_path = _config_path(tmp_path)
@@ -202,17 +276,39 @@ def test_valid_hook_input_returns_parseable_claude_json(tmp_path, fake_llm):
     hook_output = response["hookSpecificOutput"]
     assert hook_output["hookEventName"] == "UserPromptSubmit"
     context = hook_output["additionalContext"]
-    assert context.startswith("<memflow_selected_skills")
+    assert context.startswith("<selected_skills>\n")
+    assert context.endswith("</selected_skills>\n")
+    assert "These local skills were selected for the current user prompt." in context
+    assert "Use them only when relevant to this task." in context
     assert '<skill rank="1" name="commit-craft"' in context
+    assert 'source_path="' in context
+    assert 'trust_mode="instruction"' in context
+    assert "<when_to_use>" in context
+    assert "<outline>" in context
     assert '<content truncated="false">' in context
     assert "Split commits into reviewable units." in context
+    assert "MemFlow" not in context
+    assert "trace_id=" not in context
+    assert "top_k=" not in context
+    assert "catalog_mode=" not in context
+    assert "score=" not in context
+    assert "sha256=" not in context
+    assert "<why>" not in context
+    assert "matched_prompt_via_memflow_skill_search" not in context
 
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "injected"
     assert audit["adapter"] == "claude-code-user-prompt-submit"
     assert audit["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
     assert audit["session_id_hash"] == hashlib.sha256(b"session-123").hexdigest()
+    assert audit["trace_id"]
     assert audit["selected_skills"][0]["name"] == "commit-craft"
+    assert audit["selected_skills"][0]["sha256"]
+    assert audit["selected_skills"][0]["score"] > 0
+    assert (
+        audit["selected_skills"][0]["reason"]
+        == "matched_prompt_via_memflow_skill_search"
+    )
     assert audit["selected_skills"][0]["trust_mode"] == "instruction"
 
 
