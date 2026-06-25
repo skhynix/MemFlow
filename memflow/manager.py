@@ -387,7 +387,6 @@ class MemFlow:
         messages: str | list[dict] | None = None,
         procedure: Procedure | list[Procedure] | None = None,
         user_id: str = "default",
-        batch_size: int = 50,
     ) -> dict:
         """Store a procedure or procedures.
 
@@ -398,7 +397,6 @@ class MemFlow:
             messages: Conversation text/messages for extraction
             procedure: Single Procedure or list of Procedures
             user_id: User ID for the procedure(s)
-            batch_size: Batch size for multiple procedures (default: 50)
 
         Returns:
             dict with event info for single, dict with counts for batch
@@ -407,7 +405,7 @@ class MemFlow:
             if isinstance(procedure, list):
                 # Batch add
                 total = len(procedure)
-                num_seeded = self.store.add(procedure, batch_size=batch_size)
+                num_seeded = self.store.add(procedure)
                 return {
                     "num_seeded": num_seeded,
                     "num_skipped": total - num_seeded,
@@ -443,8 +441,8 @@ class MemFlow:
         path = Path(path_or_id).expanduser()
         if existing is None:
             resolved = _skill_source_candidate(path)
-            for proc in self.store.list_all(kind="skill"):
-                if proc.source_path == resolved:
+            for proc in self.store.list():
+                if proc.kind == "skill" and proc.source_path == resolved:
                     existing = proc
                     break
         if existing is not None:
@@ -516,7 +514,9 @@ class MemFlow:
         trust_state: str | None = None,
     ) -> list[Procedure]:
         """List indexed skills, optionally filtered by trust state."""
-        skills = self.store.list_all(user_id=user_id, kind="skill")
+        skills = [p for p in self.store.list() if p.kind == "skill"]
+        if user_id:
+            skills = [p for p in skills if p.user_id == user_id]
         if trust_state is None:
             return skills
         return [
@@ -540,7 +540,9 @@ class MemFlow:
         include_content: bool = True,
     ) -> Procedure | None:
         """Return a skill by id, title, or frontmatter name."""
-        for proc in self.store.list_all(kind="skill"):
+        for proc in self.store.list():
+            if proc.kind != "skill":
+                continue
             skill = proc.metadata.get("skill", {})
             if id_or_name in (proc.id, proc.title, skill.get("name")):
                 return proc if include_content else replace(proc, content="")
@@ -919,7 +921,7 @@ class MemFlow:
         self, message: str, user_id: str | None
     ) -> tuple[list[str], list[Procedure]]:
         """Find exact mentioned ids and scoped procedures safe to show."""
-        scoped_procs = self.store.list_all(user_id=user_id)
+        scoped_procs = self.store.list(user_id=user_id)
         scoped_matches = [
             proc for proc in scoped_procs if self._message_mentions_id(message, proc.id)
         ]
@@ -957,7 +959,8 @@ class MemFlow:
         for result in self.search(message, user_id=user_id, top_k=top_k, kind=None):
             add_candidate(result.procedure)
         if not candidates:
-            for proc in self.store.list_all(user_id=user_id):
+            procs = self.store.list(user_id=user_id)
+            for proc in procs:
                 add_candidate(proc)
 
         return [self._procedure_candidate(proc) for proc in candidates]
@@ -999,7 +1002,7 @@ class MemFlow:
         user_id: str | None = None,
         top_k: int = 5,
         kind: str | None = "skill",
-        max_concurrency: int = 50,
+        max_workers: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity asynchronously.
 
@@ -1019,7 +1022,7 @@ class MemFlow:
                 top_k=top_k,
                 user_id=user_id,
                 kind=kind,
-                max_concurrency=max_concurrency,
+                max_workers=max_workers,
             )
         else:
             import asyncio
@@ -1056,7 +1059,8 @@ class MemFlow:
         else:
             # Single delete
             proc = None
-            for candidate in self.store.list_all(user_id=user_id):
+            candidates = self.store.list(user_id=user_id)
+            for candidate in candidates:
                 if candidate.id == id:
                     proc = candidate
                     break
@@ -1070,7 +1074,8 @@ class MemFlow:
                 }
 
             try:
-                deleted = self.store.delete(proc.id)
+                num_deleted = self.store.delete(proc.id)
+                deleted = num_deleted > 0
             except Exception:
                 deleted = False
 
@@ -1098,37 +1103,63 @@ class MemFlow:
         self,
         id: str | list[str],
         user_id: str | None = None,
-        max_concurrency: int = 50,
+        max_workers: int = 50,
     ) -> dict:
         """Delete a stored procedure or procedures asynchronously.
 
         Args:
             id: Single ID or list of IDs
             user_id: User ID for filtering
-            max_concurrency: Max concurrent operations (default: 50)
+            max_workers: Max concurrent operations (default: 50)
 
         Returns:
             dict with event info for single, dict with counts for batch
         """
+        # Note: user_id is only used for pre-deletion lookup, not passed to store.delete_async
 
         if isinstance(id, list):
             # Batch async delete
             total = len(id)
-            num_deleted = await self.store.delete_async(
-                id, max_concurrency=max_concurrency
-            )
+            num_deleted = await self.store.delete_async(id, max_workers=max_workers)
             return {
                 "num_deleted": num_deleted,
                 "num_failed": total - num_deleted,
                 "total": total,
             }
         else:
-            # Single async delete
-            result = await self.store.delete_async(id, user_id=user_id)
+            # Single async delete - need to lookup procedure for title
+            proc = None
+            candidates = self.store.list(user_id=user_id)
+            for candidate in candidates:
+                if candidate.id == id:
+                    proc = candidate
+                    break
+
+            if proc is None:
+                return {
+                    "id": id,
+                    "event": "DELETE",
+                    "deleted": False,
+                    "error": "not_found",
+                }
+
+            num_deleted = await self.store.delete_async(id, max_workers=max_workers)
+            deleted = num_deleted > 0
+
+            if deleted:
+                return {
+                    "id": proc.id,
+                    "title": proc.title,
+                    "event": "DELETE",
+                    "deleted": True,
+                }
+
             return {
-                "id": id,
+                "id": proc.id,
+                "title": proc.title,
                 "event": "DELETE",
-                "deleted": result,
+                "deleted": False,
+                "error": "delete_failed",
             }
 
     # ------------------------------------------------------------------
@@ -1139,25 +1170,23 @@ class MemFlow:
         self,
         procedure: Procedure | list[Procedure],
         user_id: str = "default",
-        max_concurrency: int = 50,
-    ) -> dict | None:
+        max_workers: int = 50,
+    ) -> dict:
         """Add a procedure or procedures asynchronously.
 
         Args:
             procedure: Single Procedure or list of Procedures
             user_id: User ID for the procedure(s)
-            max_concurrency: Max concurrent operations (default: 50)
+            max_workers: Max concurrent operations (default: 50)
 
         Returns:
-            None for single, dict with counts for batch
+            dict with event info for single, dict with counts for batch
         """
 
         if isinstance(procedure, list):
             # Batch async add
             total = len(procedure)
-            num_seeded = await self.store.add_async(
-                procedure, max_concurrency=max_concurrency
-            )
+            num_seeded = await self.store.add_async(procedure, max_workers=max_workers)
             return {
                 "num_seeded": num_seeded,
                 "num_skipped": total - num_seeded,
@@ -1165,8 +1194,8 @@ class MemFlow:
             }
         else:
             # Single async add
-            await self.store.add_async(procedure)
-            return None
+            await self.store.add_async(procedure, max_workers=max_workers)
+            return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
 
     # ------------------------------------------------------------------
     # plan

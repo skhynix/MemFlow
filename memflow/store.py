@@ -28,7 +28,11 @@ import httpx
 from pgvector.psycopg2 import register_vector
 from sqlalchemy import create_engine, text
 
-from memflow.models import Procedure, SearchResult, procedure_search_text
+# Default constants for batch operations
+DEFAULT_MAX_BATCHES = 32
+DEFAULT_MAX_WORKERS = 48
+
+from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +106,7 @@ class BaseStore(ABC):
     """Abstract base for all storage backends."""
 
     @abstractmethod
-    def add(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-    ) -> None | int: ...
+    def add(self, procedure: Procedure | list[Procedure]) -> int: ...
 
     @abstractmethod
     def search(
@@ -118,43 +118,44 @@ class BaseStore(ABC):
     ) -> list[SearchResult] | list[list[SearchResult]]: ...
 
     @abstractmethod
-    def add_async(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None: ...
+    def get(self, id: str) -> Procedure | None: ...
 
     @abstractmethod
+    def delete(self, id: str | list[str]) -> int: ...
+
+    @abstractmethod
+    def list(self, user_id: str | None = None) -> list[Procedure]: ...
+
+    # Async methods - only PgVectorStore implements these
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        max_workers: int = DEFAULT_MAX_WORKERS,
+    ) -> int:
+        raise NotImplementedError(
+            "Async operations are only supported by PgVectorStore"
+        )
+
     async def search_async(
         self,
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
-        max_concurrency: int = 50,
-    ) -> list[SearchResult] | list[list[SearchResult]]: ...
+        max_workers: int = DEFAULT_MAX_WORKERS,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        raise NotImplementedError(
+            "Async operations are only supported by PgVectorStore"
+        )
 
-    @abstractmethod
     async def delete_async(
         self,
         id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int: ...
-
-    @abstractmethod
-    def get(self, id: str) -> Procedure | None: ...
-
-    @abstractmethod
-    def delete(
-        self,
-        id: str | list[str],
-    ) -> bool | int: ...
-
-    @abstractmethod
-    def list_all(
-        self, user_id: str | None = None, kind: str | None = None
-    ) -> list[Procedure]: ...
+        max_workers: int = DEFAULT_MAX_WORKERS,
+    ) -> int:
+        raise NotImplementedError(
+            "Async operations are only supported by PgVectorStore"
+        )
 
 
 class EmulatedStore(BaseStore):
@@ -168,18 +169,15 @@ class EmulatedStore(BaseStore):
     def __init__(self) -> None:
         self._store: dict[str, Procedure] = {}
 
-    def add(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-    ) -> None | int:
+    def add(self, procedure: Procedure | list[Procedure]) -> int:
+        """Add a procedure or procedures."""
         if isinstance(procedure, list):
             for proc in procedure:
                 self._store[proc.id] = proc
             return len(procedure)
         else:
             self._store[procedure.id] = procedure
-            return None
+            return 1
 
     def search(
         self,
@@ -188,12 +186,15 @@ class EmulatedStore(BaseStore):
         user_id: str | None = None,
         kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search using word-overlap scoring."""
         if isinstance(query, list):
             all_results = []
             for q in query:
                 results = []
                 for proc in self._store.values():
-                    if not _matches_filters(proc, user_id=user_id, kind=kind):
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    if kind is not None and proc.kind != kind:
                         continue
                     score = _text_score(procedure_search_text(proc), q)
                     if score > 0:
@@ -204,7 +205,9 @@ class EmulatedStore(BaseStore):
         else:
             results = []
             for proc in self._store.values():
-                if not _matches_filters(proc, user_id=user_id, kind=kind):
+                if user_id and proc.user_id != user_id:
+                    continue
+                if kind is not None and proc.kind != kind:
                     continue
                 score = _text_score(procedure_search_text(proc), query)
                 if score > 0:
@@ -213,12 +216,11 @@ class EmulatedStore(BaseStore):
             return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
+        """Get a single procedure by ID."""
         return self._store.get(id)
 
-    def delete(
-        self,
-        id: str | list[str],
-    ) -> bool | int:
+    def delete(self, id: str | list[str]) -> int:
+        """Delete a procedure or procedures by ID."""
         if isinstance(id, list):
             num_deleted = 0
             for i in id:
@@ -229,43 +231,14 @@ class EmulatedStore(BaseStore):
         else:
             if id in self._store:
                 del self._store[id]
-                return True
-            return False
+                return 1
+            return 0
 
-    async def search_async(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-        max_concurrency: int = 50,
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        import asyncio
-
-        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
-
-    async def add_async(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None:
-        return self.add(procedure, batch_size)
-
-    async def delete_async(
-        self,
-        id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int:
-        import asyncio
-
-        return await asyncio.to_thread(self.delete, id)
-
-    def list_all(
-        self, user_id: str | None = None, kind: str | None = None
-    ) -> list[Procedure]:
+    def list(self, user_id: str | None = None) -> list[Procedure]:
+        """Get all procedures, optionally filtered by user_id."""
         procs = list(self._store.values())
-        procs = [p for p in procs if _matches_filters(p, user_id=user_id, kind=kind)]
+        if user_id:
+            return [p for p in procs if p.user_id == user_id]
         return procs
 
 
@@ -273,18 +246,14 @@ class FileStore(BaseStore):
     """
     File-based store persisting each procedure as a Markdown file.
 
-    File format — frontmatter (key: value) followed by titled content:
+    File format — simplified frontmatter followed by titled content:
 
         ---
         id: <uuid>
         user_id: <user>
         category: <category>
         tags: ["tag1", "tag2"]
-        kind: skill
-        source_path: /path/to/SKILL.md
-        metadata: '{"skill": {...}}'
         created_at: <iso-timestamp>
-        updated_at: <iso-timestamp>
         ---
         # <title>
 
@@ -301,74 +270,39 @@ class FileStore(BaseStore):
         return self._dir / f"{id}.md"
 
     def _serialize(self, procedure: Procedure) -> str:
-        content_format = "raw" if _is_raw_skill_snapshot(procedure) else "titled"
-        header = (
+        return (
             "---\n"
             f"id: {procedure.id}\n"
-            f"title: {json.dumps(procedure.title, ensure_ascii=False)}\n"
             f"user_id: {procedure.user_id}\n"
             f"category: {procedure.category}\n"
             f"tags: {json.dumps(procedure.tags, ensure_ascii=False)}\n"
-            f"kind: {procedure.kind}\n"
-            f"content_format: {content_format}\n"
-            f"source_path: {procedure.source_path or ''}\n"
-            f"metadata: {json.dumps(procedure.metadata, ensure_ascii=False)}\n"
             f"created_at: {procedure.created_at}\n"
-            f"updated_at: {procedure.updated_at}\n"
             "---\n"
+            f"# {procedure.title}\n"
+            "\n"
+            f"{procedure.content}\n"
         )
-        if content_format == "raw":
-            return header + procedure.content
-        return header + f"# {procedure.title}\n\n{procedure.content}\n"
 
     def _deserialize(self, text: str) -> Procedure | None:
-        record = _split_file_record(text)
-        if record is None:
+        if not text.startswith("---"):
             return None
-        frontmatter, body = record
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
 
         meta: dict[str, str] = {}
-        for line in frontmatter.strip().splitlines():
+        for line in parts[1].strip().splitlines():
             if ": " in line:
                 k, v = line.split(": ", 1)
                 meta[k.strip()] = v.strip()
 
-        content_format = meta.get("content_format")
-        title = _metadata_scalar(meta.get("title", ""))
-        if content_format == "raw":
-            metadata = _metadata_json(meta.get("metadata", "{}"))
-            skill = metadata.get("skill", {})
-            if not title and isinstance(skill, dict):
-                title = str(skill.get("name") or "")
-            try:
-                tags = json.loads(meta.get("tags", "[]"))
-            except Exception:
-                tags = []
-            source_path = meta.get("source_path") or None
-            created_at = meta.get("created_at", "")
-            updated_at = meta.get("updated_at") or created_at
-
-            return Procedure(
-                id=meta.get("id", ""),
-                title=title,
-                content=body,
-                user_id=meta.get("user_id", "default"),
-                category=meta.get("category", "general"),
-                tags=tags,
-                kind=meta.get("kind", "skill"),
-                source_path=source_path,
-                metadata=metadata,
-                created_at=created_at,
-                updated_at=updated_at,
-            )
-
-        body = body.strip()
+        body = parts[2].strip()
         lines = body.splitlines()
+        title = ""
         content_start = 0
         for i, line in enumerate(lines):
             if line.startswith("# "):
-                if not title:
-                    title = line[2:].strip()
+                title = line[2:].strip()
                 content_start = i + 1
                 break
 
@@ -380,10 +314,9 @@ class FileStore(BaseStore):
             tags = json.loads(meta.get("tags", "[]"))
         except Exception:
             tags = []
-        metadata = _metadata_json(meta.get("metadata", "{}"))
-        source_path = meta.get("source_path") or None
+
         created_at = meta.get("created_at", "")
-        updated_at = meta.get("updated_at") or created_at
+        updated_at = meta.get("updated_at", created_at)
 
         return Procedure(
             id=meta.get("id", ""),
@@ -392,9 +325,6 @@ class FileStore(BaseStore):
             user_id=meta.get("user_id", "default"),
             category=meta.get("category", "general"),
             tags=tags,
-            kind=meta.get("kind", "skill"),
-            source_path=source_path,
-            metadata=metadata,
             created_at=created_at,
             updated_at=updated_at,
         )
@@ -407,11 +337,8 @@ class FileStore(BaseStore):
                 procs.append(proc)
         return procs
 
-    def add(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-    ) -> None | int:
+    def add(self, procedure: Procedure | list[Procedure]) -> int:
+        """Add a procedure or procedures."""
         if isinstance(procedure, list):
             for proc in procedure:
                 self._path(proc.id).write_text(self._serialize(proc), encoding="utf-8")
@@ -420,7 +347,7 @@ class FileStore(BaseStore):
             self._path(procedure.id).write_text(
                 self._serialize(procedure), encoding="utf-8"
             )
-            return None
+            return 1
 
     def search(
         self,
@@ -429,12 +356,15 @@ class FileStore(BaseStore):
         user_id: str | None = None,
         kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search using word-overlap scoring."""
         if isinstance(query, list):
             all_results = []
             for q in query:
                 results = []
                 for proc in self._load_all():
-                    if not _matches_filters(proc, user_id=user_id, kind=kind):
+                    if user_id and proc.user_id != user_id:
+                        continue
+                    if kind is not None and proc.kind != kind:
                         continue
                     score = _text_score(procedure_search_text(proc), q)
                     if score > 0:
@@ -445,7 +375,9 @@ class FileStore(BaseStore):
         else:
             results = []
             for proc in self._load_all():
-                if not _matches_filters(proc, user_id=user_id, kind=kind):
+                if user_id and proc.user_id != user_id:
+                    continue
+                if kind is not None and proc.kind != kind:
                     continue
                 score = _text_score(procedure_search_text(proc), query)
                 if score > 0:
@@ -454,15 +386,14 @@ class FileStore(BaseStore):
             return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
+        """Get a single procedure by ID."""
         path = self._path(id)
-        if not path.exists():
-            return None
-        return self._deserialize(path.read_text(encoding="utf-8"))
+        if path.exists():
+            return self._deserialize(path.read_text(encoding="utf-8"))
+        return None
 
-    def delete(
-        self,
-        id: str | list[str],
-    ) -> bool | int:
+    def delete(self, id: str | list[str]) -> int:
+        """Delete a procedure or procedures by ID."""
         if isinstance(id, list):
             num_deleted = 0
             for i in id:
@@ -475,43 +406,14 @@ class FileStore(BaseStore):
             path = self._path(id)
             if path.exists():
                 path.unlink()
-                return True
-            return False
+                return 1
+            return 0
 
-    async def search_async(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-        max_concurrency: int = 50,
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        import asyncio
-
-        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
-
-    async def add_async(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None:
-        return self.add(procedure, batch_size)
-
-    async def delete_async(
-        self,
-        id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int:
-        import asyncio
-
-        return await asyncio.to_thread(self.delete, id)
-
-    def list_all(
-        self, user_id: str | None = None, kind: str | None = None
-    ) -> list[Procedure]:
+    def list(self, user_id: str | None = None) -> list[Procedure]:
+        """Get all procedures, optionally filtered by user_id."""
         procs = self._load_all()
-        procs = [p for p in procs if _matches_filters(p, user_id=user_id, kind=kind)]
+        if user_id:
+            return [p for p in procs if p.user_id == user_id]
         return procs
 
 
@@ -723,7 +625,7 @@ class MemMachineStore(BaseStore):
         self,
         procedure: Procedure | list[Procedure],
         batch_size: int = 50,
-    ) -> None | int:
+    ) -> int:
         if isinstance(procedure, list):
             for proc in procedure:
                 result = self._get_memory().add(
@@ -750,7 +652,7 @@ class MemMachineStore(BaseStore):
             else:
                 ep_id = procedure.id
             self._index[procedure.id] = ep_id
-            return None
+            return 1
 
     def search(
         self,
@@ -759,6 +661,7 @@ class MemMachineStore(BaseStore):
         user_id: str | None = None,
         kind: str | None = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search using MemMachine semantic search."""
         if isinstance(query, list):
             all_results = []
             for q in query:
@@ -792,7 +695,7 @@ class MemMachineStore(BaseStore):
             return results[:top_k]
 
     def get(self, id: str) -> Procedure | None:
-        for proc in self.list_all():
+        for proc in self.list():
             if proc.id == id:
                 return proc
         return None
@@ -800,12 +703,12 @@ class MemMachineStore(BaseStore):
     def delete(
         self,
         id: str | list[str],
-    ) -> bool | int:
+    ) -> int:
         if isinstance(id, list):
             num_deleted = 0
             for i in id:
                 if i not in self._index:
-                    self.list_all()  # hydrate index
+                    self.list()  # hydrate index
                 ep_id = self._index.get(i)
                 if not ep_id:
                     continue
@@ -818,49 +721,18 @@ class MemMachineStore(BaseStore):
             return num_deleted
         else:
             if id not in self._index:
-                self.list_all()  # hydrate index
+                self.list()  # hydrate index
             ep_id = self._index.get(id)
             if not ep_id:
-                return False
+                return 0
             try:
                 self._get_memory().delete(ep_id)
                 self._index.pop(id, None)
-                return True
+                return 1
             except Exception:
-                return False
+                return 0
 
-    async def search_async(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-        max_concurrency: int = 50,
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        import asyncio
-
-        return await asyncio.to_thread(self.search, query, top_k, user_id, kind)
-
-    async def add_async(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None:
-        return self.add(procedure, batch_size)
-
-    async def delete_async(
-        self,
-        id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int:
-        import asyncio
-
-        return await asyncio.to_thread(self.delete, id)
-
-    def list_all(
-        self, user_id: str | None = None, kind: str | None = None
-    ) -> list[Procedure]:
+    def list(self, user_id: str | None = None) -> list[Procedure]:
         raw = self._get_memory().search(query="", limit=10_000)
         procs = []
 
@@ -870,7 +742,7 @@ class MemMachineStore(BaseStore):
                 continue
             if ep_id:
                 self._index[proc.id] = ep_id
-            if not _matches_filters(proc, user_id=user_id, kind=kind):
+            if user_id and proc.user_id != user_id:
                 continue
             procs.append(proc)
         return procs
@@ -1169,7 +1041,7 @@ class PgVectorStore(BaseStore):
         self,
         texts: list[str],
         batch_size: int = 50,
-        max_concurrency: int = 50,
+        max_workers: int = 50,
     ) -> list[list[float]]:
         """Compute embeddings for multiple texts in parallel batches.
 
@@ -1178,7 +1050,7 @@ class PgVectorStore(BaseStore):
         import asyncio
         from asyncio import Semaphore
 
-        semaphore = Semaphore(max_concurrency)
+        semaphore = Semaphore(max_workers)
 
         async def compute_single(text: str) -> list[float]:
             async with semaphore:
@@ -1242,7 +1114,7 @@ class PgVectorStore(BaseStore):
         self,
         procedure: Procedure | list[Procedure],
         batch_size: int = 50,
-    ) -> int | None:
+    ) -> int:
         """Add a procedure or procedures.
 
         Args:
@@ -1250,7 +1122,7 @@ class PgVectorStore(BaseStore):
             batch_size: Batch size for multiple procedures (default: 50)
 
         Returns:
-            None for single, number of inserted procedures for batch
+            1 for single, number of inserted procedures for batch
         """
         if isinstance(procedure, list):
             if not procedure:
@@ -1269,23 +1141,23 @@ class PgVectorStore(BaseStore):
             text_content = self._to_text(procedure)
             emb = self._compute_emb(text_content)
             self._insert_procedure(procedure, emb)
-            return None
+            return 1
 
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
         batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None:
+        max_workers: int = 50,
+    ) -> int:
         """Add a procedure or procedures asynchronously.
 
         Args:
             procedure: Single Procedure or list of Procedures
             batch_size: Batch size for embedding (default: 50)
-            max_concurrency: Max concurrent operations (default: 50)
+            max_workers: Max concurrent operations (default: 50)
 
         Returns:
-            None for single, number of inserted procedures for batch
+            1 for single, number of inserted procedures for batch
         """
         import asyncio
         from asyncio import Semaphore
@@ -1295,17 +1167,17 @@ class PgVectorStore(BaseStore):
                 return 0
             texts = [self._to_text(proc) for proc in procedure]
             embeddings = await self._compute_embs_batch_async(
-                texts, batch_size, max_concurrency
+                texts, batch_size, max_workers
             )
-            semaphore = Semaphore(max_concurrency)
+            semaphore = Semaphore(max_workers)
 
-            async def insert_single(proc: Procedure, emb: list[float]) -> bool:
+            async def insert_single(proc: Procedure, emb: list[float]) -> int:
                 async with semaphore:
                     try:
                         await asyncio.to_thread(self._insert_procedure, proc, emb)
-                        return True
+                        return 1
                     except Exception:
-                        return False
+                        return 0
 
             tasks = [
                 insert_single(proc, emb) for proc, emb in zip(procedure, embeddings)
@@ -1316,7 +1188,7 @@ class PgVectorStore(BaseStore):
             text_content = self._to_text(procedure)
             emb = await self._compute_emb_async(text_content)
             self._insert_procedure(procedure, emb)
-            return None
+            return 1
 
     def _insert_procedure(self, procedure: Procedure, emb: list[float]) -> None:
         """Insert a procedure with pre-computed embedding."""
@@ -1434,6 +1306,7 @@ class PgVectorStore(BaseStore):
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
+        batch_size: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity.
 
@@ -1441,12 +1314,13 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
+            batch_size: Batch size for embedding API calls (default: 50) - PgVectorStore only
 
         Returns:
             Single list for single query, list of lists for batch
         """
         if isinstance(query, list):
-            query_embs = self._compute_embs_batch(query)
+            query_embs = self._compute_embs_batch(query, batch_size=batch_size)
             results = []
             for query_emb in query_embs:
                 search_results = self._search_with_emb(query_emb, top_k, user_id, kind)
@@ -1462,7 +1336,8 @@ class PgVectorStore(BaseStore):
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
-        max_concurrency: int = 50,
+        batch_size: int = 50,
+        max_workers: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity asynchronously.
 
@@ -1470,7 +1345,8 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
-            max_concurrency: Max concurrent requests (default: 50)
+            batch_size: Batch size for embedding API calls (default: 50) - PgVectorStore only
+            max_workers: Max concurrent requests (default: 50)
 
         Returns:
             Single list for single query, list of lists for batch
@@ -1480,9 +1356,9 @@ class PgVectorStore(BaseStore):
 
         if isinstance(query, list):
             query_embs = await self._compute_embs_batch_async(
-                query, max_concurrency=max_concurrency
+                query, batch_size=batch_size, max_workers=max_workers
             )
-            semaphore = Semaphore(max_concurrency)
+            semaphore = Semaphore(max_workers)
 
             async def search_single(query_emb: list[float]) -> list[SearchResult]:
                 async with semaphore:
@@ -1497,6 +1373,40 @@ class PgVectorStore(BaseStore):
             return await asyncio.to_thread(
                 self._search_with_emb, query_emb, top_k, user_id, kind
             )
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_workers: int = 50,
+    ) -> int:
+        """Delete a procedure or procedures asynchronously.
+
+        Args:
+            id: Single ID or list of IDs
+            max_workers: Max concurrent operations (default: 50)
+
+        Returns:
+            int: Number of procedures deleted
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(id, list):
+            semaphore = Semaphore(max_workers)
+
+            async def delete_single(i: str) -> int:
+                async with semaphore:
+                    try:
+                        return await asyncio.to_thread(self.delete, i)
+                    except Exception:
+                        return 0
+
+            tasks = [delete_single(i) for i in id]
+            results = await asyncio.gather(*tasks)
+            return sum(results)
+        else:
+            result = await asyncio.to_thread(self.delete, id)
+            return result
 
     def get(self, id: str) -> Procedure | None:
         """Get a procedure by ID."""
@@ -1520,14 +1430,11 @@ class PgVectorStore(BaseStore):
     def delete(
         self,
         id: str | list[str],
-    ) -> bool | int:
+    ) -> int:
         """Delete a procedure or procedures by ID.
 
-        Args:
-            id: Single ID or list of IDs
-
         Returns:
-            bool for single (success), int for batch (num deleted)
+            int: Number of procedures deleted
         """
         if isinstance(id, list):
             num_deleted = 0
@@ -1545,66 +1452,32 @@ class PgVectorStore(BaseStore):
                         {"id": id},
                     )
                     conn.commit()
-                    return result.rowcount > 0
+                    return result.rowcount
             except Exception:
-                return False
+                return 0
 
-    async def delete_async(
-        self,
-        id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int:
-        """Delete a procedure or procedures asynchronously.
-
-        Args:
-            id: Single ID or list of IDs
-            max_concurrency: Max concurrent operations (default: 50)
-
-        Returns:
-            bool for single (success), int for batch (num deleted)
-        """
-        import asyncio
-        from asyncio import Semaphore
-
-        if isinstance(id, list):
-            semaphore = Semaphore(max_concurrency)
-
-            async def delete_single(i: str) -> bool:
-                async with semaphore:
-                    try:
-                        return await asyncio.to_thread(self.delete, i)
-                    except Exception:
-                        return False
-
-            tasks = [delete_single(i) for i in id]
-            results = await asyncio.gather(*tasks)
-            return sum(results)
-        else:
-            return await asyncio.to_thread(self.delete, id)
-
-    def list_all(
-        self, user_id: str | None = None, kind: str | None = None
-    ) -> list[Procedure]:
-        """List all procedures."""
+    def list(self, user_id: str | None = None) -> list[Procedure]:
+        """List all procedures, optionally filtered by user_id."""
         with self._engine.connect() as conn:
-            filters = []
-            params: dict[str, Any] = {}
             if user_id:
-                filters.append("user_id = :user_id")
-                params["user_id"] = user_id
-            if kind is not None:
-                filters.append("kind = :kind")
-                params["kind"] = kind
-            filter_clause = "WHERE " + " AND ".join(filters) if filters else ""
-            result = conn.execute(
-                text(f"""
-                SELECT
-                    id, user_id, title, content, category, tags, kind, source_path,
-                    metadata, created_at, updated_at
-                FROM procedures {filter_clause}
-            """),
-                params,
-            )
+                result = conn.execute(
+                    text("""
+                    SELECT
+                        id, user_id, title, content, category, tags, kind, source_path,
+                        metadata, created_at, updated_at
+                    FROM procedures WHERE user_id = :user_id
+                """),
+                    {"user_id": user_id},
+                )
+            else:
+                result = conn.execute(
+                    text("""
+                    SELECT
+                        id, user_id, title, content, category, tags, kind, source_path,
+                        metadata, created_at, updated_at
+                    FROM procedures
+                """),
+                )
             rows = result.fetchall()
 
         return [self._procedure_from_row(row) for row in rows]
