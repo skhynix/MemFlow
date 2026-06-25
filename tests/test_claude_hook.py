@@ -9,9 +9,17 @@ import time
 
 import pytest
 
-from memflow.claude_hook import default_manager_factory, load_hook_config, run_hook
+from memflow.claude_hook import (
+    ADAPTER_NAME,
+    build_skill_context_request,
+    default_manager_factory,
+    load_hook_config,
+    parse_hook_input,
+    run_hook,
+)
 from memflow.manager import MemFlow
 from memflow.models import SearchResult
+from memflow.skill_context import SkillContextRequest
 from memflow.skills import load_skill
 from memflow.store import EmulatedStore
 
@@ -96,6 +104,85 @@ def _audit_rows(path):
         json.loads(line)
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
+    ]
+
+
+def test_hook_input_and_config_map_to_skill_context_request(tmp_path):
+    prompt = "Please find relevant skills."
+    hook_input = parse_hook_input(_hook_input(prompt))
+    config_path = _config_path(
+        tmp_path,
+        memflow={"user_id": "alice", "project_scope": "repo:/work/project"},
+    )
+    config = load_hook_config(config_path)
+
+    request = build_skill_context_request(hook_input, config)
+
+    assert request == SkillContextRequest(
+        prompt=prompt,
+        cwd="/work/project",
+        agent="claude-code",
+        adapter=ADAPTER_NAME,
+        session_id="session-123",
+        transcript_path="/tmp/transcript.jsonl",
+        user_id="alice",
+        project_scope="repo:/work/project",
+    )
+    default_request = build_skill_context_request(hook_input, {"memflow": {}})
+    assert default_request.user_id == "default"
+    assert default_request.project_scope == "/work/project"
+
+
+def test_run_hook_uses_skill_context_request_for_query_and_user_id(tmp_path):
+    root = tmp_path / "recorded-skill"
+    _write_skill(
+        root,
+        "---\n"
+        "name: recorded-skill\n"
+        "description: Records hook request boundaries.\n"
+        "---\n"
+        "# Recorded Skill\n\nUse request boundaries for retrieval.\n",
+    )
+    procedure = load_skill(root, trust_state="trusted")
+
+    class RecordingManager:
+        def __init__(self):
+            self.calls = []
+
+        def search_skills(self, query, user_id=None, top_k=5):
+            self.calls.append(
+                {
+                    "query": query,
+                    "user_id": user_id,
+                    "top_k": top_k,
+                }
+            )
+            return [SearchResult(procedure=procedure, score=0.9)]
+
+        def get_skill(self, id_or_name, include_content=True):
+            del id_or_name, include_content
+            raise AssertionError("complete search results should not be hydrated")
+
+    manager = RecordingManager()
+    config_path = _config_path(tmp_path, memflow={"user_id": "alice"})
+    prompt = "Use request boundaries for retrieval."
+
+    output = run_hook(
+        _hook_input(prompt),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    response = json.loads(output)
+    context = response["hookSpecificOutput"]["additionalContext"]
+    assert response["suppressOutput"] is True
+    assert '<skill rank="1" name="recorded-skill"' in context
+    assert manager.calls == [
+        {
+            "query": f"{prompt}\nCurrent working directory: /work/project",
+            "user_id": "alice",
+            "top_k": 10,
+        }
     ]
 
 

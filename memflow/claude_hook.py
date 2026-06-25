@@ -23,6 +23,7 @@ from xml.sax.saxutils import escape
 
 from memflow.llm import BaseLLM
 from memflow.models import Procedure, SearchResult
+from memflow.skill_context import SkillContextRequest, SkillContextResponse
 from memflow.skills import parse_skill_frontmatter, render_skill_for_injection
 
 ADAPTER_NAME = "claude-code-user-prompt-submit"
@@ -222,32 +223,51 @@ def parse_hook_input(stdin_text: str) -> HookInput:
     )
 
 
-def build_query(hook_input: HookInput, config: dict[str, Any]) -> str:
+def build_skill_context_request(
+    hook_input: HookInput,
+    config: dict[str, Any],
+) -> SkillContextRequest:
+    memflow_config = config.get("memflow", {})
+    if not isinstance(memflow_config, dict):
+        memflow_config = {}
+    return SkillContextRequest(
+        prompt=hook_input.prompt,
+        cwd=hook_input.cwd,
+        agent="claude-code",
+        adapter=ADAPTER_NAME,
+        session_id=hook_input.session_id,
+        transcript_path=hook_input.transcript_path,
+        user_id=str(memflow_config.get("user_id") or "default"),
+        project_scope=str(memflow_config.get("project_scope") or hook_input.cwd),
+    )
+
+
+def build_query(request: SkillContextRequest, config: dict[str, Any]) -> str:
     retrieval = config.get("retrieval", {})
-    parts = [hook_input.prompt.strip()]
-    if retrieval.get("include_cwd_in_query") and hook_input.cwd:
-        parts.append(f"Current working directory: {hook_input.cwd}")
+    parts = [request.prompt.strip()]
+    if retrieval.get("include_cwd_in_query") and request.cwd:
+        parts.append(f"Current working directory: {request.cwd}")
     return "\n".join(part for part in parts if part)
 
 
 def retrieve_skill_candidates(
     manager: Any,
-    query: str,
+    request: SkillContextRequest,
     config: dict[str, Any],
 ) -> tuple[list[SkillCandidate], list[str]]:
     """Retrieve, filter, dedupe, and rank skill candidates."""
     retrieval = config.get("retrieval", {})
-    memflow_config = config.get("memflow", {})
-    user_id = (
-        memflow_config.get("user_id") if isinstance(memflow_config, dict) else None
-    )
     candidate_k = retrieval.get(
         "candidate_k", DEFAULT_CONFIG["retrieval"]["candidate_k"]
     )
     min_score = retrieval.get("min_score", DEFAULT_CONFIG["retrieval"]["min_score"])
     warnings: list[str] = []
 
-    raw_results = manager.search_skills(query, user_id=user_id, top_k=candidate_k)
+    raw_results = manager.search_skills(
+        build_query(request, config),
+        user_id=request.user_id,
+        top_k=candidate_k,
+    )
     deduped: dict[str, SkillCandidate] = {}
     for result in raw_results:
         candidate = _candidate_from_result(manager, result, min_score)
@@ -681,6 +701,7 @@ def run_hook(
     trace_id = uuid.uuid4().hex
     config: dict[str, Any]
     hook_input: HookInput | None = None
+    context_request: SkillContextRequest | None = None
     prompt = ""
 
     try:
@@ -693,7 +714,8 @@ def run_hook(
 
     try:
         hook_input = parse_hook_input(stdin_text)
-        prompt = hook_input.prompt
+        context_request = build_skill_context_request(hook_input, config)
+        prompt = context_request.prompt
         if hook_input.hook_event_name != "UserPromptSubmit":
             record = _base_audit_record(
                 config=config,
@@ -707,16 +729,24 @@ def run_hook(
             _audit_or_fail(config, record)
             return ""
 
-        query = build_query(hook_input, config)
+        query = build_query(context_request, config)
         if not query.strip():
-            record = _base_audit_record(
-                config=config,
+            context_response = SkillContextResponse(
                 trace_id=trace_id,
-                hook_input=hook_input,
-                prompt=prompt,
+                selected_skills=(),
+                rendered_context="",
+                warnings=("empty_query",),
                 status="no_results",
                 latency_ms=latency_ms(),
-                warnings=["empty_query"],
+            )
+            record = _base_audit_record(
+                config=config,
+                trace_id=context_response.trace_id,
+                hook_input=hook_input,
+                prompt=prompt,
+                status=context_response.status,
+                latency_ms=context_response.latency_ms,
+                warnings=context_response.warnings,
             )
             if not _audit_or_fail(config, record):
                 return ""
@@ -728,33 +758,41 @@ def run_hook(
             factory = manager_factory or default_manager_factory
             manager = factory(config)
             candidates, selection_warnings = retrieve_skill_candidates(
-                manager, query, config
+                manager, context_request, config
             )
         render_result = render_selected_skills(candidates, config, trace_id=trace_id)
-        selected_skills = [
+        selected_skills = tuple(
             _selected_skill_metadata(rendered) for rendered in render_result.skills
-        ]
-        warnings = [*selection_warnings, *render_result.warnings]
+        )
+        warnings = (*selection_warnings, *render_result.warnings)
         status = "injected" if render_result.xml else "no_results"
-        record = _base_audit_record(
-            config=config,
+        context_response = SkillContextResponse(
             trace_id=trace_id,
-            hook_input=hook_input,
-            prompt=prompt,
+            selected_skills=selected_skills,
+            rendered_context=render_result.xml,
+            warnings=warnings,
             status=status,
             latency_ms=latency_ms(),
-            warnings=warnings,
-            selected_skills=selected_skills,
+        )
+        record = _base_audit_record(
+            config=config,
+            trace_id=context_response.trace_id,
+            hook_input=hook_input,
+            prompt=prompt,
+            status=context_response.status,
+            latency_ms=context_response.latency_ms,
+            warnings=context_response.warnings,
+            selected_skills=list(context_response.selected_skills),
         )
         if not _audit_or_fail(config, record):
             return ""
-        if not render_result.xml:
+        if not context_response.rendered_context:
             return ""
         response = {
             "suppressOutput": True,
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": render_result.xml,
+                "additionalContext": context_response.rendered_context,
             },
         }
         return json.dumps(response)
