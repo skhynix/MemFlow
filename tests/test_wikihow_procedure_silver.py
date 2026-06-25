@@ -68,14 +68,13 @@ class FakeStore:
     def add(
         self,
         procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-    ) -> None | int:
+    ) -> int:
         if isinstance(procedure, list):
             self.existing.extend(procedure)
             return len(procedure)
         else:
             self.existing.append(procedure)
-            return None
+            return 1
 
     def search(
         self,
@@ -114,7 +113,7 @@ class FakeStore:
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
-        max_concurrency: int = 50,
+        max_workers: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         import asyncio
 
@@ -123,7 +122,7 @@ class FakeStore:
     def delete(
         self,
         id: str | list[str],
-    ) -> bool | int:
+    ) -> int:
         if isinstance(id, list):
             num_deleted = 0
             for i in id:
@@ -132,13 +131,13 @@ class FakeStore:
             return num_deleted
         else:
             self.deleted.append(id)
-            return True
+            return 1
 
     async def delete_async(
         self,
         id: str | list[str],
-        max_concurrency: int = 50,
-    ) -> bool | int:
+        max_workers: int = 50,
+    ) -> int:
         import asyncio
 
         return await asyncio.to_thread(self.delete, id)
@@ -146,10 +145,9 @@ class FakeStore:
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_concurrency: int = 50,
-    ) -> int | None:
-        return self.add(procedure, batch_size)
+        max_workers: int = 50,
+    ) -> int:
+        return self.add(procedure)
 
 
 class FakeMemFlow:
@@ -161,8 +159,7 @@ class FakeMemFlow:
         self,
         procedure: Procedure | list[Procedure],
         user_id: str = "default",
-        batch_size: int = 50,
-    ) -> dict | None:
+    ) -> dict:
         if isinstance(procedure, list):
             for proc in procedure:
                 proc.user_id = user_id

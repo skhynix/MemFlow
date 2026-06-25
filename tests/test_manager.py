@@ -281,7 +281,7 @@ class TestMemFlowAdd:
 
         assert result["event"] == "ADD"
         assert result["id"] == proc.id
-        assert proc in [p for p in manager.store.list_all()]
+        assert proc in [p for p in manager.store.list()]
 
     def test_add_procedure_requires_either_messages_or_procedure(self, fake_llm):
         """Test that add requires either messages or procedure."""
@@ -786,10 +786,10 @@ class TestMemFlowRun:
         learned_proc = Procedure(title="Learned", content="1. Step")
         mock_learner.extract.return_value = learned_proc
 
-        initial_count = len(store.list_all())
+        initial_count = len(store.list())
         # Use multi_stage=False for simpler execution path
         manager.run("Test task", multi_stage=False)
-        final_count = len(store.list_all())
+        final_count = len(store.list())
 
         assert final_count == initial_count + 1
 
