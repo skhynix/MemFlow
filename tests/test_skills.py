@@ -8,8 +8,11 @@ import hashlib
 import pytest
 
 from memflow.manager import MemFlow
+from memflow.models import Procedure
 from memflow.skills import (
     build_resource_manifest,
+    build_skill_metadata,
+    indexed_skill_render_parts,
     load_skill,
     parse_skill_frontmatter,
     skill_id,
@@ -130,7 +133,66 @@ def test_load_skill_from_directory_preserves_raw_content_and_metadata(tmp_path):
     assert proc.metadata["governance"]["trust_state"] == "trusted"
     assert proc.metadata["governance"]["mode"] == "instruction"
     assert proc.metadata["governance"]["warnings"] == []
-    assert proc.metadata["index"]["search_text_sha256"]
+    index = proc.metadata["index"]
+    body = "# Commit Craft\n\nUse focused commits.\n"
+    assert index["frontmatter_present"] is True
+    assert index["body_offset"] == source_text.index(body)
+    assert index["body_start_line"] == 11
+    assert index["body_sha256"] == hashlib.sha256(body.encode()).hexdigest()
+    assert index["search_text_sha256"]
+
+
+def test_build_skill_metadata_records_body_index_without_frontmatter(tmp_path):
+    root = tmp_path / "simple-skill"
+    root.mkdir()
+    source = root / "SKILL.md"
+    source_text = _write_skill(root, "# Simple\n\nBody\n")
+
+    metadata = build_skill_metadata(
+        root_path=root.resolve(),
+        source_path=source.resolve(),
+        raw_text=source_text,
+        frontmatter={},
+        trust_state="trusted",
+    )
+
+    index = metadata["index"]
+    assert index["frontmatter_present"] is False
+    assert index["body_offset"] == 0
+    assert index["body_start_line"] == 1
+    assert index["body_sha256"] == hashlib.sha256(source_text.encode()).hexdigest()
+
+
+def test_indexed_skill_render_parts_uses_body_offset_and_legacy_fallback(tmp_path):
+    root = tmp_path / "render-skill"
+    root.mkdir()
+    source_text = _write_skill(
+        root,
+        "---\nname: render-skill\n---\n# Render Skill\n\nPINEAPPLE_MARKER\n",
+    )
+    proc = load_skill(root, trust_state="trusted")
+
+    frontmatter, body, warnings = indexed_skill_render_parts(proc)
+
+    assert frontmatter["name"] == "render-skill"
+    assert body == "# Render Skill\n\nPINEAPPLE_MARKER\n"
+    assert warnings == ()
+
+    legacy_proc = Procedure(
+        title=proc.title,
+        content=source_text,
+        id=proc.id,
+        kind="skill",
+        metadata={"skill": proc.metadata["skill"], "index": {}},
+    )
+
+    legacy_frontmatter, legacy_body, legacy_warnings = indexed_skill_render_parts(
+        legacy_proc
+    )
+
+    assert legacy_frontmatter["name"] == "render-skill"
+    assert legacy_body == source_text
+    assert legacy_warnings == (f"legacy_skill_render_metadata_missing:{proc.id}",)
 
 
 @pytest.mark.parametrize(

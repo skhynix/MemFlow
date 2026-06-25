@@ -121,6 +121,31 @@ def _heading_index(text: str) -> list[dict[str, Any]]:
     return headings
 
 
+def _body_index(text: str) -> dict[str, Any]:
+    lines = text.splitlines(keepends=True)
+    body_offset = 0
+    body_start_line = 1
+    frontmatter_present = False
+
+    if lines and lines[0].strip() == "---":
+        offset = len(lines[0])
+        for index, line in enumerate(lines[1:], start=1):
+            offset += len(line)
+            if line.strip() == "---":
+                body_offset = offset
+                body_start_line = index + 2
+                frontmatter_present = True
+                break
+
+    body = text[body_offset:]
+    return {
+        "frontmatter_present": frontmatter_present,
+        "body_offset": body_offset,
+        "body_start_line": body_start_line,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
 def build_resource_manifest(root_path: Path) -> dict[str, Any]:
     """Build manifests for scripts, references, and assets under a skill root."""
     root = root_path.expanduser().resolve()
@@ -280,6 +305,7 @@ def build_skill_metadata(
         "index": {
             "indexed_at": indexed_at,
             "headings": _heading_index(raw_text),
+            **_body_index(raw_text),
         },
     }
     metadata["index"]["search_text_sha256"] = hashlib.sha256(
@@ -338,6 +364,37 @@ def load_skill(
     )
 
 
+def indexed_skill_render_parts(
+    procedure: Procedure,
+) -> tuple[dict[str, Any], str, tuple[str, ...]]:
+    """Return frontmatter and body using indexed metadata only.
+
+    The prompt/render path must not reparse SKILL.md frontmatter. New skill
+    records carry a body offset under metadata["index"]. Legacy records fall
+    back to the stored content so body markers are still injected.
+    """
+    skill = procedure.metadata.get("skill", {})
+    if not isinstance(skill, dict):
+        skill = {}
+    frontmatter = skill.get("frontmatter", {})
+    if not isinstance(frontmatter, dict):
+        frontmatter = {}
+
+    index = procedure.metadata.get("index", {})
+    if not isinstance(index, dict):
+        index = {}
+    body_offset = index.get("body_offset")
+    if isinstance(body_offset, int) and 0 <= body_offset <= len(procedure.content):
+        return dict(frontmatter), procedure.content[body_offset:], ()
+
+    return (
+        dict(frontmatter),
+        procedure.content,
+        (f"legacy_skill_render_metadata_missing:{procedure.id}",),
+    )
+
+
 def render_skill_for_injection(procedure: Procedure) -> str:
-    """Return the stored skill body for future gateway rendering."""
-    return procedure.content
+    """Return the indexed skill body for injection without reparsing frontmatter."""
+    _frontmatter, body, _warnings = indexed_skill_render_parts(procedure)
+    return body

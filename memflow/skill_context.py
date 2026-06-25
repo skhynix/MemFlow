@@ -14,7 +14,7 @@ from typing import Any
 from xml.sax.saxutils import escape
 
 from memflow.models import Procedure, SearchResult
-from memflow.skills import parse_skill_frontmatter, render_skill_for_injection
+from memflow.skills import indexed_skill_render_parts
 
 
 @dataclass(frozen=True)
@@ -220,14 +220,16 @@ class ContextRenderer:
             if available <= 0:
                 warnings.append("render_budget_exhausted")
                 break
-            rendered = _render_skill_with_budget(
+            render_result = _render_skill_with_budget(
                 candidate, len(selected) + 1, available
             )
-            if rendered is None:
+            if render_result is None:
                 warnings.append(
                     f"skill_render_budget_exhausted:{candidate.procedure.id}"
                 )
                 continue
+            rendered, render_warnings = render_result
+            warnings.extend(render_warnings)
             body_parts.append(rendered.xml)
             selected.append(rendered)
             remaining -= rendered.rendered_chars + separator_chars
@@ -352,14 +354,8 @@ def _render_skill_with_budget(
     candidate: SkillCandidate,
     rank: int,
     budget: int,
-) -> RenderedSkill | None:
-    skill_text = render_skill_for_injection(candidate.procedure)
-    try:
-        frontmatter, body = parse_skill_frontmatter(skill_text)
-    except ValueError:
-        frontmatter, body = {}, skill_text
-    if not isinstance(frontmatter, dict):
-        frontmatter = {}
+) -> tuple[RenderedSkill, tuple[str, ...]] | None:
+    frontmatter, body, render_warnings = indexed_skill_render_parts(candidate.procedure)
     body = _strip_surrounding_blank_lines(body)
 
     content_limit = min(len(body), max(0, budget))
@@ -373,7 +369,7 @@ def _render_skill_with_budget(
                 rank=rank,
                 xml=xml,
                 rendered_chars=len(xml),
-            )
+            ), render_warnings
         excess = len(xml) - budget
         next_limit = content_limit - excess - 32
         if next_limit >= content_limit:
@@ -387,7 +383,7 @@ def _render_skill_with_budget(
             rank=rank,
             xml=xml,
             rendered_chars=len(xml),
-        )
+        ), render_warnings
     return None
 
 

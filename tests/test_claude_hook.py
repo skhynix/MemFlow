@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+import memflow.skill_context as skill_context_module
+import memflow.skills as skills_module
 from memflow.claude_hook import (
     ADAPTER_NAME,
     build_skill_context_request,
@@ -18,7 +20,7 @@ from memflow.claude_hook import (
     run_hook,
 )
 from memflow.manager import MemFlow
-from memflow.models import SearchResult
+from memflow.models import Procedure, SearchResult
 from memflow.skill_context import SkillContextRequest, SkillContextSelector
 from memflow.skills import load_skill
 from memflow.store import EmulatedStore
@@ -467,6 +469,110 @@ def test_full_search_results_do_not_hydrate_skills(tmp_path):
     context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
     assert '<skill rank="1" name="complete-skill"' in context
     assert manager.get_skill_calls == 0
+
+
+def test_run_hook_does_not_parse_frontmatter_on_prompt_path(monkeypatch, tmp_path):
+    root = tmp_path / "no-prompt-parse"
+    _write_skill(
+        root,
+        "---\n"
+        "name: no-prompt-parse\n"
+        "description: Render from indexed metadata.\n"
+        "---\n"
+        "# No Prompt Parse\n\nPINEAPPLE_MARKER survives render.\n",
+    )
+    procedure = load_skill(root, trust_state="trusted")
+
+    def fail_if_parsed(_text):
+        raise AssertionError("prompt path must not parse skill frontmatter")
+
+    monkeypatch.setattr(
+        skills_module,
+        "parse_skill_frontmatter",
+        fail_if_parsed,
+    )
+    monkeypatch.setattr(
+        skill_context_module,
+        "parse_skill_frontmatter",
+        fail_if_parsed,
+        raising=False,
+    )
+
+    class IndexedOnlyManager:
+        def search_skills(self, query, user_id=None, top_k=5):
+            del query, user_id, top_k
+            return [SearchResult(procedure=procedure, score=0.9)]
+
+        def get_skill(self, id_or_name, include_content=True):
+            del id_or_name, include_content
+            raise AssertionError("complete search results should not hydrate")
+
+    output = run_hook(
+        _hook_input("PINEAPPLE_MARKER"),
+        config_path=_config_path(tmp_path),
+        manager_factory=lambda _config: IndexedOnlyManager(),
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert '<skill rank="1" name="no-prompt-parse"' in context
+    assert "PINEAPPLE_MARKER survives render." in context
+
+
+def test_run_hook_retrieval_only_manager_avoids_indexing_and_sync(tmp_path):
+    root = tmp_path / "hydrated-skill"
+    _write_skill(
+        root,
+        "---\n"
+        "name: hydrated-skill\n"
+        "description: Hydrate from retrieval-only manager.\n"
+        "---\n"
+        "# Hydrated Skill\n\nretrieval only PINEAPPLE_MARKER\n",
+    )
+    procedure = load_skill(root, trust_state="trusted")
+    partial = Procedure(
+        title=procedure.title,
+        content="",
+        id=procedure.id,
+        kind="skill",
+        metadata={},
+    )
+
+    class RetrievalOnlyManager:
+        def __init__(self):
+            self.search_calls = 0
+            self.get_skill_calls = 0
+
+        def search_skills(self, query, user_id=None, top_k=5):
+            del query, user_id, top_k
+            self.search_calls += 1
+            return [SearchResult(procedure=partial, score=0.9)]
+
+        def get_skill(self, id_or_name, include_content=True):
+            assert id_or_name == procedure.id
+            assert include_content is True
+            self.get_skill_calls += 1
+            return procedure
+
+        def add_skill(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("hook path must not index skills")
+
+        def sync_skill(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("hook path must not sync skills")
+
+    manager = RetrievalOnlyManager()
+
+    output = run_hook(
+        _hook_input("retrieval only"),
+        config_path=_config_path(tmp_path),
+        manager_factory=lambda _config: manager,
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert "retrieval only PINEAPPLE_MARKER" in context
+    assert manager.search_calls == 1
+    assert manager.get_skill_calls == 1
 
 
 def test_audit_logging_errors_fail_open(tmp_path, fake_llm):
