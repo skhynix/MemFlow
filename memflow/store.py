@@ -20,6 +20,7 @@ import re
 import threading
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1335,6 +1336,19 @@ class PgVectorStore(BaseStore):
         """Convert procedure to text for embedding."""
         return procedure_search_text(procedure)
 
+    @staticmethod
+    def _sanitize_content(procedure: Procedure) -> Procedure:
+        """Strip NUL bytes from content so PostgreSQL text columns accept it.
+
+        PostgreSQL rejects strings containing NUL (0x00) characters with
+        ValueError. Some upstream corpora embed control bytes (e.g. in
+        directory-tree blocks) that must be removed before storage and
+        embedding so both paths see the same cleaned text.
+        """
+        if "\x00" in procedure.content:
+            return replace(procedure, content=procedure.content.replace("\x00", ""))
+        return procedure
+
     def add(
         self,
         procedure: Procedure | list[Procedure],
@@ -1352,6 +1366,7 @@ class PgVectorStore(BaseStore):
         if isinstance(procedure, list):
             if not procedure:
                 return 0
+            procedure = [self._sanitize_content(proc) for proc in procedure]
             texts = [self._to_text(proc) for proc in procedure]
             embeddings = self._compute_embs_batch(texts, batch_size=batch_size)
             num_inserted = 0
@@ -1363,6 +1378,7 @@ class PgVectorStore(BaseStore):
                     pass
             return num_inserted
         else:
+            procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = self._compute_emb(text_content)
             self._insert_procedure(procedure, emb)
@@ -1390,6 +1406,7 @@ class PgVectorStore(BaseStore):
         if isinstance(procedure, list):
             if not procedure:
                 return 0
+            procedure = [self._sanitize_content(proc) for proc in procedure]
             texts = [self._to_text(proc) for proc in procedure]
             embeddings = await self._compute_embs_batch_async(
                 texts, batch_size, max_workers
@@ -1410,6 +1427,7 @@ class PgVectorStore(BaseStore):
             results = await asyncio.gather(*tasks)
             return sum(results)
         else:
+            procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = await self._compute_emb_async(text_content)
             self._insert_procedure(procedure, emb)
