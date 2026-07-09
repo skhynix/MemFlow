@@ -264,6 +264,19 @@ class AuditLogger:
     ) -> dict[str, Any]:
         retrieval = self.config.get("retrieval", {})
         claude = self.config.get("claude", {})
+        if not isinstance(claude, dict):
+            claude = {}
+        catalog_mode = self.config.get("_memflow_catalog_mode", {})
+        if not isinstance(catalog_mode, dict):
+            catalog_mode = {}
+        raw_catalog_mode = catalog_mode.get(
+            "raw",
+            claude.get("native_catalog_mode"),
+        )
+        effective_catalog_mode = catalog_mode.get(
+            "effective",
+            claude.get("native_catalog_mode"),
+        )
         logging_config = self.config.get("logging", {})
         session_id = request.session_id if request else ""
         record = {
@@ -275,7 +288,9 @@ class AuditLogger:
             "cwd": request.cwd if request else None,
             "prompt_sha256": _hash_optional(prompt),
             "prompt_length": len(prompt),
-            "native_catalog_mode": claude.get("native_catalog_mode"),
+            "native_catalog_mode": effective_catalog_mode,
+            "native_catalog_mode_raw": raw_catalog_mode,
+            "native_catalog_mode_effective": effective_catalog_mode,
             "candidate_k": retrieval.get("candidate_k"),
             "top_k": retrieval.get("top_k"),
             "selected_skills": selected_skills or [],

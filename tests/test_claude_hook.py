@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import time
 
@@ -18,6 +19,9 @@ from memflow.claude_hook import (
     load_hook_config,
     parse_hook_input,
     run_hook,
+)
+from memflow.claude_hook import (
+    main as claude_hook_main,
 )
 from memflow.manager import MemFlow
 from memflow.models import Procedure, SearchResult
@@ -711,6 +715,7 @@ def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
     assert missing["schema_version"] == "memflow.claude_hook.v1"
     assert missing["retrieval"]["top_k"] == 3
     assert missing["retrieval"]["candidate_k"] == 20
+    assert missing["claude"]["native_catalog_mode"] == "hidden_or_minimized"
 
     path = tmp_path / "config.json"
     path.write_text(
@@ -731,3 +736,95 @@ def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
     assert clamped["retrieval"]["top_k"] == 2
     assert clamped["retrieval"]["candidate_k"] == 2
     assert clamped["future_gateway_field"] == {"kept": True}
+
+
+def test_invalid_catalog_mode_falls_back_and_audits_warning(tmp_path, fake_llm):
+    manager = _manager_with_skill(tmp_path, fake_llm)
+    config_path = _config_path(
+        tmp_path,
+        claude={"native_catalog_mode": "not-a-mode"},
+    )
+    loaded_config = load_hook_config(config_path)
+
+    assert loaded_config["claude"]["native_catalog_mode"] == "not-a-mode"
+    assert loaded_config["_memflow_catalog_mode"] == {
+        "raw": "not-a-mode",
+        "effective": "hidden_or_minimized",
+        "warnings": ["invalid_native_catalog_mode"],
+    }
+
+    output = run_hook(
+        _hook_input("split commits"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert output
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert "catalog_mode=" not in context
+    audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert audit["native_catalog_mode"] == "hidden_or_minimized"
+    assert audit["native_catalog_mode_raw"] == "not-a-mode"
+    assert audit["native_catalog_mode_effective"] == "hidden_or_minimized"
+    assert "invalid_native_catalog_mode" in audit["warnings"]
+
+
+def test_non_object_claude_config_falls_back_without_fail_open(tmp_path, fake_llm):
+    manager = _manager_with_skill(tmp_path, fake_llm)
+    config_path = _config_path(tmp_path, claude="bad")
+
+    output = run_hook(
+        _hook_input("split commits"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert output
+    audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert audit["status"] == "injected"
+    assert audit["native_catalog_mode"] == "hidden_or_minimized"
+    assert "invalid_claude_config" in audit["warnings"]
+
+
+def test_user_prompt_hook_does_not_mutate_claude_settings(tmp_path, fake_llm):
+    manager = _manager_with_skill(tmp_path, fake_llm)
+    config_path = _config_path(tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True)
+    original_settings = {
+        "disableBundledSkills": False,
+        "skillOverrides": {"manual-skill": "off"},
+    }
+    settings_path.write_text(json.dumps(original_settings), encoding="utf-8")
+    hook_input = json.dumps(
+        {
+            "session_id": "session-123",
+            "transcript_path": "/tmp/transcript.jsonl",
+            "cwd": str(tmp_path),
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "split commits",
+        }
+    )
+
+    output = run_hook(
+        hook_input,
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert output
+    assert json.loads(settings_path.read_text(encoding="utf-8")) == original_settings
+    assert not (tmp_path / ".memflow" / "claude-catalog-state.json").exists()
+
+
+@pytest.mark.parametrize(
+    "option",
+    ("--dry-run", "--apply", "--mode", "--settings-path", "--project-root"),
+)
+def test_runtime_cli_rejects_setup_only_options(option):
+    with pytest.raises(SystemExit):
+        claude_hook_main(
+            [option],
+            stdin=io.StringIO(""),
+            stdout=io.StringIO(),
+        )

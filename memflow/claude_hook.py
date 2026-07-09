@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+from memflow.claude_catalog import normalize_native_catalog_mode
 from memflow.llm import BaseLLM
 from memflow.skill_context import (
     AuditLogger,
@@ -169,7 +170,12 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
     )
 
     config.setdefault("memflow", copy.deepcopy(DEFAULT_CONFIG["memflow"]))
-    config.setdefault("claude", copy.deepcopy(DEFAULT_CONFIG["claude"]))
+    catalog_mode = normalize_native_catalog_mode(config)
+    config["_memflow_catalog_mode"] = {
+        "raw": catalog_mode.raw_mode,
+        "effective": catalog_mode.effective_mode,
+        "warnings": list(catalog_mode.warnings),
+    }
     config.setdefault("logging", copy.deepcopy(DEFAULT_CONFIG["logging"]))
     return config
 
@@ -272,6 +278,10 @@ def run_hook(
         config = load_hook_config(config_path)
     except Exception:
         return ""
+    catalog_mode = config.get("_memflow_catalog_mode", {})
+    if not isinstance(catalog_mode, dict):
+        catalog_mode = {}
+    catalog_warnings = tuple(str(item) for item in catalog_mode.get("warnings", ()))
 
     def latency_ms() -> int:
         return int((time.perf_counter() - started) * 1000)
@@ -292,7 +302,7 @@ def run_hook(
                 prompt=prompt,
                 status="fail_open",
                 latency_ms=latency_ms(),
-                warnings=["unsupported_hook_event"],
+                warnings=[*catalog_warnings, "unsupported_hook_event"],
             )
             audit_logger.write_or_fail(record)
             return ""
@@ -303,7 +313,7 @@ def run_hook(
                 trace_id=trace_id,
                 selected_skills=(),
                 rendered_context="",
-                warnings=("empty_query",),
+                warnings=(*catalog_warnings, "empty_query"),
                 status="no_results",
                 latency_ms=latency_ms(),
             )
@@ -330,7 +340,7 @@ def run_hook(
         selected_skills = tuple(
             selected_skill_metadata(rendered) for rendered in render_result.skills
         )
-        warnings = (*selection_warnings, *render_result.warnings)
+        warnings = (*catalog_warnings, *selection_warnings, *render_result.warnings)
         status = "injected" if render_result.xml else "no_results"
         context_response = SkillContextResponse(
             trace_id=trace_id,
@@ -370,7 +380,7 @@ def run_hook(
             prompt=prompt,
             status="fail_open",
             latency_ms=latency_ms(),
-            warnings=[f"{type(exc).__name__}"],
+            warnings=[*catalog_warnings, f"{type(exc).__name__}"],
         )
         audit_logger.write_or_fail(record)
         return ""
