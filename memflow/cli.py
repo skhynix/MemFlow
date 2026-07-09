@@ -19,9 +19,37 @@ if TYPE_CHECKING:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="memflow.py",
+        prog="memflow",
+        description="MemFlow command line tools.",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+
+    chat = subparsers.add_parser(
+        "chat",
+        help="start an interactive chat console or run one prompt",
         description="Start an interactive MemFlow chat() console.",
     )
+    _add_chat_arguments(chat)
+    chat.set_defaults(handler=_run_chat_args)
+
+    claude = subparsers.add_parser("claude", help="manage Claude Code integration")
+    from memflow.claude_setup import add_claude_subcommands
+
+    add_claude_subcommands(claude)
+    return parser
+
+
+def _build_chat_parser(*, prog: str = "memflow") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description="Start an interactive MemFlow chat() console.",
+    )
+    _add_chat_arguments(parser)
+    parser.set_defaults(handler=_run_chat_args)
+    return parser
+
+
+def _add_chat_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--user-id",
         default="default",
@@ -48,7 +76,6 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TEXT",
         help="Process a single prompt and exit.",
     )
-    return parser
 
 
 def _format_count(value: object) -> str:
@@ -508,25 +535,76 @@ def run_repl(
     return 0
 
 
-def main(argv: Iterable[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _run_chat_args(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO,
+    manager_factory: Callable[[], "MemFlow"] | None = None,
+    input_fn: Callable[[str], str] | None = None,
+    **_: Any,
+) -> int:
+    factory = manager_factory or _create_manager
 
     if args.prompt is not None:
         return run_single_prompt(
-            manager_factory=_create_manager,
+            manager_factory=factory,
             prompt=args.prompt,
             user_id=args.user_id,
             verbose=args.verbose,
             allow_execute=args.execute,
             use_history=not args.no_history,
+            output=stdout,
         )
 
     return run_repl(
-        manager_factory=_create_manager,
+        manager_factory=factory,
         user_id=args.user_id,
         verbose=args.verbose,
         allow_execute=args.execute,
         use_history=not args.no_history,
+        output=stdout,
+        input_fn=input_fn,
+    )
+
+
+def _uses_legacy_chat_args(argv: list[str]) -> bool:
+    if not argv:
+        return True
+    if argv[0] in {"chat", "claude", "-h", "--help"}:
+        return False
+    return True
+
+
+def main(
+    argv: Iterable[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    manager_factory: Callable[[], "MemFlow"] | None = None,
+    input_fn: Callable[[str], str] | None = None,
+) -> int:
+    args_list = list(argv) if argv is not None else sys.argv[1:]
+    out = stdout or sys.stdout
+    if _uses_legacy_chat_args(args_list):
+        legacy_parser = _build_chat_parser()
+        args = legacy_parser.parse_args(args_list)
+        return _run_chat_args(
+            args,
+            stdout=out,
+            manager_factory=manager_factory,
+            input_fn=input_fn,
+        )
+
+    parser = build_parser()
+    args = parser.parse_args(args_list)
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help(file=out)
+        return 0
+    return handler(
+        args,
+        stdout=out,
+        manager_factory=manager_factory,
+        input_fn=input_fn,
     )
 
 

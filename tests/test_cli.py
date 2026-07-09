@@ -16,6 +16,7 @@ from memflow.cli import (
     _handle_prompt_newline,
     _handle_prompt_submit,
     format_verbose_trace,
+    main,
     run_repl,
 )
 from memflow.models import Procedure, SearchResult
@@ -165,6 +166,71 @@ def test_run_repl_passes_input_to_chat_and_tracks_history():
     assert manager.calls[1]["history"] == [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "hello"},
+    ]
+
+
+def test_main_without_command_uses_legacy_repl_path():
+    output = io.StringIO()
+
+    rc = main([], stdout=output, input_fn=lambda _prompt: "/exit")
+
+    assert rc == 0
+    assert output.getvalue() == ""
+
+
+def test_top_level_single_prompt_uses_legacy_chat_path():
+    manager = FakeManager(
+        {
+            "response": "hello",
+            "intents": ["CONVERSATION"],
+            "primary_intent": "CONVERSATION",
+        }
+    )
+    output = io.StringIO()
+
+    rc = main(
+        ["-p", "hi", "--user-id", "alice", "--no-history"],
+        stdout=output,
+        manager_factory=lambda: manager,
+    )
+
+    assert rc == 0
+    assert output.getvalue() == "hello\n\n"
+    assert manager.calls == [
+        {
+            "message": "hi",
+            "user_id": "alice",
+            "history": None,
+            "allow_execute": False,
+        }
+    ]
+
+
+def test_chat_subcommand_single_prompt_uses_existing_chat_path():
+    manager = FakeManager(
+        {
+            "response": "hello",
+            "intents": ["CONVERSATION"],
+            "primary_intent": "CONVERSATION",
+        }
+    )
+    output = io.StringIO()
+
+    rc = main(
+        ["chat", "-p", "hi", "--user-id", "alice", "--no-history"],
+        stdout=output,
+        manager_factory=lambda: manager,
+    )
+
+    assert rc == 0
+    assert output.getvalue() == "hello\n\n"
+    assert manager.calls == [
+        {
+            "message": "hi",
+            "user_id": "alice",
+            "history": None,
+            "allow_execute": False,
+        }
     ]
 
 
