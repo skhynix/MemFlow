@@ -795,7 +795,7 @@ class PgVectorStore(BaseStore):
         PGVECTOR_EMBEDDING_API_KEY     — API key
         PGVECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
         PGVECTOR_TABLE_NAME            — Table name (default: procedures)
-        PGVECTOR_INDEX_TYPE            — Index type: ivfflat or hnsw (default: ivfflat)
+        PGVECTOR_INDEX_TYPE            — Index type: ivfflat or hnsw (default: hnsw)
 
     Note:
         PGVECTOR_EMBEDDING_API_BASE must be set via environment variable or
@@ -835,7 +835,7 @@ class PgVectorStore(BaseStore):
         if table_name is None:
             table_name = os.getenv("PGVECTOR_TABLE_NAME", "procedures")
         if index_type is None:
-            index_type = os.getenv("PGVECTOR_INDEX_TYPE", "ivfflat")
+            index_type = os.getenv("PGVECTOR_INDEX_TYPE", "hnsw")
         self._base_url = base_url
         self._emb_model = emb_model
         self._emb_api_base = emb_api_base

@@ -592,6 +592,7 @@ class TestPgVectorStore:
                 {
                     "PGVECTOR_EMBEDDING_API_BASE": "http://test-api",
                     "PGVECTOR_EMBEDDING_DIMENSIONS": "2560",
+                    "PGVECTOR_TABLE_NAME": "procedures",
                 },
             ):
                 PgVectorStore(base_url="postgresql://test:5432/testdb")
