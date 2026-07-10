@@ -651,6 +651,7 @@ class TestPgVectorStore:
         mock_conn = MagicMock()
         mock_engine.connect.return_value.__enter__.return_value = mock_conn
         store._engine = mock_engine
+        store._table_name = "procedures"
         proc = Procedure(
             id="skill-id",
             title="commit-craft",

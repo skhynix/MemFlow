@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from abc import ABC, abstractmethod
@@ -31,6 +32,12 @@ from sqlalchemy import create_engine, text
 # Default constants for batch operations
 DEFAULT_MAX_BATCHES = 32
 DEFAULT_MAX_WORKERS = 48
+
+# Default token limit for the embedding model.
+# Qwen3-Embedding-4B (.env.example default) supports 8192 tokens. Use char-based
+# estimation only — see _count_tokens. Chunk boundaries are approximate; quality
+# impact is bounded since chunks are mean-pooled before indexing.
+DEFAULT_EMBEDDING_MAX_TOKENS = 8192
 
 from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
 
@@ -764,7 +771,7 @@ class PgVectorStore(BaseStore):
         To use index, set PGVECTOR_EMBEDDING_DIMENSIONS <= 2000 or use a lower-dim model.
 
     Schema:
-        CREATE TABLE IF NOT EXISTS procedures (
+        CREATE TABLE IF NOT EXISTS <table_name> (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL DEFAULT 'default',
             title TEXT NOT NULL,
@@ -778,8 +785,8 @@ class PgVectorStore(BaseStore):
             updated_at TEXT NOT NULL,
             emb vector(2560)
         );
-        CREATE INDEX IF NOT EXISTS idx_procedures_emb
-            ON procedures USING ivfflat (emb vector_cosine_ops);  -- only if dim <= 2000
+        CREATE INDEX IF NOT EXISTS idx_<table_name>_emb
+            ON <table_name> USING <index_type> (emb vector_cosine_ops);  -- only if dim <= 2000
 
     Environment variables:
         PGVECTOR_BASE_URL              — PostgreSQL URL
@@ -787,6 +794,8 @@ class PgVectorStore(BaseStore):
         PGVECTOR_EMBEDDING_API_BASE    — API base URL (required)
         PGVECTOR_EMBEDDING_API_KEY     — API key
         PGVECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
+        PGVECTOR_TABLE_NAME            — Table name (default: procedures)
+        PGVECTOR_INDEX_TYPE            — Index type: ivfflat or hnsw (default: ivfflat)
 
     Note:
         PGVECTOR_EMBEDDING_API_BASE must be set via environment variable or
@@ -801,6 +810,8 @@ class PgVectorStore(BaseStore):
         emb_api_base: str | None = None,
         emb_api_key: str | None = None,
         emb_dim: int | None = None,
+        table_name: str | None = None,
+        index_type: str | None = None,
     ) -> None:
         # Load from environment if not provided
         if base_url is None:
@@ -821,11 +832,17 @@ class PgVectorStore(BaseStore):
             emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
         if emb_dim is None:
             emb_dim = int(os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560"))
+        if table_name is None:
+            table_name = os.getenv("PGVECTOR_TABLE_NAME", "procedures")
+        if index_type is None:
+            index_type = os.getenv("PGVECTOR_INDEX_TYPE", "ivfflat")
         self._base_url = base_url
         self._emb_model = emb_model
         self._emb_api_base = emb_api_base
         self._emb_api_key = emb_api_key
         self._emb_dim = emb_dim
+        self._table_name = table_name
+        self._index_type = index_type
 
         self._engine: Any = None
         self._lock = threading.Lock()
@@ -850,7 +867,7 @@ class PgVectorStore(BaseStore):
                 # Create table with emb column
                 conn.execute(
                     text(f"""
-                    CREATE TABLE IF NOT EXISTS procedures (
+                    CREATE TABLE IF NOT EXISTS {self._table_name} (
                         id TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL DEFAULT 'default',
                         title TEXT NOT NULL,
@@ -869,52 +886,52 @@ class PgVectorStore(BaseStore):
 
                 # Add missing columns if the table already exists (migration).
                 conn.execute(
-                    text("""
-                    ALTER TABLE procedures
+                    text(f"""
+                    ALTER TABLE {self._table_name}
                     ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'skill'
                 """)
                 )
                 conn.execute(
-                    text("""
-                    ALTER TABLE procedures
+                    text(f"""
+                    ALTER TABLE {self._table_name}
                     ADD COLUMN IF NOT EXISTS source_path TEXT
                 """)
                 )
                 conn.execute(
-                    text("""
-                    ALTER TABLE procedures
-                    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+                    text(f"""
+                    ALTER TABLE {self._table_name}
+                    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
                 """)
                 )
                 conn.execute(
-                    text("""
-                    ALTER TABLE procedures
+                    text(f"""
+                    ALTER TABLE {self._table_name}
                     ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''
                 """)
                 )
                 conn.execute(
                     text(f"""
-                    ALTER TABLE procedures
+                    ALTER TABLE {self._table_name}
                     ADD COLUMN IF NOT EXISTS emb vector({self._emb_dim})
                 """)
                 )
 
                 conn.execute(
-                    text("""
-                    CREATE INDEX IF NOT EXISTS idx_procedures_kind
-                    ON procedures (kind)
+                    text(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_kind
+                    ON {self._table_name} (kind)
                 """)
                 )
                 conn.execute(
-                    text("""
-                    CREATE INDEX IF NOT EXISTS idx_procedures_user_kind
-                    ON procedures (user_id, kind)
+                    text(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_user_kind
+                    ON {self._table_name} (user_id, kind)
                 """)
                 )
                 conn.execute(
-                    text("""
-                    CREATE INDEX IF NOT EXISTS idx_procedures_source_path
-                    ON procedures (source_path)
+                    text(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_source_path
+                    ON {self._table_name} (source_path)
                 """)
                 )
 
@@ -923,9 +940,9 @@ class PgVectorStore(BaseStore):
                 # hnsw: also limited to 2000 dimensions in current pgvector
                 if self._emb_dim <= 2000:
                     conn.execute(
-                        text("""
-                        CREATE INDEX IF NOT EXISTS idx_procedures_emb
-                        ON procedures USING ivfflat (emb vector_cosine_ops)
+                        text(f"""
+                        CREATE INDEX IF NOT EXISTS idx_{self._table_name}_emb
+                        ON {self._table_name} USING {self._index_type} (emb vector_cosine_ops)
                     """)
                     )
                 # Skip index creation for dimensions > 2000 (sequential scan will be used)
@@ -946,57 +963,280 @@ class PgVectorStore(BaseStore):
             "dim": self._emb_dim,
         }
 
-    def _compute_emb(self, text: str) -> list[float]:
-        """Compute embedding vector using OpenAI-compatible API."""
+    def _get_max_tokens(self) -> int:
+        """Get max tokens for the current embedding model.
+
+        Priority:
+        1. PGVECTOR_EMBEDDING_MAX_TOKENS environment variable
+        2. DEFAULT_EMBEDDING_MAX_TOKENS (8192, matches Qwen3-Embedding-4B)
+        """
+        env_max = os.getenv("PGVECTOR_EMBEDDING_MAX_TOKENS")
+        if env_max:
+            try:
+                return int(env_max)
+            except ValueError:
+                logger.warning(
+                    "Invalid PGVECTOR_EMBEDDING_MAX_TOKENS=%r, using default", env_max
+                )
+
+        return DEFAULT_EMBEDDING_MAX_TOKENS
+
+    def _count_tokens(self, text: str) -> int:
+        """Estimate token count in text.
+
+        Uses a character-based heuristic (~4 chars per token). This is an
+        approximation — chunk boundaries affect embedding quality since each
+        chunk is embedded independently then mean-pooled. For the default
+        Qwen3-Embedding-4B model the estimate is conservative; set
+        PGVECTOR_EMBEDDING_MAX_TOKENS explicitly to tune chunking frequency.
+        """
+        return len(text) // 4
+
+    def _compute_emb(self, text: str, max_tokens: int | None = None) -> list[float]:
+        """Compute embedding vector using OpenAI-compatible API.
+
+        For long texts exceeding max_tokens, splits into chunks,
+        embeds each chunk, and returns the mean embedding.
+        """
+        if max_tokens is None:
+            max_tokens = self._get_max_tokens()
+
         config = self._get_emb_config()
 
-        try:
-            url = config["api_base"].rstrip("/") + "/embeddings"
-            headers = {
-                "Authorization": f"Bearer {config['api_key']}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": config["model"],
-                "input": text,
-                "encoding_format": "float",
-            }
+        # Count tokens to check if chunking is needed
+        text_tokens = self._count_tokens(text)
 
-            response = httpx.post(url, headers=headers, json=payload, timeout=30.0)
-            response.raise_for_status()
-            data = response.json()
-            emb = data["data"][0]["embedding"]
-            return emb
-        except Exception as exc:
-            # Fallback: hash-based pseudo-embedding. Semantic search results
-            # will be effectively random until the embedding endpoint works,
-            # so surface this loudly instead of hiding the failure.
-            logger.warning(
-                "Embedding API request failed (%s: %s); falling back to "
-                "hash-based pseudo-embedding — search results will not be "
-                "semantically meaningful until the endpoint is reachable.",
-                type(exc).__name__,
-                exc,
+        # Split text into chunks if too long
+        if text_tokens <= max_tokens:
+            chunks = [text]
+        else:
+            logger.info(
+                "Text has %d tokens (max %d), splitting into chunks",
+                text_tokens,
+                max_tokens,
             )
-            emb = [0.0] * config["dim"]
-            words = text.lower().split()
-            for word in words:
-                word_hash = hashlib.md5(word.encode()).hexdigest()
-                for i in range(min(len(word_hash), config["dim"])):
-                    val = (int(word_hash[i % len(word_hash)], 16) - 8) / 8.0
-                    emb[i] += val / len(words)
-            norm = sum(x * x for x in emb) ** 0.5
-            if norm > 0:
-                emb = [x / norm for x in emb]
-            return emb
+            chunks = self._split_text_by_tokens(text, max_tokens)
 
-    async def _compute_emb_async(self, text: str) -> list[float]:
+        if len(chunks) == 1:
+            # Single chunk - direct embedding
+            try:
+                return self._embed_chunk(chunks[0], config)
+            except Exception as exc:
+                logger.warning(
+                    "Embedding API failed (%s: %s); falling back to "
+                    "hash-based pseudo-embedding — search results will not "
+                    "be semantically meaningful until the endpoint is reachable.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return self._hash_emb(chunks[0], config["dim"])
+
+        # Multiple chunks - embed each and average
+        chunk_embeddings = []
+        for chunk in chunks:
+            try:
+                emb = self._embed_chunk(chunk, config)
+                chunk_embeddings.append(emb)
+            except Exception as exc:
+                logger.warning(
+                    "Chunk embedding failed (%s: %s); using zero vector for chunk.",
+                    type(exc).__name__,
+                    exc,
+                )
+                chunk_embeddings.append([0.0] * config["dim"])
+
+        # Mean pooling
+        return self._mean_pool(chunk_embeddings)
+
+    def _split_text_by_tokens(self, text: str, max_tokens: int) -> list[str]:
+        """Split long text into chunks by estimated token count.
+
+        Uses character-based token estimation (~4 chars/token) and splits at
+        sentence boundaries when possible. Chunk boundaries are approximate;
+        each chunk is embedded independently then mean-pooled, so boundary
+        placement has bounded impact on final embedding quality.
+        """
+        # Split by sentence endings first
+        sentences = re.split(r"(?<=[.!?।।\n])\s+", text)
+
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+
+        for sentence in sentences:
+            # Estimate tokens for this sentence
+            sentence_tokens = self._count_tokens(sentence)
+
+            if current_tokens + sentence_tokens > max_tokens and current_chunk:
+                # Start new chunk
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [sentence]
+                current_tokens = sentence_tokens
+            else:
+                current_chunk.append(sentence)
+                current_tokens += sentence_tokens
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        # If any chunk still exceeds max_tokens, split by character estimate
+        # (fallback for very long sentences without punctuation)
+        final_chunks = []
+        chars_per_token = len(text) / max(1, self._count_tokens(text)) if text else 4
+        max_chars = int(max_tokens * chars_per_token)
+
+        for chunk in chunks:
+            if len(chunk) > max_chars:
+                # Hard split by characters
+                for i in range(0, len(chunk), max_chars):
+                    final_chunks.append(chunk[i : i + max_chars])
+            else:
+                final_chunks.append(chunk)
+
+        return final_chunks
+
+    def _embed_chunk(self, chunk: str, config: dict) -> list[float]:
+        """Embed a single chunk of text."""
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config["model"],
+            "input": chunk,
+            "encoding_format": "float",
+        }
+
+        response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"]
+
+    def _hash_emb(self, text: str, dim: int) -> list[float]:
+        """Generate a deterministic pseudo-embedding via hashing.
+
+        Word-aware fallback when the embedding API is unavailable: each word
+        contributes an MD5-derived vector so distinct vocabulary yields distinct
+        vectors, and the result is L2-normalized to match real embeddings.
+        """
+        emb = [0.0] * dim
+        words = text.lower().split()
+        for word in words:
+            word_hash = hashlib.md5(word.encode()).hexdigest()
+            for i in range(min(len(word_hash), dim)):
+                val = (int(word_hash[i % len(word_hash)], 16) - 8) / 8.0
+                emb[i] += val / max(len(words), 1)
+        norm = sum(x * x for x in emb) ** 0.5
+        if norm > 0:
+            emb = [x / norm for x in emb]
+        return emb
+
+    @staticmethod
+    def _mean_pool(embeddings: list[list[float]]) -> list[float]:
+        """Compute mean of multiple embedding vectors."""
+        if not embeddings:
+            return []
+        dim = len(embeddings[0])
+        result = [0.0] * dim
+        for emb in embeddings:
+            for i, val in enumerate(emb):
+                result[i] += val
+        for i in range(dim):
+            result[i] /= len(embeddings)
+        return result
+
+    async def _compute_emb_async(
+        self, text: str, max_tokens: int | None = None
+    ) -> list[float]:
         """Compute embedding vector asynchronously using httpx.AsyncClient.
 
-        Uses native async HTTP requests instead of asyncio.to_thread() for better
-        I/O performance. Thread pool is not blocked during HTTP wait time.
+        For long texts exceeding max_tokens, splits into chunks,
+        embeds each chunk, and returns the mean embedding.
         """
-        import httpx
+
+        if max_tokens is None:
+            max_tokens = self._get_max_tokens()
+
+        config = self._get_emb_config()
+
+        # Count tokens to check if chunking is needed
+        text_tokens = self._count_tokens(text)
+
+        # Split text into chunks if too long
+        if text_tokens <= max_tokens:
+            chunks = [text]
+        else:
+            logger.info(
+                "Text has %d tokens (max %d), splitting into chunks",
+                text_tokens,
+                max_tokens,
+            )
+            chunks = self._split_text_by_tokens(text, max_tokens)
+
+        if len(chunks) == 1:
+            try:
+                return await self._embed_chunk_async(chunks[0], config)
+            except Exception as exc:
+                logger.warning(
+                    "Async embedding API failed (%s: %s); falling back to "
+                    "hash-based pseudo-embedding — search results will not "
+                    "be semantically meaningful until the endpoint is reachable.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return self._hash_emb(chunks[0], config["dim"])
+
+        # Multiple chunks - embed each sequentially and average
+        chunk_embeddings = []
+        for chunk in chunks:
+            try:
+                emb = await self._embed_chunk_async(chunk, config)
+                chunk_embeddings.append(emb)
+            except Exception as exc:
+                logger.warning(
+                    "Async chunk embedding failed (%s: %s); using zero vector for chunk.",
+                    type(exc).__name__,
+                    exc,
+                )
+                chunk_embeddings.append([0.0] * config["dim"])
+
+        return self._mean_pool(chunk_embeddings)
+
+    async def _embed_chunk_async(self, chunk: str, config: dict) -> list[float]:
+        """Embed a single chunk of text asynchronously."""
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {
+            "Authorization": f"Bearer {config['api_key']}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": config["model"],
+            "input": chunk,
+            "encoding_format": "float",
+        }
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                url, headers=headers, json=payload, timeout=60.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["data"][0]["embedding"]
+
+    async def _compute_embs_batch_async(
+        self,
+        texts: list[str],
+        batch_size: int = 50,
+        max_workers: int = 10,
+    ) -> list[list[float]]:
+        """Compute embeddings for multiple texts in parallel batches.
+
+        Uses batch API for efficiency, with semaphore to limit concurrent requests.
+        Reduced default max_workers from 50 to 10 to avoid overwhelming the embedding API.
+        """
+        import asyncio
+        from asyncio import Semaphore
 
         config = self._get_emb_config()
         url = config["api_base"].rstrip("/") + "/embeddings"
@@ -1005,73 +1245,60 @@ class PgVectorStore(BaseStore):
             "Content-Type": "application/json",
         }
 
-        try:
-            async with httpx.AsyncClient() as client:
-                payload = {
-                    "model": config["model"],
-                    "input": text,
-                    "encoding_format": "float",
-                }
-                response = await client.post(
-                    url, headers=headers, json=payload, timeout=30.0
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data["data"][0]["embedding"]
-        except Exception as exc:
-            logger.warning(
-                "Async embedding API failed (%s: %s); falling back to hash-based embedding.",
-                type(exc).__name__,
-                exc,
-            )
-            # Fallback: hash-based pseudo-embedding
-            emb = [0.0] * config["dim"]
-            words = text.lower().split()
-            for word in words:
-                word_hash = hashlib.md5(word.encode()).hexdigest()
-                for i in range(min(len(word_hash), config["dim"])):
-                    val = (int(word_hash[i % len(word_hash)], 16) - 8) / 8.0
-                    emb[i] += val / len(words)
-            norm = sum(x * x for x in emb) ** 0.5
-            if norm > 0:
-                emb = [x / norm for x in emb]
-            return emb
-
-    async def _compute_embs_batch_async(
-        self,
-        texts: list[str],
-        batch_size: int = 50,
-        max_workers: int = 50,
-    ) -> list[list[float]]:
-        """Compute embeddings for multiple texts in parallel batches.
-
-        Uses _compute_emb_async() with Semaphore for concurrency control.
-        """
-        import asyncio
-        from asyncio import Semaphore
-
         semaphore = Semaphore(max_workers)
 
-        async def compute_single(text: str) -> list[float]:
-            async with semaphore:
-                return await self._compute_emb_async(text)
+        async def compute_batch(batch: list[str]) -> list[list[float]]:
+            """Compute embeddings for a batch of texts using batch API."""
+            try:
+                async with semaphore:
+                    payload = {
+                        "model": config["model"],
+                        "input": batch,
+                        "encoding_format": "float",
+                    }
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            url, headers=headers, json=payload, timeout=120.0
+                        )
+                    response.raise_for_status()
+                    data = response.json()
+                    return [item["embedding"] for item in data["data"]]
+            except Exception as exc:
+                logger.warning(
+                    "Async batch embedding API failed (%s: %s); falling back to individual embedding.",
+                    type(exc).__name__,
+                    exc,
+                )
+
+                # Fallback: compute individually in parallel, bounded by semaphore
+                async def _embed_one(text: str) -> list[float]:
+                    async with semaphore:
+                        return await self._compute_emb_async(text)
+
+                return await asyncio.gather(*(_embed_one(text) for text in batch))
 
         # Process in batches for memory efficiency
         all_embs = []
+        batch_tasks = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            batch_embs = await asyncio.gather(*[compute_single(text) for text in batch])
+            batch_tasks.append(compute_batch(batch))
+
+        results = await asyncio.gather(*batch_tasks)
+        for batch_embs in results:
             all_embs.extend(batch_embs)
         return all_embs
 
     def _compute_embs_batch(
         self,
         texts: list[str],
-        batch_size: int = 50,
+        batch_size: int = 5,
     ) -> list[list[float]]:
-        """Compute embeddings for multiple texts in batches (sync version).
+        """Compute embeddings for multiple texts using batch API calls.
 
-        Uses batch API calls to reduce HTTP overhead.
+        Groups texts into batches and sends each batch in a single API request
+        to reduce HTTP overhead. Falls back to per-text _compute_emb (which
+        handles chunking for long texts) when the batch API fails.
         """
         config = self._get_emb_config()
         url = config["api_base"].rstrip("/") + "/embeddings"
@@ -1080,7 +1307,7 @@ class PgVectorStore(BaseStore):
             "Content-Type": "application/json",
         }
 
-        all_embeddings = []
+        all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             try:
@@ -1089,21 +1316,19 @@ class PgVectorStore(BaseStore):
                     "input": batch,
                     "encoding_format": "float",
                 }
-                response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+                response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
                 response.raise_for_status()
                 data = response.json()
-                batch_embeddings = [item["embedding"] for item in data["data"]]
-                all_embeddings.extend(batch_embeddings)
+                all_embeddings.extend(item["embedding"] for item in data["data"])
             except Exception as exc:
                 logger.warning(
-                    "Batch embedding API failed (%s: %s); falling back to individual embedding.",
+                    "Batch embedding API failed (%s: %s); falling back to "
+                    "individual embedding.",
                     type(exc).__name__,
                     exc,
                 )
-                # Fallback: compute individually
                 for text in batch:
                     all_embeddings.append(self._compute_emb(text))
-
         return all_embeddings
 
     def _to_text(self, procedure: Procedure) -> str:
@@ -1113,13 +1338,13 @@ class PgVectorStore(BaseStore):
     def add(
         self,
         procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
+        batch_size: int = 10,
     ) -> int:
         """Add a procedure or procedures.
 
         Args:
             procedure: Single Procedure or list of Procedures
-            batch_size: Batch size for multiple procedures (default: 50)
+            batch_size: Batch size for embedding API calls (default: 10)
 
         Returns:
             1 for single, number of inserted procedures for batch
@@ -1146,15 +1371,15 @@ class PgVectorStore(BaseStore):
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-        max_workers: int = 50,
+        batch_size: int = 10,
+        max_workers: int = 10,
     ) -> int:
         """Add a procedure or procedures asynchronously.
 
         Args:
             procedure: Single Procedure or list of Procedures
-            batch_size: Batch size for embedding (default: 50)
-            max_workers: Max concurrent operations (default: 50)
+            batch_size: Batch size for embedding API calls (default: 10)
+            max_workers: Max concurrent embedding requests (default: 10)
 
         Returns:
             1 for single, number of inserted procedures for batch
@@ -1197,8 +1422,8 @@ class PgVectorStore(BaseStore):
         with self._engine.connect() as conn:
             # Use CAST for the vector type - the ::vector syntax doesn't work with parameters
             conn.execute(
-                text("""
-                INSERT INTO procedures (
+                text(f"""
+                INSERT INTO {self._table_name} (
                     id, user_id, title, content, category, tags, kind, source_path,
                     metadata, created_at, updated_at, emb
                 )
@@ -1284,7 +1509,7 @@ class PgVectorStore(BaseStore):
                     id, user_id, title, content, category, tags, kind, source_path,
                     metadata, created_at, updated_at,
                        1 - (emb <=> CAST(:emb AS vector)) AS score
-                FROM procedures
+                FROM {self._table_name}
                 WHERE TRUE {filter_clause}
                 ORDER BY emb <=> CAST(:emb AS vector)
                 LIMIT :limit
@@ -1306,7 +1531,7 @@ class PgVectorStore(BaseStore):
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
-        batch_size: int = 50,
+        batch_size: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity.
 
@@ -1314,7 +1539,7 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
-            batch_size: Batch size for embedding API calls (default: 50) - PgVectorStore only
+            batch_size: Batch size for embedding API calls (default: 10) - PgVectorStore only
 
         Returns:
             Single list for single query, list of lists for batch
@@ -1336,8 +1561,8 @@ class PgVectorStore(BaseStore):
         top_k: int = 5,
         user_id: str | None = None,
         kind: str | None = "skill",
-        batch_size: int = 50,
-        max_workers: int = 50,
+        batch_size: int = 10,
+        max_workers: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity asynchronously.
 
@@ -1345,8 +1570,8 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
-            batch_size: Batch size for embedding API calls (default: 50) - PgVectorStore only
-            max_workers: Max concurrent requests (default: 50)
+            batch_size: Batch size for embedding API calls (default: 10) - PgVectorStore only
+            max_workers: Max concurrent requests (default: 10)
 
         Returns:
             Single list for single query, list of lists for batch
@@ -1412,11 +1637,11 @@ class PgVectorStore(BaseStore):
         """Get a procedure by ID."""
         with self._engine.connect() as conn:
             result = conn.execute(
-                text("""
+                text(f"""
                 SELECT
                     id, user_id, title, content, category, tags, kind, source_path,
                     metadata, created_at, updated_at
-                FROM procedures WHERE id = :id
+                FROM {self._table_name} WHERE id = :id
             """),
                 {"id": id},
             )
@@ -1446,8 +1671,8 @@ class PgVectorStore(BaseStore):
             try:
                 with self._engine.connect() as conn:
                     result = conn.execute(
-                        text("""
-                        DELETE FROM procedures WHERE id = :id
+                        text(f"""
+                        DELETE FROM {self._table_name} WHERE id = :id
                     """),
                         {"id": id},
                     )
@@ -1461,21 +1686,21 @@ class PgVectorStore(BaseStore):
         with self._engine.connect() as conn:
             if user_id:
                 result = conn.execute(
-                    text("""
+                    text(f"""
                     SELECT
                         id, user_id, title, content, category, tags, kind, source_path,
                         metadata, created_at, updated_at
-                    FROM procedures WHERE user_id = :user_id
+                    FROM {self._table_name} WHERE user_id = :user_id
                 """),
                     {"user_id": user_id},
                 )
             else:
                 result = conn.execute(
-                    text("""
+                    text(f"""
                     SELECT
                         id, user_id, title, content, category, tags, kind, source_path,
                         metadata, created_at, updated_at
-                    FROM procedures
+                    FROM {self._table_name}
                 """),
                 )
             rows = result.fetchall()
