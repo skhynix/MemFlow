@@ -8,11 +8,12 @@ This package provides benchmark harnesses for evaluating MemFlow retrieval perfo
 Available benchmarks:
     - proced_mem_bench: Procedural Memory Benchmark (Proced_mem_bench) based evaluation
     - wikihow_procedure_silver: WikiHow Procedure Silver v1 benchmark
+    - skill_ret_bench: SkillRet benchmark for skill retrieval evaluation
 """
 
 from importlib import import_module
 
-__all__ = ["proced_mem_bench", "wikihow_procedure_silver"]
+__all__ = ["proced_mem_bench", "wikihow_procedure_silver", "skill_ret_bench"]
 
 
 def __getattr__(name: str):
