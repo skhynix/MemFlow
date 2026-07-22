@@ -677,6 +677,35 @@ def test_activation_fingerprint_changes_at_truncation_boundary():
     assert below.activation_fingerprint != exact.activation_fingerprint
 
 
+def test_context_renderer_compose_preserves_rendered_subset_and_sparse_ranks():
+    candidates = [
+        _renderer_candidate(
+            name=f"compose-{rank}",
+            procedure_id=f"compose-{rank}",
+            source_path=f"/stored/compose-{rank}/SKILL.md",
+            body=f"# Compose {rank}\n\nContent {rank}.\n",
+            headings=(f"Compose {rank}",),
+        )
+        for rank in range(1, 4)
+    ]
+    renderer = ContextRenderer(_renderer_config(top_k=3))
+    baseline = renderer.render(candidates, trace_id="compose-trace")
+
+    assert renderer.compose(baseline.skills) == baseline.xml
+    assert renderer.compose(()) == ""
+
+    mixed_skills = (baseline.skills[0], baseline.skills[2])
+    mixed = renderer.compose(mixed_skills)
+    assert [skill.rank for skill in mixed_skills] == [1, 3]
+    assert baseline.skills[0].xml in mixed
+    assert baseline.skills[2].xml in mixed
+    assert '<skill rank="1"' in mixed
+    assert '<skill rank="2"' not in mixed
+    assert '<skill rank="3"' in mixed
+    assert mixed.startswith("<selected_skills>\n")
+    assert mixed.endswith("</selected_skills>\n")
+
+
 def test_hook_input_and_config_map_to_skill_context_request(tmp_path):
     prompt = "Please find relevant skills."
     hook_input = parse_hook_input(_hook_input(prompt))
@@ -905,7 +934,7 @@ def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "unsupported-event-state",
             }
         },
@@ -1286,7 +1315,114 @@ def test_untrusted_skill_is_marked_as_data_context(tmp_path, fake_llm):
     assert audit["selected_skills"][0]["trust_mode"] == "data"
 
 
-@pytest.mark.parametrize("rollout", ("off", "shadow"))
+def test_enforce_reuses_only_within_the_same_session(tmp_path):
+    source_path = "/stored/session-skill/SKILL.md"
+    identity = f"path:{source_path}"
+    candidate = _renderer_candidate(
+        name="session-skill",
+        source_path=source_path,
+        body="# Session Skill\n\nSame semantic payload.\n",
+        headings=("Session Skill",),
+    )
+    manager = _StaticSkillManager([candidate])
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "session-state",
+            }
+        },
+    )
+
+    first = run_hook(
+        _hook_input("session skill", session_id="same-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    second = run_hook(
+        _hook_input("session skill again", session_id="same-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    other_session = run_hook(
+        _hook_input("session skill", session_id="other-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    first_context = json.loads(first)["hookSpecificOutput"]["additionalContext"]
+    assert second == ""
+    assert json.loads(other_session)["hookSpecificOutput"]["additionalContext"] == (
+        first_context
+    )
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    assert [row["status"] for row in rows] == ["injected", "reused", "injected"]
+    assert rows[0]["session_dedupe"]["state_load_status"] == "missing"
+    assert rows[1]["selected_skills"][0]["identity"] == identity
+    assert rows[1]["injected_skills"] == []
+    assert rows[1]["reused_skills"] == [identity]
+    assert rows[1]["skipped_skills"] == [
+        {
+            "identity": identity,
+            "reason": "duplicate_activation_fingerprint",
+        }
+    ]
+    assert rows[1]["session_dedupe"] == {
+        "requested_rollout": "enforce",
+        "rollout": "enforce",
+        "configuration_status": "valid",
+        "policy": "on_hash_change",
+        "state_load_status": "ok",
+        "context_generation": 0,
+        "lifecycle_tracking": "user_prompt_submit_only",
+        "dedupe_saved_chars": len(first_context),
+    }
+
+
+def test_enforce_emits_each_semantic_a_b_a_transition(tmp_path):
+    source_path = "/stored/changing-skill/SKILL.md"
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "session-state",
+            }
+        },
+    )
+    candidates = [
+        _renderer_candidate(
+            name="changing-skill",
+            source_path=source_path,
+            body=f"# Changing Skill\n\nPayload {payload}.\n",
+            headings=("Changing Skill",),
+            sha256=raw_sha,
+        )
+        for payload, raw_sha in (("A", "sha-a-1"), ("B", "sha-b"), ("A", "sha-a-2"))
+    ]
+
+    outputs = [
+        run_hook(
+            _hook_input(f"transition {index}"),
+            config_path=config_path,
+            manager_factory=lambda _config, candidate=candidate: _StaticSkillManager(
+                [candidate]
+            ),
+        )
+        for index, candidate in enumerate(candidates)
+    ]
+
+    assert all(outputs)
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    assert [row["status"] for row in rows] == ["injected", "injected", "injected"]
+    fingerprints = [row["selected_skills"][0]["activation_fingerprint"] for row in rows]
+    assert fingerprints[0] != fingerprints[1]
+    assert fingerprints[1] != fingerprints[2]
+    assert fingerprints[0] == fingerprints[2]
+
+
+@pytest.mark.parametrize("rollout", ("off", "shadow", "enforce"))
 def test_fingerprint_failure_keeps_complete_hook_baseline(
     tmp_path,
     monkeypatch,
@@ -1349,7 +1485,60 @@ def test_fingerprint_failure_keeps_complete_hook_baseline(
         assert loaded.state.activations == {}
 
 
-@pytest.mark.parametrize("rollout", ("shadow",))
+def test_enforce_never_suppresses_unfingerprintable_skill_beside_valid_reuse(
+    tmp_path,
+):
+    bad_source = "/stored/unfingerprintable-peer/SKILL.md"
+    valid_source = "/stored/valid-peer/SKILL.md"
+    bad_candidate = _renderer_candidate(
+        name="unfingerprintable-peer",
+        source_path=bad_source,
+        body="# Unfingerprintable Peer\n\nPayload \ud800 remains renderable.\n",
+        headings=("Unfingerprintable Peer",),
+        score=0.9,
+    )
+    valid_candidate = _renderer_candidate(
+        name="valid-peer",
+        source_path=valid_source,
+        score=0.8,
+    )
+    manager = _StaticSkillManager([bad_candidate, valid_candidate])
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"top_k": 2},
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "peer-state",
+            }
+        },
+    )
+
+    first = run_hook(
+        _hook_input("seed valid peer"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    second = run_hook(
+        _hook_input("reuse only valid peer"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    first_context = json.loads(first)["hookSpecificOutput"]["additionalContext"]
+    second_context = json.loads(second)["hookSpecificOutput"]["additionalContext"]
+    assert "unfingerprintable-peer" in first_context
+    assert "valid-peer" in first_context
+    assert "unfingerprintable-peer" in second_context
+    assert "valid-peer" not in second_context
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "mixed"
+    assert row["injected_skills"] == [f"path:{bad_source}"]
+    assert row["reused_skills"] == [f"path:{valid_source}"]
+    assert "activation_fingerprint_unavailable" in row["warnings"]
+
+
+@pytest.mark.parametrize("rollout", ("shadow", "enforce"))
 def test_valid_unfingerprintable_valid_sequence_invalidates_stale_state(
     tmp_path,
     rollout,
@@ -1462,7 +1651,7 @@ def test_hook_records_valid_update_and_invalidation_in_one_state_mutation(
         retrieval={"top_k": 3},
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "combined-state",
             }
         },
@@ -1538,6 +1727,266 @@ def test_hook_records_valid_update_and_invalidation_in_one_state_mutation(
     )
 
 
+def test_pathless_enforce_records_each_a_b_a_transition_in_one_identity_slot(
+    tmp_path,
+):
+    procedure_id = "pathless-hook-skill"
+    identity = f"id:{procedure_id}"
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "pathless-state",
+            }
+        },
+    )
+    candidates = [
+        _renderer_candidate(
+            name="pathless-hook-skill",
+            procedure_id=procedure_id,
+            source_path=None,
+            metadata_source_path=None,
+            body=f"# Pathless Hook Skill\n\nPayload {payload}.\n",
+            headings=("Pathless Hook Skill",),
+            sha256=raw_sha,
+        )
+        for payload, raw_sha in (("A", "sha-a-1"), ("B", "sha-b"), ("A", "sha-a-2"))
+    ]
+    store = claude_session_state_module.ClaudeSessionStateStore(
+        tmp_path / "pathless-state"
+    )
+    outputs = []
+    stored_fingerprints = []
+
+    for index, candidate in enumerate(candidates):
+        outputs.append(
+            run_hook(
+                _hook_input(f"pathless transition {index}"),
+                config_path=config_path,
+                manager_factory=lambda _config, candidate=candidate: (
+                    _StaticSkillManager([candidate])
+                ),
+            )
+        )
+        loaded = store.load("session-123")
+        assert loaded.state is not None
+        assert set(loaded.state.activations) == {identity}
+        stored_fingerprints.append(
+            loaded.state.activations[identity].activation_fingerprint
+        )
+
+    assert all(outputs)
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    fingerprints = [row["selected_skills"][0]["activation_fingerprint"] for row in rows]
+    assert fingerprints[0] != fingerprints[1]
+    assert fingerprints[1] != fingerprints[2]
+    assert fingerprints[0] == fingerprints[2]
+    assert stored_fingerprints == fingerprints
+    assert [row["status"] for row in rows] == ["injected", "injected", "injected"]
+
+
+def test_enforce_filters_completed_baseline_without_reallocating_budget(tmp_path):
+    reused = _renderer_candidate(
+        name="budget-reused",
+        source_path="/a",
+        body="# Budget Reused\n\n" + ("A" * 5_000),
+        headings=("Budget Reused",),
+        score=0.9,
+        trust_mode="data",
+    )
+    retained = _renderer_candidate(
+        name="budget-retained",
+        source_path="/b",
+        body="# Budget Retained\n\n" + ("B" * 1_500),
+        headings=("Budget Retained",),
+        score=0.8,
+        trust_mode="data",
+    )
+    lower = _renderer_candidate(
+        name="budget-lower",
+        source_path="/c",
+        body="# Budget Lower\n\nCompact lower-ranked payload.\n",
+        headings=("Budget Lower",),
+        score=0.7,
+        trust_mode="data",
+    )
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"top_k": 3},
+        rendering={
+            "max_chars": 1_600,
+            "hard_max_chars": 1_600,
+            "max_chars_per_skill": 900,
+        },
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "budget-state",
+            }
+        },
+    )
+    renderer = ContextRenderer(load_hook_config(config_path))
+    baseline = renderer.render([reused, retained, lower], trace_id="budget-baseline")
+    counterfactual = renderer.render(
+        [retained, lower],
+        trace_id="budget-counterfactual",
+    )
+
+    assert [skill.candidate.procedure.title for skill in baseline.skills] == [
+        "budget-reused",
+        "budget-retained",
+    ]
+    assert baseline.skills[1].rank == 2
+    assert 'truncated="true"' in baseline.skills[1].xml
+    assert [skill.candidate.procedure.title for skill in counterfactual.skills] == [
+        "budget-retained",
+        "budget-lower",
+    ]
+    assert counterfactual.skills[0].rendered_chars > baseline.skills[1].rendered_chars
+
+    run_hook(
+        _hook_input("seed reused budget skill"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([reused]),
+    )
+    output = run_hook(
+        _hook_input("filter completed budget baseline"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([reused, retained, lower]),
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert context == renderer.compose((baseline.skills[1],))
+    assert '<skill rank="2" name="budget-retained"' in context
+    assert "budget-lower" not in context
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert [skill["name"] for skill in row["selected_skills"]] == [
+        "budget-reused",
+        "budget-retained",
+    ]
+    assert row["selected_skills"][1]["rank"] == 2
+    assert row["selected_skills"][1]["rendered_chars"] == (
+        baseline.skills[1].rendered_chars
+    )
+    assert row["reused_skills"] == ["path:/a"]
+    assert row["injected_skills"] == ["path:/b"]
+
+
+def test_enforce_mixed_output_preserves_sparse_rank_and_never_backfills(tmp_path):
+    source_a = "/stored/baseline-a/SKILL.md"
+    source_b = "/stored/baseline-b/SKILL.md"
+    candidate_a = _renderer_candidate(
+        name="baseline-a",
+        source_path=source_a,
+        score=0.9,
+    )
+    candidate_b = _renderer_candidate(
+        name="baseline-b",
+        source_path=source_b,
+        score=0.8,
+    )
+    lower_candidate = _renderer_candidate(
+        name="lower-candidate",
+        source_path="/stored/lower/SKILL.md",
+        score=0.7,
+    )
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"top_k": 2},
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "session-state",
+            }
+        },
+    )
+    seed_manager = _StaticSkillManager([candidate_a])
+    baseline_manager = _StaticSkillManager([candidate_a, candidate_b, lower_candidate])
+    run_hook(
+        _hook_input("seed A", session_id="mixed-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: seed_manager,
+    )
+    full_output = run_hook(
+        _hook_input("full baseline", session_id="baseline-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: baseline_manager,
+    )
+
+    mixed_output = run_hook(
+        _hook_input("mixed baseline", session_id="mixed-session"),
+        config_path=config_path,
+        manager_factory=lambda _config: baseline_manager,
+    )
+
+    baseline_context = json.loads(full_output)["hookSpecificOutput"][
+        "additionalContext"
+    ]
+    mixed_context = json.loads(mixed_output)["hookSpecificOutput"]["additionalContext"]
+    assert 'name="baseline-a"' not in mixed_context
+    assert '<skill rank="2" name="baseline-b"' in mixed_context
+    assert "lower-candidate" not in mixed_context
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "mixed"
+    assert [skill["name"] for skill in row["selected_skills"]] == [
+        "baseline-a",
+        "baseline-b",
+    ]
+    assert row["reused_skills"] == [f"path:{source_a}"]
+    assert row["injected_skills"] == [f"path:{source_b}"]
+    assert row["session_dedupe"]["dedupe_saved_chars"] == (
+        len(baseline_context) - len(mixed_context)
+    )
+
+
+def test_enforce_reuses_rank_and_score_only_changes(tmp_path):
+    stable_source = "/stored/rank-stable/SKILL.md"
+    first = _renderer_candidate(
+        name="rank-stable",
+        source_path=stable_source,
+        score=0.9,
+    )
+    higher = _renderer_candidate(
+        name="new-higher-rank",
+        source_path="/stored/higher/SKILL.md",
+        score=0.95,
+    )
+    reranked = replace(first, score=0.4)
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"top_k": 2},
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "session-state",
+            }
+        },
+    )
+    run_hook(
+        _hook_input("seed rank"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([first]),
+    )
+
+    output = run_hook(
+        _hook_input("rerank"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([higher, reranked]),
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    assert "new-higher-rank" in context
+    assert "rank-stable" not in context
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    stable_metadata = next(
+        skill for skill in row["selected_skills"] if skill["name"] == "rank-stable"
+    )
+    assert stable_metadata["rank"] == 2
+    assert stable_metadata["score"] == 0.4
+    assert row["reused_skills"] == [f"path:{stable_source}"]
+
+
 def test_shadow_audits_reuse_but_never_reduces_context(tmp_path):
     candidate = _renderer_candidate(
         name="shadow-skill",
@@ -1579,6 +2028,50 @@ def test_shadow_audits_reuse_but_never_reduces_context(tmp_path):
     assert row["session_dedupe"]["dedupe_saved_chars"] == 0
 
 
+@pytest.mark.parametrize("prompt", ["/clear", "/compact"])
+def test_prompt_strings_do_not_advance_context_generation(
+    tmp_path,
+    monkeypatch,
+    prompt,
+):
+    candidate = _renderer_candidate()
+    manager = _StaticSkillManager([candidate])
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "enforce",
+                "state_dir": "prompt-string-state",
+            }
+        },
+    )
+
+    def unexpected_advance(*_args, **_kwargs):
+        raise AssertionError("UserPromptSubmit must not advance lifecycle generation")
+
+    monkeypatch.setattr(
+        claude_session_state_module.ClaudeSessionStateStore,
+        "advance_context_generation",
+        unexpected_advance,
+    )
+    first = run_hook(
+        _hook_input("seed prompt-string session"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    after_prompt_string = run_hook(
+        _hook_input(prompt),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert first
+    assert after_prompt_string == ""
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "reused"
+    assert row["session_dedupe"]["context_generation"] == 0
+
+
 def test_default_off_emits_baseline_and_never_constructs_state_store(
     tmp_path,
     monkeypatch,
@@ -1611,14 +2104,14 @@ def test_default_off_emits_baseline_and_never_constructs_state_store(
     assert row["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
 
 
-def test_shadow_missing_session_and_no_results_do_no_state_work(tmp_path):
+def test_enforce_missing_session_and_no_results_do_no_state_work(tmp_path):
     candidate = _renderer_candidate(score=0.99)
     config_path = _config_path(
         tmp_path,
         retrieval={"min_score": 0.95},
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "session-state",
             }
         },
@@ -1646,13 +2139,13 @@ def test_shadow_missing_session_and_no_results_do_no_state_work(tmp_path):
     assert rows[1]["session_dedupe"]["state_load_status"] == "not_needed"
 
 
-def test_shadow_corrupt_state_fails_open_without_overwriting_it(tmp_path):
+def test_enforce_corrupt_state_fails_open_without_overwriting_it(tmp_path):
     candidate = _renderer_candidate()
     config_path = _config_path(
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "session-state",
             }
         },
@@ -1679,16 +2172,18 @@ def test_shadow_corrupt_state_fails_open_without_overwriting_it(tmp_path):
     assert "claude_session_state_invalid_json" in row["warnings"]
 
 
-def test_shadow_unsupported_lock_platform_fails_open_without_state_io(
+@pytest.mark.parametrize("rollout", ("shadow", "enforce"))
+def test_stateful_rollout_unsupported_lock_platform_fails_open_without_state_io(
     tmp_path,
     monkeypatch,
+    rollout,
 ):
     candidate = _renderer_candidate()
     config_path = _config_path(
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": rollout,
                 "state_dir": "unsupported-state",
             }
         },
@@ -1704,7 +2199,10 @@ def test_shadow_unsupported_lock_platform_fails_open_without_state_io(
     assert output
     assert not (tmp_path / "unsupported-state").exists()
     row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["session_dedupe"]["rollout"] == rollout
     assert row["session_dedupe"]["state_load_status"] == ("unsupported_lock_platform")
+    assert row["reused_skills"] == []
+    assert row["would_reuse_skills"] == []
     assert "claude_session_state_unsupported_lock_platform" in row["warnings"]
 
 
@@ -1717,7 +2215,7 @@ def test_unexpected_state_load_error_fails_open_without_state_record(
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "load-error-state",
             }
         },
@@ -1759,7 +2257,7 @@ def test_unexpected_activation_compare_error_fails_open_without_state_record(
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "compare-error-state",
             }
         },
@@ -1800,7 +2298,7 @@ def test_post_audit_state_failure_preserves_output_and_next_call_injects(
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "record-failure-state",
             }
         },
@@ -1848,13 +2346,13 @@ def test_post_audit_state_failure_preserves_output_and_next_call_injects(
 
     assert failed_record_output
     assert retry_output
-    assert reused_output
+    assert reused_output == ""
     rows = _audit_rows(tmp_path / "hook-audit.jsonl")
     assert [row["status"] for row in rows] == [
         "injected",
         "state_record_failed",
         "injected",
-        "injected",
+        "reused",
     ]
     failure_row = rows[1]
     assert failure_row["trace_id"] == rows[0]["trace_id"]
@@ -1862,8 +2360,8 @@ def test_post_audit_state_failure_preserves_output_and_next_call_injects(
     assert failure_row["audit_event"] == "session_dedupe_state_record"
     assert failure_row["warnings"] == [f"claude_session_state_{failure_status}"]
     assert failure_row["session_dedupe"] == {
-        "requested_rollout": "shadow",
-        "rollout": "shadow",
+        "requested_rollout": "enforce",
+        "rollout": "enforce",
         "configuration_status": "valid",
         "policy": "on_hash_change",
         "state_load_status": "missing",
@@ -1871,7 +2369,6 @@ def test_post_audit_state_failure_preserves_output_and_next_call_injects(
         "context_generation": 0,
         "lifecycle_tracking": "user_prompt_submit_only",
     }
-    assert rows[-1]["would_reuse_skills"] == ["path:/stored/renderer-skill/SKILL.md"]
 
 
 def test_audit_failure_leaves_existing_activation_state_unchanged(tmp_path):
@@ -1892,7 +2389,7 @@ def test_audit_failure_leaves_existing_activation_state_unchanged(tmp_path):
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "audit-order-state",
             }
         },
@@ -1914,7 +2411,7 @@ def test_audit_failure_leaves_existing_activation_state_unchanged(tmp_path):
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "audit-order-state",
             }
         },
@@ -1933,7 +2430,7 @@ def test_audit_failure_leaves_existing_activation_state_unchanged(tmp_path):
         tmp_path,
         claude={
             "session_dedupe": {
-                "rollout": "shadow",
+                "rollout": "enforce",
                 "state_dir": "audit-order-state",
             }
         },

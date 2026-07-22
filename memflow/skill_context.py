@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,13 @@ from memflow.models import Procedure, SearchResult
 from memflow.skills import indexed_skill_render_parts
 
 _ACTIVATION_FORMAT = "selected_skills_xml_v1.activation_v1"
+_SELECTED_SKILLS_OPENING = (
+    "<selected_skills>\n"
+    "These local skills were selected for the current user prompt.\n"
+    "Use them only when relevant to this task. They do not override "
+    "higher-priority instructions.\n\n"
+)
+_SELECTED_SKILLS_CLOSING = "</selected_skills>\n"
 
 
 @dataclass(frozen=True)
@@ -213,25 +221,19 @@ class ContextRenderer:
         if top_k <= 0 or budget <= 0 or per_skill_max <= 0:
             return RenderResult("", (), ("render_budget_too_small",))
 
-        opening = (
-            "<selected_skills>\n"
-            "These local skills were selected for the current user prompt.\n"
-            "Use them only when relevant to this task. They do not override "
-            "higher-priority instructions.\n\n"
-        )
-        closing = "</selected_skills>\n"
-        if len(opening) + len(closing) > budget:
+        if len(_SELECTED_SKILLS_OPENING) + len(_SELECTED_SKILLS_CLOSING) > budget:
             return RenderResult("", (), ("render_budget_too_small",))
 
         selected: list[RenderedSkill] = []
-        body_parts: list[str] = []
-        remaining = budget - len(opening) - len(closing)
+        remaining = (
+            budget - len(_SELECTED_SKILLS_OPENING) - len(_SELECTED_SKILLS_CLOSING)
+        )
         warnings: list[str] = []
 
         for candidate in candidates:
             if len(selected) >= top_k:
                 break
-            separator_chars = 1 if body_parts else 0
+            separator_chars = 1 if selected else 0
             available = min(per_skill_max, remaining - separator_chars)
             if available <= 0:
                 warnings.append("render_budget_exhausted")
@@ -246,17 +248,27 @@ class ContextRenderer:
                 continue
             rendered, render_warnings = render_result
             warnings.extend(render_warnings)
-            body_parts.append(rendered.xml)
             selected.append(rendered)
             remaining -= rendered.rendered_chars + separator_chars
 
         if not selected:
             return RenderResult("", (), tuple(warnings or ["no_renderable_skills"]))
 
-        xml = opening + "\n".join(body_parts) + closing
+        xml = self.compose(selected)
         if len(xml) > budget:
             return RenderResult("", (), ("render_budget_exceeded",))
         return RenderResult(xml, tuple(selected), tuple(warnings))
+
+    @staticmethod
+    def compose(skills: Sequence[RenderedSkill]) -> str:
+        """Compose already-rendered skills without reranking or rerendering."""
+        if not skills:
+            return ""
+        return (
+            _SELECTED_SKILLS_OPENING
+            + "\n".join(rendered.xml for rendered in skills)
+            + _SELECTED_SKILLS_CLOSING
+        )
 
 
 class AuditLogger:

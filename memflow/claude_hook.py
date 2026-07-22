@@ -43,7 +43,7 @@ DEFAULT_RETRIEVAL_TIMEOUT_MS = 2000
 DEFAULT_SESSION_DEDUPE_ROLLOUT = "off"
 DEFAULT_SESSION_DEDUPE_POLICY = "on_hash_change"
 DEFAULT_SESSION_DEDUPE_STATE_DIR = "claude-sessions"
-SUPPORTED_SESSION_DEDUPE_ROLLOUTS = {"off", "shadow"}
+SUPPORTED_SESSION_DEDUPE_ROLLOUTS = {"off", "shadow", "enforce"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": "memflow.claude_hook.v1",
@@ -427,6 +427,10 @@ def _plan_session_dedupe(
     assert loaded.state is not None
     try:
         matching = _matching_activations(baseline, loaded.state.activations)
+        matching_object_ids = {id(rendered) for rendered in matching}
+        retained = tuple(
+            rendered for rendered in baseline if id(rendered) not in matching_object_ids
+        )
         matching_identities = tuple(
             rendered.identity for rendered in matching if rendered.identity
         )
@@ -454,10 +458,20 @@ def _plan_session_dedupe(
             context_generation=loaded.state.context_generation,
             store=store,
         )
-    return _baseline_dedupe_plan(
-        config,
-        baseline,
+    return _SessionDedupePlan(
+        requested_rollout=settings.get("requested_rollout"),
+        rollout=rollout,
+        configuration_status=str(
+            settings.get("configuration_status") or "invalid_fallback_off"
+        ),
+        policy=policy,
+        output_skills=retained,
+        record_skills=retained,
+        reused_skills=matching_identities,
+        would_reuse_skills=(),
         state_load_status=loaded.status,
+        context_generation=loaded.state.context_generation,
+        store=store,
     )
 
 
@@ -695,7 +709,7 @@ def run_hook(
             baseline.skills,
             session_id=context_request.session_id,
         )
-        output_context = baseline.xml
+        output_context = renderer.compose(dedupe_plan.output_skills)
         selected_skills = tuple(
             selected_skill_metadata(rendered) for rendered in baseline.skills
         )
@@ -708,6 +722,8 @@ def run_hook(
         )
         if not baseline.xml:
             status = "no_results"
+        elif dedupe_plan.rollout == "enforce" and dedupe_plan.reused_skills:
+            status = "mixed" if output_context else "reused"
         else:
             status = "injected"
         context_response = SkillContextResponse(
@@ -739,6 +755,8 @@ def run_hook(
             selected_skills=list(context_response.selected_skills),
         )
         dedupe_saved_chars = 0
+        if dedupe_plan.rollout == "enforce":
+            dedupe_saved_chars = len(baseline.xml) - len(output_context)
         _add_session_dedupe_audit(
             record,
             dedupe_plan,
