@@ -12,6 +12,8 @@ from dataclasses import replace
 
 import pytest
 
+import memflow.claude_hook as claude_hook_module
+import memflow.claude_session_state as claude_session_state_module
 import memflow.skill_context as skill_context_module
 import memflow.skills as skills_module
 from memflow.claude_hook import (
@@ -70,10 +72,15 @@ def _manager_with_skill(
     return manager
 
 
-def _hook_input(prompt: str, *, event: str = "UserPromptSubmit") -> str:
+def _hook_input(
+    prompt: str,
+    *,
+    event: str = "UserPromptSubmit",
+    session_id: str = "session-123",
+) -> str:
     return json.dumps(
         {
-            "session_id": "session-123",
+            "session_id": session_id,
             "transcript_path": "/tmp/transcript.jsonl",
             "cwd": "/work/project",
             "hook_event_name": event,
@@ -231,6 +238,24 @@ def _candidate_with_skill_metadata(candidate: SkillCandidate, **updates):
     metadata["skill"].update(updates)
     procedure = replace(candidate.procedure, metadata=metadata)
     return replace(candidate, procedure=procedure)
+
+
+class _StaticSkillManager:
+    def __init__(self, candidates: list[SkillCandidate]) -> None:
+        self.candidates = candidates
+        self.search_calls = 0
+
+    def search_skills(self, query, user_id=None, top_k=5):
+        del query, user_id
+        self.search_calls += 1
+        return [
+            SearchResult(procedure=candidate.procedure, score=candidate.score)
+            for candidate in self.candidates[:top_k]
+        ]
+
+    def get_skill(self, id_or_name, include_content=True):
+        del id_or_name, include_content
+        raise AssertionError("complete static results must not be hydrated")
 
 
 @pytest.mark.parametrize(
@@ -871,11 +896,20 @@ def test_below_threshold_results_return_empty_stdout(tmp_path, fake_llm):
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "no_results"
     assert audit["selected_skills"] == []
+    assert audit["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
 
 
 def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
     manager = _manager_with_skill(tmp_path, fake_llm)
-    config_path = _config_path(tmp_path)
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "unsupported-event-state",
+            }
+        },
+    )
 
     invalid_output = run_hook(
         "{not json",
@@ -893,6 +927,8 @@ def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
     rows = _audit_rows(tmp_path / "hook-audit.jsonl")
     assert [row["status"] for row in rows] == ["fail_open", "fail_open"]
     assert rows[1]["warnings"] == ["unsupported_hook_event"]
+    assert all("session_dedupe" not in row for row in rows)
+    assert not (tmp_path / "unsupported-event-state").exists()
 
 
 def test_memflow_errors_fail_open(tmp_path):
@@ -908,6 +944,7 @@ def test_memflow_errors_fail_open(tmp_path):
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "fail_open"
     assert audit["warnings"] == ["RuntimeError"]
+    assert audit["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
 
 
 def test_default_factory_avoids_optional_llm_dependencies(monkeypatch, tmp_path):
@@ -1249,12 +1286,689 @@ def test_untrusted_skill_is_marked_as_data_context(tmp_path, fake_llm):
     assert audit["selected_skills"][0]["trust_mode"] == "data"
 
 
+@pytest.mark.parametrize("rollout", ("off", "shadow"))
+def test_fingerprint_failure_keeps_complete_hook_baseline(
+    tmp_path,
+    monkeypatch,
+    rollout,
+):
+    state_dir = tmp_path / "fingerprint-failure-state"
+    candidate = _renderer_candidate(
+        name="unfingerprintable",
+        source_path="/stored/unfingerprintable/SKILL.md",
+        body="# Unfingerprintable\n\nPayload \ud800 remains renderable.\n",
+        headings=("Unfingerprintable",),
+    )
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": rollout,
+                "state_dir": str(state_dir),
+            }
+        },
+    )
+
+    if rollout == "off":
+
+        class UnexpectedStateStore:
+            def __init__(self, *_args, **_kwargs):
+                raise AssertionError("off mode must not construct session state")
+
+        monkeypatch.setattr(
+            claude_hook_module,
+            "ClaudeSessionStateStore",
+            UnexpectedStateStore,
+        )
+
+    output = run_hook(
+        _hook_input(f"{rollout} fingerprint failure"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    identity = "path:/stored/unfingerprintable/SKILL.md"
+    assert "\ud800" in context
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["selected_skills"][0]["identity"] == identity
+    assert row["selected_skills"][0]["activation_fingerprint"] is None
+    assert "activation_fingerprint_unavailable" in row["warnings"]
+    assert row["injected_skills"] == [identity]
+    assert row["reused_skills"] == []
+    assert row["would_reuse_skills"] == []
+    assert row["skipped_skills"] == []
+    if rollout == "off":
+        assert not state_dir.exists()
+    else:
+        loaded = claude_session_state_module.ClaudeSessionStateStore(state_dir).load(
+            "session-123"
+        )
+        assert loaded.state is not None
+        assert loaded.state.activations == {}
+
+
+@pytest.mark.parametrize("rollout", ("shadow",))
+def test_valid_unfingerprintable_valid_sequence_invalidates_stale_state(
+    tmp_path,
+    rollout,
+):
+    source_path = "/stored/stale-fingerprint/SKILL.md"
+    identity = f"path:{source_path}"
+    valid_a = _renderer_candidate(
+        name="stale-fingerprint",
+        source_path=source_path,
+        body="# Stale Fingerprint\n\nPayload A.\n",
+        headings=("Stale Fingerprint",),
+    )
+    unfingerprintable_b = _renderer_candidate(
+        name="stale-fingerprint",
+        source_path=source_path,
+        body="# Stale Fingerprint\n\nPayload B contains \ud800.\n",
+        headings=("Stale Fingerprint",),
+    )
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": rollout,
+                "state_dir": "stale-fingerprint-state",
+            }
+        },
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(
+        tmp_path / "stale-fingerprint-state"
+    )
+
+    outputs = []
+    stored_fingerprints = []
+    for index, candidate in enumerate((valid_a, unfingerprintable_b, valid_a)):
+        outputs.append(
+            run_hook(
+                _hook_input(f"{rollout} transition {index}"),
+                config_path=config_path,
+                manager_factory=lambda _config, candidate=candidate: (
+                    _StaticSkillManager([candidate])
+                ),
+            )
+        )
+        loaded = store.load("session-123")
+        assert loaded.state is not None
+        stored = loaded.state.activations.get(identity)
+        stored_fingerprints.append(
+            stored.activation_fingerprint if stored is not None else None
+        )
+
+    assert all(outputs)
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    fingerprints = [row["selected_skills"][0]["activation_fingerprint"] for row in rows]
+    assert fingerprints[0] is not None
+    assert fingerprints == [fingerprints[0], None, fingerprints[0]]
+    assert stored_fingerprints == [fingerprints[0], None, fingerprints[0]]
+    assert all(row["reused_skills"] == [] for row in rows)
+    assert all(row["would_reuse_skills"] == [] for row in rows)
+
+
+def test_hook_records_valid_update_and_invalidation_in_one_state_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    invalidated_source = "/stored/combined-invalidated/SKILL.md"
+    updated_source = "/stored/combined-updated/SKILL.md"
+    unrelated_source = "/stored/combined-unrelated/SKILL.md"
+    invalidated_identity = f"path:{invalidated_source}"
+    updated_identity = f"path:{updated_source}"
+    unrelated_identity = f"path:{unrelated_source}"
+    seed_candidates = [
+        _renderer_candidate(
+            name="combined-invalidated",
+            source_path=invalidated_source,
+            body="# Combined Invalidated\n\nOld valid payload.\n",
+            headings=("Combined Invalidated",),
+            score=0.9,
+        ),
+        _renderer_candidate(
+            name="combined-updated",
+            source_path=updated_source,
+            body="# Combined Updated\n\nOld payload.\n",
+            headings=("Combined Updated",),
+            score=0.8,
+        ),
+        _renderer_candidate(
+            name="combined-unrelated",
+            source_path=unrelated_source,
+            score=0.7,
+        ),
+    ]
+    next_candidates = [
+        _renderer_candidate(
+            name="combined-invalidated",
+            source_path=invalidated_source,
+            body="# Combined Invalidated\n\nUnfingerprintable \ud800 payload.\n",
+            headings=("Combined Invalidated",),
+            score=0.9,
+        ),
+        _renderer_candidate(
+            name="combined-updated",
+            source_path=updated_source,
+            body="# Combined Updated\n\nNew payload.\n",
+            headings=("Combined Updated",),
+            score=0.8,
+        ),
+    ]
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"top_k": 3},
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "combined-state",
+            }
+        },
+    )
+    run_hook(
+        _hook_input("seed combined state"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager(seed_candidates),
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(
+        tmp_path / "combined-state"
+    )
+    before = store.load("session-123")
+    assert before.state is not None
+    unrelated_before = before.state.activations[unrelated_identity]
+    original_record = (
+        claude_session_state_module.ClaudeSessionStateStore.record_activations
+    )
+    recorded_calls = []
+
+    def spy_record(
+        self,
+        session_id,
+        activations,
+        *,
+        expected_generation,
+        invalidated_identities=(),
+    ):
+        frozen_activations = tuple(activations)
+        frozen_invalidations = tuple(invalidated_identities)
+        recorded_calls.append(
+            (frozen_activations, frozen_invalidations, expected_generation)
+        )
+        return original_record(
+            self,
+            session_id,
+            frozen_activations,
+            expected_generation=expected_generation,
+            invalidated_identities=frozen_invalidations,
+        )
+
+    monkeypatch.setattr(
+        claude_session_state_module.ClaudeSessionStateStore,
+        "record_activations",
+        spy_record,
+    )
+
+    output = run_hook(
+        _hook_input("apply combined mutation"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager(next_candidates),
+    )
+    loaded = store.load("session-123")
+
+    assert output
+    assert len(recorded_calls) == 1
+    updates, invalidations, generation = recorded_calls[0]
+    assert [update.identity for update in updates] == [updated_identity]
+    assert set(invalidations) == {invalidated_identity}
+    assert generation == 0
+    assert loaded.state is not None
+    assert set(loaded.state.activations) == {updated_identity, unrelated_identity}
+    assert loaded.state.activations[unrelated_identity] == unrelated_before
+    selected = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]["selected_skills"]
+    expected_updated_fingerprint = next(
+        skill["activation_fingerprint"]
+        for skill in selected
+        if skill["identity"] == updated_identity
+    )
+    assert (
+        loaded.state.activations[updated_identity].activation_fingerprint
+        == expected_updated_fingerprint
+    )
+
+
+def test_shadow_audits_reuse_but_never_reduces_context(tmp_path):
+    candidate = _renderer_candidate(
+        name="shadow-skill",
+        source_path="/stored/shadow/SKILL.md",
+    )
+    manager = _StaticSkillManager([candidate])
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "session-state",
+            }
+        },
+    )
+
+    first = run_hook(
+        _hook_input("shadow first"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    second = run_hook(
+        _hook_input("shadow second"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert (
+        json.loads(first)["hookSpecificOutput"]["additionalContext"]
+        == json.loads(second)["hookSpecificOutput"]["additionalContext"]
+    )
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    identity = "path:/stored/shadow/SKILL.md"
+    assert row["status"] == "injected"
+    assert row["injected_skills"] == [identity]
+    assert row["reused_skills"] == []
+    assert row["would_reuse_skills"] == [identity]
+    assert row["skipped_skills"] == []
+    assert row["session_dedupe"]["dedupe_saved_chars"] == 0
+
+
+def test_default_off_emits_baseline_and_never_constructs_state_store(
+    tmp_path,
+    monkeypatch,
+):
+    candidate = _renderer_candidate()
+
+    class UnexpectedStateStore:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("off mode must not construct session state")
+
+    monkeypatch.setattr(
+        claude_hook_module,
+        "ClaudeSessionStateStore",
+        UnexpectedStateStore,
+    )
+    config_path = _config_path(tmp_path)
+
+    output = run_hook(
+        _hook_input("off mode"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert not (tmp_path / "claude-sessions").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["session_dedupe"]["rollout"] == "off"
+    assert row["session_dedupe"]["state_load_status"] == "off"
+    assert row["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
+
+
+def test_shadow_missing_session_and_no_results_do_no_state_work(tmp_path):
+    candidate = _renderer_candidate(score=0.99)
+    config_path = _config_path(
+        tmp_path,
+        retrieval={"min_score": 0.95},
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "session-state",
+            }
+        },
+    )
+
+    missing_session = run_hook(
+        _hook_input("missing session", session_id=""),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+    no_results = run_hook(
+        _hook_input("no results"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([]),
+    )
+
+    assert missing_session
+    assert no_results == ""
+    assert not (tmp_path / "session-state").exists()
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    assert rows[0]["status"] == "injected"
+    assert "session_dedupe_missing_session_id" in rows[0]["warnings"]
+    assert rows[0]["session_dedupe"]["state_load_status"] == "missing_session_id"
+    assert rows[1]["status"] == "no_results"
+    assert rows[1]["session_dedupe"]["state_load_status"] == "not_needed"
+
+
+def test_shadow_corrupt_state_fails_open_without_overwriting_it(tmp_path):
+    candidate = _renderer_candidate()
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "session-state",
+            }
+        },
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(
+        tmp_path / "session-state"
+    )
+    state_path = store.state_path("session-123")
+    state_path.parent.mkdir()
+    invalid_state = b"{not valid session state"
+    state_path.write_bytes(invalid_state)
+
+    output = run_hook(
+        _hook_input("corrupt state"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert state_path.read_bytes() == invalid_state
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["session_dedupe"]["state_load_status"] == "invalid_json"
+    assert "claude_session_state_invalid_json" in row["warnings"]
+
+
+def test_shadow_unsupported_lock_platform_fails_open_without_state_io(
+    tmp_path,
+    monkeypatch,
+):
+    candidate = _renderer_candidate()
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "unsupported-state",
+            }
+        },
+    )
+    monkeypatch.setattr(claude_session_state_module, "fcntl", None)
+
+    output = run_hook(
+        _hook_input("unsupported lock platform"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert not (tmp_path / "unsupported-state").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["session_dedupe"]["state_load_status"] == ("unsupported_lock_platform")
+    assert "claude_session_state_unsupported_lock_platform" in row["warnings"]
+
+
+def test_unexpected_state_load_error_fails_open_without_state_record(
+    tmp_path,
+    monkeypatch,
+):
+    candidate = _renderer_candidate()
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "load-error-state",
+            }
+        },
+    )
+
+    class LoadErrorStore:
+        def __init__(self, _state_dir):
+            pass
+
+        def load(self, _session_id):
+            raise RuntimeError("state load failed")
+
+    monkeypatch.setattr(
+        claude_hook_module,
+        "ClaudeSessionStateStore",
+        LoadErrorStore,
+    )
+
+    output = run_hook(
+        _hook_input("load failure"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert not (tmp_path / "load-error-state").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["session_dedupe"]["state_load_status"] == "load_failed"
+    assert "session_dedupe_state_load_failed" in row["warnings"]
+
+
+def test_unexpected_activation_compare_error_fails_open_without_state_record(
+    tmp_path,
+    monkeypatch,
+):
+    candidate = _renderer_candidate()
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "compare-error-state",
+            }
+        },
+    )
+
+    def fail_compare(_baseline, _activations):
+        raise RuntimeError("comparison failed")
+
+    monkeypatch.setattr(
+        claude_hook_module,
+        "_matching_activations",
+        fail_compare,
+    )
+
+    output = run_hook(
+        _hook_input("compare failure"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert not (tmp_path / "compare-error-state").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["session_dedupe"]["state_load_status"] == "compare_failed"
+    assert "session_dedupe_compare_failed" in row["warnings"]
+
+
+@pytest.mark.parametrize("failure_status", ["write_failed", "lock_timeout"])
+def test_post_audit_state_failure_preserves_output_and_next_call_injects(
+    tmp_path,
+    monkeypatch,
+    failure_status,
+):
+    candidate = _renderer_candidate()
+    manager = _StaticSkillManager([candidate])
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "record-failure-state",
+            }
+        },
+    )
+
+    def fail_record(
+        self,
+        session_id,
+        activations,
+        *,
+        expected_generation,
+        invalidated_identities=(),
+    ):
+        del (
+            self,
+            session_id,
+            activations,
+            expected_generation,
+            invalidated_identities,
+        )
+        return claude_session_state_module.StateOperationResult(failure_status)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            claude_session_state_module.ClaudeSessionStateStore,
+            "record_activations",
+            fail_record,
+        )
+        failed_record_output = run_hook(
+            _hook_input("record failure"),
+            config_path=config_path,
+            manager_factory=lambda _config: manager,
+        )
+
+    retry_output = run_hook(
+        _hook_input("retry after record failure"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+    reused_output = run_hook(
+        _hook_input("reuse after successful retry"),
+        config_path=config_path,
+        manager_factory=lambda _config: manager,
+    )
+
+    assert failed_record_output
+    assert retry_output
+    assert reused_output
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    assert [row["status"] for row in rows] == [
+        "injected",
+        "state_record_failed",
+        "injected",
+        "injected",
+    ]
+    failure_row = rows[1]
+    assert failure_row["trace_id"] == rows[0]["trace_id"]
+    assert failure_row["session_id_hash"] == rows[0]["session_id_hash"]
+    assert failure_row["audit_event"] == "session_dedupe_state_record"
+    assert failure_row["warnings"] == [f"claude_session_state_{failure_status}"]
+    assert failure_row["session_dedupe"] == {
+        "requested_rollout": "shadow",
+        "rollout": "shadow",
+        "configuration_status": "valid",
+        "policy": "on_hash_change",
+        "state_load_status": "missing",
+        "state_record_status": failure_status,
+        "context_generation": 0,
+        "lifecycle_tracking": "user_prompt_submit_only",
+    }
+    assert rows[-1]["would_reuse_skills"] == ["path:/stored/renderer-skill/SKILL.md"]
+
+
+def test_audit_failure_leaves_existing_activation_state_unchanged(tmp_path):
+    source_path = "/stored/audit-order/SKILL.md"
+    candidate_a = _renderer_candidate(
+        name="audit-order",
+        source_path=source_path,
+        body="# Audit Order\n\nPayload A.\n",
+        headings=("Audit Order",),
+    )
+    candidate_b = _renderer_candidate(
+        name="audit-order",
+        source_path=source_path,
+        body="# Audit Order\n\nPayload B contains \ud800.\n",
+        headings=("Audit Order",),
+    )
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "audit-order-state",
+            }
+        },
+    )
+    first = run_hook(
+        _hook_input("seed audit state"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate_a]),
+    )
+    assert first
+    store = claude_session_state_module.ClaudeSessionStateStore(
+        tmp_path / "audit-order-state"
+    )
+    state_path = store.state_path("session-123")
+    state_before = state_path.read_bytes()
+    audit_directory = tmp_path / "audit-is-directory"
+    audit_directory.mkdir()
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "audit-order-state",
+            }
+        },
+        logging={"path": str(audit_directory)},
+    )
+
+    failed = run_hook(
+        _hook_input("changed payload with failed audit"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate_b]),
+    )
+
+    assert failed == ""
+    assert state_path.read_bytes() == state_before
+    recovered_config = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "state_dir": "audit-order-state",
+            }
+        },
+        logging={"path": str(tmp_path / "recovered-audit.jsonl")},
+    )
+    recovered = run_hook(
+        _hook_input("changed payload after audit recovers"),
+        config_path=recovered_config,
+        manager_factory=lambda _config: _StaticSkillManager([candidate_b]),
+    )
+    assert recovered
+    loaded = store.load("session-123")
+    assert loaded.state is not None
+    assert f"path:{source_path}" not in loaded.state.activations
+
+
 def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
     missing = load_hook_config(tmp_path / "missing.json")
     assert missing["schema_version"] == "memflow.claude_hook.v1"
     assert missing["retrieval"]["top_k"] == 3
     assert missing["retrieval"]["candidate_k"] == 20
     assert missing["claude"]["native_catalog_mode"] == "hidden_or_minimized"
+    assert missing["claude"]["session_dedupe"] == {
+        "rollout": "off",
+        "policy": "on_hash_change",
+        "state_dir": "claude-sessions",
+    }
+    assert missing["_memflow_session_dedupe"] == {
+        "requested_rollout": "off",
+        "rollout": "off",
+        "configuration_status": "valid",
+        "policy": "on_hash_change",
+        "state_dir": str(tmp_path / "claude-sessions"),
+        "warnings": [],
+    }
 
     path = tmp_path / "config.json"
     path.write_text(
@@ -1264,6 +1978,13 @@ def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
                     "top_k": 10,
                     "max_top_k": 2,
                     "candidate_k": 1,
+                },
+                "claude": {
+                    "session_dedupe": {
+                        "rollout": "shadow",
+                        "state_dir": "nested/../session-state",
+                        "future_field": {"kept": True},
+                    }
                 },
                 "future_gateway_field": {"kept": True},
             }
@@ -1275,6 +1996,84 @@ def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
     assert clamped["retrieval"]["top_k"] == 2
     assert clamped["retrieval"]["candidate_k"] == 2
     assert clamped["future_gateway_field"] == {"kept": True}
+    assert clamped["claude"]["session_dedupe"]["future_field"] == {"kept": True}
+    assert clamped["_memflow_session_dedupe"] == {
+        "requested_rollout": "shadow",
+        "rollout": "shadow",
+        "configuration_status": "valid",
+        "policy": "on_hash_change",
+        "state_dir": str(tmp_path / "session-state"),
+        "warnings": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw_session_dedupe", "expected_warning"),
+    [
+        ("bad", "invalid_session_dedupe_config"),
+        ({"rollout": "sometimes"}, "invalid_session_dedupe_rollout"),
+        ({"policy": "always"}, "invalid_session_dedupe_policy"),
+        ({"state_dir": ""}, "invalid_session_dedupe_state_dir"),
+        ({"state_dir": 42}, "invalid_session_dedupe_state_dir"),
+    ],
+)
+def test_invalid_session_dedupe_config_falls_back_to_off_without_state_work(
+    tmp_path,
+    raw_session_dedupe,
+    expected_warning,
+):
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": raw_session_dedupe},
+    )
+    loaded = load_hook_config(config_path)
+    candidate = _renderer_candidate()
+
+    output = run_hook(
+        _hook_input("invalid dedupe config"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert loaded["_memflow_session_dedupe"]["rollout"] == "off"
+    assert expected_warning in loaded["_memflow_session_dedupe"]["warnings"]
+    assert not (tmp_path / "claude-sessions").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["session_dedupe"]["rollout"] == "off"
+    assert row["session_dedupe"]["configuration_status"] == "invalid_fallback_off"
+    assert expected_warning in row["warnings"]
+
+
+def test_invalid_shadow_state_dir_audits_effective_off_without_state_work(tmp_path):
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "session_dedupe": {
+                "rollout": "shadow",
+                "policy": "on_hash_change",
+                "state_dir": "",
+            }
+        },
+    )
+    candidate = _renderer_candidate()
+
+    output = run_hook(
+        _hook_input("invalid shadow state directory"),
+        config_path=config_path,
+        manager_factory=lambda _config: _StaticSkillManager([candidate]),
+    )
+
+    assert output
+    assert not (tmp_path / "claude-sessions").exists()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
+    assert row["status"] == "injected"
+    assert row["would_reuse_skills"] == []
+    assert row["session_dedupe"]["requested_rollout"] == "shadow"
+    assert row["session_dedupe"]["rollout"] == "off"
+    assert row["session_dedupe"]["configuration_status"] == "invalid_fallback_off"
+    assert row["session_dedupe"]["state_load_status"] == "off"
+    assert "invalid_session_dedupe_state_dir" in row["warnings"]
 
 
 def test_invalid_catalog_mode_falls_back_and_audits_warning(tmp_path, fake_llm):

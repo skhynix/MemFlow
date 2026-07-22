@@ -13,16 +13,24 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from memflow.claude_catalog import normalize_native_catalog_mode
+from memflow.claude_session_state import (
+    ActivationUpdate,
+    ClaudeSessionStateStore,
+    StateOperationResult,
+    resolve_state_dir,
+)
 from memflow.llm import BaseLLM
 from memflow.skill_context import (
     AuditLogger,
     ContextRenderer,
+    RenderedSkill,
     SkillContextRequest,
     SkillContextResponse,
     SkillContextSelector,
@@ -32,6 +40,10 @@ from memflow.skill_context import (
 ADAPTER_NAME = "claude-code-user-prompt-submit"
 DEFAULT_CONFIG_PATH = ".memflow/claude-hook.json"
 DEFAULT_RETRIEVAL_TIMEOUT_MS = 2000
+DEFAULT_SESSION_DEDUPE_ROLLOUT = "off"
+DEFAULT_SESSION_DEDUPE_POLICY = "on_hash_change"
+DEFAULT_SESSION_DEDUPE_STATE_DIR = "claude-sessions"
+SUPPORTED_SESSION_DEDUPE_ROLLOUTS = {"off", "shadow"}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": "memflow.claude_hook.v1",
@@ -43,6 +55,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "claude": {
         "native_catalog_mode": "hidden_or_minimized",
+        "session_dedupe": {
+            "rollout": DEFAULT_SESSION_DEDUPE_ROLLOUT,
+            "policy": DEFAULT_SESSION_DEDUPE_POLICY,
+            "state_dir": DEFAULT_SESSION_DEDUPE_STATE_DIR,
+        },
     },
     "retrieval": {
         "top_k": 3,
@@ -73,6 +90,24 @@ class HookInput:
     cwd: str
     hook_event_name: str
     prompt: str
+
+
+@dataclass(frozen=True)
+class _SessionDedupePlan:
+    """One fail-open dedupe decision over an already-rendered baseline."""
+
+    requested_rollout: str | None
+    rollout: str
+    configuration_status: str
+    policy: str
+    output_skills: tuple[RenderedSkill, ...]
+    record_skills: tuple[RenderedSkill, ...]
+    reused_skills: tuple[str, ...]
+    would_reuse_skills: tuple[str, ...]
+    state_load_status: str
+    context_generation: int | None
+    warnings: tuple[str, ...] = ()
+    store: ClaudeSessionStateStore | None = None
 
 
 ManagerFactory = Callable[[dict[str, Any]], Any]
@@ -113,6 +148,62 @@ def _as_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_session_dedupe_config(
+    config: dict[str, Any],
+    *,
+    config_path: str | Path | None,
+) -> dict[str, Any]:
+    """Return effective fail-closed-to-off session dedupe configuration."""
+    warnings: list[str] = []
+    claude_config = config.get("claude")
+    raw_config = (
+        claude_config.get("session_dedupe") if isinstance(claude_config, dict) else None
+    )
+    if not isinstance(raw_config, dict):
+        warnings.append("invalid_session_dedupe_config")
+        raw_config = {}
+
+    rollout = raw_config.get("rollout", DEFAULT_SESSION_DEDUPE_ROLLOUT)
+    if not isinstance(rollout, str) or rollout not in SUPPORTED_SESSION_DEDUPE_ROLLOUTS:
+        warnings.append("invalid_session_dedupe_rollout")
+
+    policy = raw_config.get("policy", DEFAULT_SESSION_DEDUPE_POLICY)
+    if policy != DEFAULT_SESSION_DEDUPE_POLICY:
+        warnings.append("invalid_session_dedupe_policy")
+
+    state_dir = raw_config.get("state_dir", DEFAULT_SESSION_DEDUPE_STATE_DIR)
+    if not isinstance(state_dir, str) or not state_dir.strip():
+        warnings.append("invalid_session_dedupe_state_dir")
+        state_dir = DEFAULT_SESSION_DEDUPE_STATE_DIR
+
+    try:
+        resolved_state_dir = resolve_state_dir(
+            state_dir,
+            config_path=config_path or DEFAULT_CONFIG_PATH,
+        )
+    except (OSError, TypeError, ValueError):
+        warnings.append("invalid_session_dedupe_state_dir")
+        resolved_state_dir = resolve_state_dir(
+            DEFAULT_SESSION_DEDUPE_STATE_DIR,
+            config_path=config_path or DEFAULT_CONFIG_PATH,
+        )
+
+    requested_rollout = rollout if isinstance(rollout, str) else None
+    effective_rollout = (
+        rollout
+        if not warnings and isinstance(rollout, str)
+        else DEFAULT_SESSION_DEDUPE_ROLLOUT
+    )
+    return {
+        "requested_rollout": requested_rollout,
+        "rollout": effective_rollout,
+        "configuration_status": ("valid" if not warnings else "invalid_fallback_off"),
+        "policy": DEFAULT_SESSION_DEDUPE_POLICY,
+        "state_dir": str(resolved_state_dir),
+        "warnings": list(dict.fromkeys(warnings)),
+    }
 
 
 def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
@@ -176,6 +267,10 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
         "effective": catalog_mode.effective_mode,
         "warnings": list(catalog_mode.warnings),
     }
+    config["_memflow_session_dedupe"] = _normalize_session_dedupe_config(
+        config,
+        config_path=config_path,
+    )
     config.setdefault("logging", copy.deepcopy(DEFAULT_CONFIG["logging"]))
     return config
 
@@ -222,6 +317,245 @@ def build_skill_context_request(
         user_id=str(memflow_config.get("user_id") or "default"),
         project_scope=str(memflow_config.get("project_scope") or hook_input.cwd),
     )
+
+
+def _session_dedupe_settings(config: dict[str, Any]) -> dict[str, Any]:
+    settings = config.get("_memflow_session_dedupe", {})
+    if isinstance(settings, dict):
+        return settings
+    return {
+        "requested_rollout": DEFAULT_SESSION_DEDUPE_ROLLOUT,
+        "rollout": DEFAULT_SESSION_DEDUPE_ROLLOUT,
+        "configuration_status": "invalid_fallback_off",
+        "policy": DEFAULT_SESSION_DEDUPE_POLICY,
+        "state_dir": DEFAULT_SESSION_DEDUPE_STATE_DIR,
+        "warnings": ["invalid_session_dedupe_config"],
+    }
+
+
+def _baseline_dedupe_plan(
+    config: dict[str, Any],
+    baseline_skills: Sequence[RenderedSkill] = (),
+    *,
+    state_load_status: str,
+    warnings: Sequence[str] = (),
+) -> _SessionDedupePlan:
+    settings = _session_dedupe_settings(config)
+    return _SessionDedupePlan(
+        requested_rollout=settings.get("requested_rollout"),
+        rollout=str(settings.get("rollout") or DEFAULT_SESSION_DEDUPE_ROLLOUT),
+        configuration_status=str(
+            settings.get("configuration_status") or "invalid_fallback_off"
+        ),
+        policy=str(settings.get("policy") or DEFAULT_SESSION_DEDUPE_POLICY),
+        output_skills=tuple(baseline_skills),
+        record_skills=(),
+        reused_skills=(),
+        would_reuse_skills=(),
+        state_load_status=state_load_status,
+        context_generation=None,
+        warnings=tuple(warnings),
+    )
+
+
+def _matching_activations(
+    baseline_skills: Sequence[RenderedSkill],
+    stored_activations: dict[str, Any],
+) -> tuple[RenderedSkill, ...]:
+    matches: list[RenderedSkill] = []
+    for rendered in baseline_skills:
+        identity = rendered.identity
+        fingerprint = rendered.activation_fingerprint
+        if not identity or not fingerprint:
+            continue
+        stored = stored_activations.get(identity)
+        if stored is not None and stored.activation_fingerprint == fingerprint:
+            matches.append(rendered)
+    return tuple(matches)
+
+
+def _plan_session_dedupe(
+    config: dict[str, Any],
+    baseline_skills: Sequence[RenderedSkill],
+    *,
+    session_id: str,
+) -> _SessionDedupePlan:
+    """Compare only the completed baseline and fail open on state errors."""
+    settings = _session_dedupe_settings(config)
+    rollout = str(settings.get("rollout") or DEFAULT_SESSION_DEDUPE_ROLLOUT)
+    policy = str(settings.get("policy") or DEFAULT_SESSION_DEDUPE_POLICY)
+    baseline = tuple(baseline_skills)
+
+    if rollout == "off":
+        return _baseline_dedupe_plan(
+            config,
+            baseline,
+            state_load_status="off",
+        )
+    if not baseline:
+        return _baseline_dedupe_plan(
+            config,
+            state_load_status="not_needed",
+        )
+    if not session_id:
+        return _baseline_dedupe_plan(
+            config,
+            baseline,
+            state_load_status="missing_session_id",
+            warnings=("session_dedupe_missing_session_id",),
+        )
+
+    try:
+        store = ClaudeSessionStateStore(str(settings["state_dir"]))
+        loaded = store.load(session_id)
+    except Exception:
+        return _baseline_dedupe_plan(
+            config,
+            baseline,
+            state_load_status="load_failed",
+            warnings=("session_dedupe_state_load_failed",),
+        )
+
+    if not loaded.available:
+        return _baseline_dedupe_plan(
+            config,
+            baseline,
+            state_load_status=loaded.status,
+            warnings=loaded.warnings,
+        )
+
+    assert loaded.state is not None
+    try:
+        matching = _matching_activations(baseline, loaded.state.activations)
+        matching_identities = tuple(
+            rendered.identity for rendered in matching if rendered.identity
+        )
+    except Exception:
+        return _baseline_dedupe_plan(
+            config,
+            baseline,
+            state_load_status="compare_failed",
+            warnings=("session_dedupe_compare_failed",),
+        )
+
+    if rollout == "shadow":
+        return _SessionDedupePlan(
+            requested_rollout=settings.get("requested_rollout"),
+            rollout=rollout,
+            configuration_status=str(
+                settings.get("configuration_status") or "invalid_fallback_off"
+            ),
+            policy=policy,
+            output_skills=baseline,
+            record_skills=baseline,
+            reused_skills=(),
+            would_reuse_skills=matching_identities,
+            state_load_status=loaded.status,
+            context_generation=loaded.state.context_generation,
+            store=store,
+        )
+    return _baseline_dedupe_plan(
+        config,
+        baseline,
+        state_load_status=loaded.status,
+    )
+
+
+def _activation_identities(
+    rendered_skills: Sequence[RenderedSkill],
+) -> list[str]:
+    return [
+        rendered.identity
+        for rendered in rendered_skills
+        if isinstance(rendered.identity, str) and rendered.identity
+    ]
+
+
+def _rendered_skill_name(rendered: RenderedSkill) -> str:
+    procedure = rendered.candidate.procedure
+    skill = procedure.metadata.get("skill", {})
+    if not isinstance(skill, dict):
+        skill = {}
+    frontmatter = skill.get("frontmatter", {})
+    if not isinstance(frontmatter, dict):
+        frontmatter = {}
+    return str(skill.get("name") or frontmatter.get("name") or procedure.title)
+
+
+def _add_session_dedupe_audit(
+    record: dict[str, Any],
+    plan: _SessionDedupePlan,
+    *,
+    dedupe_saved_chars: int,
+) -> None:
+    record.update(
+        {
+            "injected_skills": _activation_identities(plan.output_skills),
+            "reused_skills": list(plan.reused_skills),
+            "would_reuse_skills": list(plan.would_reuse_skills),
+            "skipped_skills": [
+                {
+                    "identity": identity,
+                    "reason": "duplicate_activation_fingerprint",
+                }
+                for identity in plan.reused_skills
+            ],
+            "session_dedupe": {
+                "requested_rollout": plan.requested_rollout,
+                "rollout": plan.rollout,
+                "configuration_status": plan.configuration_status,
+                "policy": plan.policy,
+                "state_load_status": plan.state_load_status,
+                "context_generation": plan.context_generation,
+                "lifecycle_tracking": "user_prompt_submit_only",
+                "dedupe_saved_chars": dedupe_saved_chars,
+            },
+        }
+    )
+
+
+def _record_session_activations(
+    plan: _SessionDedupePlan,
+    *,
+    session_id: str,
+) -> StateOperationResult | None:
+    """Record payloads prepared for output, without claiming delivery."""
+    if plan.store is None or plan.context_generation is None:
+        return None
+
+    try:
+        updates = []
+        invalidated_identities = []
+        for rendered in plan.record_skills:
+            identity = rendered.identity
+            if not identity:
+                continue
+            fingerprint = rendered.activation_fingerprint
+            if not fingerprint:
+                invalidated_identities.append(identity)
+                continue
+            updates.append(
+                ActivationUpdate(
+                    identity=identity,
+                    activation_fingerprint=fingerprint,
+                    name=_rendered_skill_name(rendered),
+                    emitted_chars=rendered.rendered_chars,
+                )
+            )
+        if updates or invalidated_identities:
+            return plan.store.record_activations(
+                session_id,
+                updates,
+                expected_generation=plan.context_generation,
+                invalidated_identities=invalidated_identities,
+            )
+        return StateOperationResult("unchanged")
+    except Exception:
+        # The already-audited stdout plan must survive best-effort state failure.
+        return StateOperationResult(
+            "record_failed",
+            warnings=("session_dedupe_state_record_failed",),
+        )
 
 
 @contextmanager
@@ -282,6 +616,10 @@ def run_hook(
     if not isinstance(catalog_mode, dict):
         catalog_mode = {}
     catalog_warnings = tuple(str(item) for item in catalog_mode.get("warnings", ()))
+    session_dedupe_settings = _session_dedupe_settings(config)
+    session_dedupe_config_warnings = tuple(
+        str(item) for item in session_dedupe_settings.get("warnings", ())
+    )
 
     def latency_ms() -> int:
         return int((time.perf_counter() - started) * 1000)
@@ -309,11 +647,21 @@ def run_hook(
 
         query = selector.build_query(context_request)
         if not query.strip():
+            dedupe_plan = _plan_session_dedupe(
+                config,
+                (),
+                session_id=context_request.session_id,
+            )
             context_response = SkillContextResponse(
                 trace_id=trace_id,
                 selected_skills=(),
                 rendered_context="",
-                warnings=(*catalog_warnings, "empty_query"),
+                warnings=(
+                    *catalog_warnings,
+                    *session_dedupe_config_warnings,
+                    *dedupe_plan.warnings,
+                    "empty_query",
+                ),
                 status="no_results",
                 latency_ms=latency_ms(),
             )
@@ -326,6 +674,11 @@ def run_hook(
                 latency_ms=context_response.latency_ms,
                 warnings=context_response.warnings,
             )
+            _add_session_dedupe_audit(
+                record,
+                dedupe_plan,
+                dedupe_saved_chars=0,
+            )
             if not audit_logger.write_or_fail(record):
                 return ""
             return ""
@@ -336,20 +689,45 @@ def run_hook(
             factory = manager_factory or default_manager_factory
             manager = factory(config)
             candidates, selection_warnings = selector.select(manager, context_request)
-        render_result = renderer.render(candidates, trace_id=trace_id)
-        selected_skills = tuple(
-            selected_skill_metadata(rendered) for rendered in render_result.skills
+        baseline = renderer.render(candidates, trace_id=trace_id)
+        dedupe_plan = _plan_session_dedupe(
+            config,
+            baseline.skills,
+            session_id=context_request.session_id,
         )
-        warnings = (*catalog_warnings, *selection_warnings, *render_result.warnings)
-        status = "injected" if render_result.xml else "no_results"
+        output_context = baseline.xml
+        selected_skills = tuple(
+            selected_skill_metadata(rendered) for rendered in baseline.skills
+        )
+        warnings = (
+            *catalog_warnings,
+            *session_dedupe_config_warnings,
+            *selection_warnings,
+            *baseline.warnings,
+            *dedupe_plan.warnings,
+        )
+        if not baseline.xml:
+            status = "no_results"
+        else:
+            status = "injected"
         context_response = SkillContextResponse(
             trace_id=trace_id,
             selected_skills=selected_skills,
-            rendered_context=render_result.xml,
+            rendered_context=output_context,
             warnings=warnings,
             status=status,
             latency_ms=latency_ms(),
         )
+        planned_stdout = ""
+        if context_response.rendered_context:
+            response = {
+                "suppressOutput": True,
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context_response.rendered_context,
+                },
+            }
+            planned_stdout = json.dumps(response)
         record = audit_logger.base_record(
             trace_id=context_response.trace_id,
             request=context_request,
@@ -360,19 +738,52 @@ def run_hook(
             warnings=context_response.warnings,
             selected_skills=list(context_response.selected_skills),
         )
+        dedupe_saved_chars = 0
+        _add_session_dedupe_audit(
+            record,
+            dedupe_plan,
+            dedupe_saved_chars=dedupe_saved_chars,
+        )
         if not audit_logger.write_or_fail(record):
             return ""
-        if not context_response.rendered_context:
-            return ""
-        response = {
-            "suppressOutput": True,
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": context_response.rendered_context,
-            },
-        }
-        return json.dumps(response)
+        state_record_result = _record_session_activations(
+            dedupe_plan,
+            session_id=context_request.session_id,
+        )
+        if state_record_result is not None and not state_record_result.succeeded:
+            state_record_warnings = state_record_result.warnings or (
+                f"claude_session_state_{state_record_result.status}",
+            )
+            state_record_failure = audit_logger.base_record(
+                trace_id=context_response.trace_id,
+                request=context_request,
+                hook_event=hook_input.hook_event_name,
+                prompt=prompt,
+                status="state_record_failed",
+                latency_ms=latency_ms(),
+                warnings=state_record_warnings,
+            )
+            state_record_failure["audit_event"] = "session_dedupe_state_record"
+            state_record_failure["session_dedupe"] = {
+                "requested_rollout": dedupe_plan.requested_rollout,
+                "rollout": dedupe_plan.rollout,
+                "configuration_status": dedupe_plan.configuration_status,
+                "policy": dedupe_plan.policy,
+                "state_load_status": dedupe_plan.state_load_status,
+                "state_record_status": state_record_result.status,
+                "context_generation": dedupe_plan.context_generation,
+                "lifecycle_tracking": "user_prompt_submit_only",
+            }
+            audit_logger.write_or_fail(state_record_failure)
+        return planned_stdout
     except Exception as exc:
+        is_user_prompt_submit = (
+            hook_input is not None and hook_input.hook_event_name == "UserPromptSubmit"
+        )
+        warnings = [*catalog_warnings]
+        if is_user_prompt_submit:
+            warnings.extend(session_dedupe_config_warnings)
+        warnings.append(f"{type(exc).__name__}")
         record = audit_logger.base_record(
             trace_id=trace_id,
             request=context_request,
@@ -380,8 +791,19 @@ def run_hook(
             prompt=prompt,
             status="fail_open",
             latency_ms=latency_ms(),
-            warnings=[*catalog_warnings, f"{type(exc).__name__}"],
+            warnings=warnings,
         )
+        if is_user_prompt_submit:
+            fail_open_plan = _plan_session_dedupe(
+                config,
+                (),
+                session_id=hook_input.session_id,
+            )
+            _add_session_dedupe_audit(
+                record,
+                fail_open_plan,
+                dedupe_saved_chars=0,
+            )
         audit_logger.write_or_fail(record)
         return ""
 

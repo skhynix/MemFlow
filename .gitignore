@@ -49,6 +49,9 @@ tags
 # Coding agents
 .claude/
 
+# Local Claude hook session activation state
+/.memflow/claude-sessions/
+
 # Docker volumes
 postgres_data/
 
