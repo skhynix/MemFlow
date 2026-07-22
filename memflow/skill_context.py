@@ -16,6 +16,8 @@ from xml.sax.saxutils import escape
 from memflow.models import Procedure, SearchResult
 from memflow.skills import indexed_skill_render_parts
 
+_ACTIVATION_FORMAT = "selected_skills_xml_v1.activation_v1"
+
 
 @dataclass(frozen=True)
 class SkillContextRequest:
@@ -56,6 +58,8 @@ class RenderedSkill:
     rank: int
     xml: str
     rendered_chars: int
+    identity: str | None
+    activation_fingerprint: str | None
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,18 @@ class RenderResult:
     xml: str
     skills: tuple[RenderedSkill, ...]
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _RenderedSkillSemantics:
+    identity: str | None
+    name: str
+    source_path: str
+    trust_mode: str
+    when_to_use: str
+    headings: tuple[str, ...]
+    content: str
+    truncated: bool
 
 
 class SkillPolicy:
@@ -326,18 +342,21 @@ def selected_skill_metadata(rendered: RenderedSkill) -> dict[str, Any]:
     skill = procedure.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
+    _stored_source_path, emitted_source_path = _resolved_source_path(procedure, skill)
     return {
         "rank": rendered.rank,
         "id": procedure.id,
         "name": skill.get("name") or procedure.title,
         "title": procedure.title,
-        "source_path": procedure.source_path or skill.get("source_path"),
+        "source_path": emitted_source_path,
         "sha256": skill.get("sha256"),
         "score": candidate.score,
         "rendered_chars": rendered.rendered_chars,
         "reason": candidate.reason,
         "provenance": candidate.provenance,
         "trust_mode": candidate.trust_mode,
+        "identity": rendered.identity,
+        "activation_fingerprint": rendered.activation_fingerprint,
     }
 
 
@@ -377,67 +396,162 @@ def _render_skill_with_budget(
     for _ in range(8):
         truncated = len(body) > content_limit
         content = _truncate_text(body, content_limit)
-        xml = _render_skill_xml(candidate, rank, frontmatter, content, truncated)
+        semantics = _resolve_rendered_skill_semantics(
+            candidate,
+            frontmatter,
+            content,
+            truncated,
+        )
+        xml = _render_skill_xml(semantics, rank)
         if len(xml) <= budget:
+            warnings = render_warnings
+            if semantics.identity is None:
+                warnings = (*warnings, "activation_identity_unavailable")
+            activation_fingerprint, fingerprint_warnings = _safe_activation_fingerprint(
+                semantics
+            )
+            warnings = (*warnings, *fingerprint_warnings)
             return RenderedSkill(
                 candidate=candidate,
                 rank=rank,
                 xml=xml,
                 rendered_chars=len(xml),
-            ), render_warnings
+                identity=semantics.identity,
+                activation_fingerprint=activation_fingerprint,
+            ), warnings
         excess = len(xml) - budget
         next_limit = content_limit - excess - 32
         if next_limit >= content_limit:
             break
         content_limit = max(0, next_limit)
 
-    xml = _render_skill_xml(candidate, rank, frontmatter, "", bool(body))
+    semantics = _resolve_rendered_skill_semantics(
+        candidate,
+        frontmatter,
+        "",
+        bool(body),
+    )
+    xml = _render_skill_xml(semantics, rank)
     if len(xml) <= budget:
+        warnings = render_warnings
+        if semantics.identity is None:
+            warnings = (*warnings, "activation_identity_unavailable")
+        activation_fingerprint, fingerprint_warnings = _safe_activation_fingerprint(
+            semantics
+        )
+        warnings = (*warnings, *fingerprint_warnings)
         return RenderedSkill(
             candidate=candidate,
             rank=rank,
             xml=xml,
             rendered_chars=len(xml),
-        ), render_warnings
+            identity=semantics.identity,
+            activation_fingerprint=activation_fingerprint,
+        ), warnings
     return None
 
 
-def _render_skill_xml(
+def _resolve_rendered_skill_semantics(
     candidate: SkillCandidate,
-    rank: int,
     frontmatter: dict[str, Any],
     content: str,
     truncated: bool,
-) -> str:
+) -> _RenderedSkillSemantics:
     procedure = candidate.procedure
     skill = procedure.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     name = str(skill.get("name") or frontmatter.get("name") or procedure.title)
-    source_path = str(procedure.source_path or skill.get("source_path") or "")
+    stored_source_path, source_path = _resolved_source_path(procedure, skill)
     description = str(skill.get("description") or frontmatter.get("description") or "")
     when_to_use = _when_to_use_text(frontmatter, skill, description)
-    headings = _heading_texts(procedure, content)
+    headings = tuple(_heading_texts(procedure, content)[:8])
+    if not headings:
+        headings = ("No headings indexed.",)
 
-    outline = "\n".join(
-        f"    <heading>{_xml_text(heading)}</heading>" for heading in headings[:8]
+    return _RenderedSkillSemantics(
+        identity=_activation_identity(stored_source_path, procedure.id),
+        name=name,
+        source_path=source_path,
+        trust_mode=candidate.trust_mode,
+        when_to_use=when_to_use,
+        headings=headings,
+        content=content,
+        truncated=truncated,
     )
-    if not outline:
-        outline = "    <heading>No headings indexed.</heading>"
+
+
+def _resolved_source_path(
+    procedure: Procedure,
+    skill: dict[str, Any],
+) -> tuple[str | None, str]:
+    candidates = (procedure.source_path, skill.get("source_path"))
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value, value
+
+    raw_value = procedure.source_path or skill.get("source_path")
+    return None, str(raw_value or "")
+
+
+def _render_skill_xml(semantics: _RenderedSkillSemantics, rank: int) -> str:
+    outline = "\n".join(
+        f"    <heading>{_xml_text(heading)}</heading>" for heading in semantics.headings
+    )
 
     return (
-        f'<skill rank="{_xml_attr(rank)}" name="{_xml_attr(name)}" '
-        f'source_path="{_xml_attr(source_path)}" '
-        f'trust_mode="{_xml_attr(candidate.trust_mode)}">\n'
-        f"  <when_to_use>{_xml_text(when_to_use)}</when_to_use>\n"
+        f'<skill rank="{_xml_attr(rank)}" name="{_xml_attr(semantics.name)}" '
+        f'source_path="{_xml_attr(semantics.source_path)}" '
+        f'trust_mode="{_xml_attr(semantics.trust_mode)}">\n'
+        f"  <when_to_use>{_xml_text(semantics.when_to_use)}</when_to_use>\n"
         "  <outline>\n"
         f"{outline}\n"
         "  </outline>\n"
-        f'  <content truncated="{_xml_attr(str(truncated).lower())}">\n'
-        f"{_xml_text(content)}\n"
+        f'  <content truncated="{_xml_attr(str(semantics.truncated).lower())}">\n'
+        f"{_xml_text(semantics.content)}\n"
         "  </content>\n"
         "</skill>\n"
     )
+
+
+def _activation_identity(source_path: object, procedure_id: object) -> str | None:
+    if isinstance(source_path, str) and source_path.strip():
+        return f"path:{source_path}"
+    if isinstance(procedure_id, str) and procedure_id.strip():
+        return f"id:{procedure_id}"
+    return None
+
+
+def _activation_fingerprint(semantics: _RenderedSkillSemantics) -> str | None:
+    if semantics.identity is None:
+        return None
+    payload = {
+        "format": _ACTIVATION_FORMAT,
+        "identity": semantics.identity,
+        "name": semantics.name,
+        "source_path": semantics.source_path,
+        "trust_mode": semantics.trust_mode,
+        "when_to_use": semantics.when_to_use,
+        "headings": semantics.headings,
+        "content": semantics.content,
+        "truncated": semantics.truncated,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _sha256_text(canonical)
+
+
+def _safe_activation_fingerprint(
+    semantics: _RenderedSkillSemantics,
+) -> tuple[str | None, tuple[str, ...]]:
+    try:
+        return _activation_fingerprint(semantics), ()
+    except Exception:
+        return None, ("activation_fingerprint_unavailable",)
 
 
 def _when_to_use_text(

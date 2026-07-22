@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -25,7 +27,13 @@ from memflow.claude_hook import (
 )
 from memflow.manager import MemFlow
 from memflow.models import Procedure, SearchResult
-from memflow.skill_context import SkillContextRequest, SkillContextSelector
+from memflow.skill_context import (
+    ContextRenderer,
+    SkillCandidate,
+    SkillContextRequest,
+    SkillContextSelector,
+    selected_skill_metadata,
+)
 from memflow.skills import load_skill
 from memflow.store import EmulatedStore
 
@@ -111,6 +119,537 @@ def _audit_rows(path):
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+_DEFAULT_METADATA_SOURCE = object()
+
+
+def _renderer_config(
+    *,
+    top_k: int = 3,
+    max_chars: int = 20_000,
+    max_chars_per_skill: int = 10_000,
+    rendering_format: str = "selected_skills_xml_v1",
+):
+    return {
+        "retrieval": {"top_k": top_k},
+        "rendering": {
+            "max_chars": max_chars,
+            "hard_max_chars": max_chars,
+            "max_chars_per_skill": max_chars_per_skill,
+            "format": rendering_format,
+        },
+    }
+
+
+def _renderer_candidate(
+    *,
+    name: str = "renderer-skill",
+    body: str = "# Renderer Skill\n\nRender the selected skill.\n",
+    procedure_id: str = "stable-renderer-id",
+    source_path: str | None = "/stored/renderer-skill/SKILL.md",
+    metadata_source_path=_DEFAULT_METADATA_SOURCE,
+    description: str = "Use this renderer skill.",
+    headings: tuple[str, ...] = ("Renderer Skill",),
+    sha256: str = "raw-skill-sha",
+    score: float = 0.9,
+    reason: str = "matched_prompt_via_memflow_skill_search",
+    provenance: str = "local",
+    trust_mode: str = "instruction",
+    trust_state: str = "trusted",
+) -> SkillCandidate:
+    if metadata_source_path is _DEFAULT_METADATA_SOURCE:
+        metadata_source_path = source_path
+    skill = {
+        "name": name,
+        "description": description,
+        "sha256": sha256,
+        "frontmatter": {
+            "name": name,
+            "description": description,
+        },
+        "aliases": [],
+        "file_patterns": [],
+        "tools": [],
+    }
+    if metadata_source_path is not None:
+        skill["source_path"] = metadata_source_path
+    procedure = Procedure(
+        id=procedure_id,
+        title=name,
+        content=body,
+        kind="skill",
+        source_path=source_path,
+        metadata={
+            "skill": skill,
+            "index": {
+                "body_offset": 0,
+                "headings": [{"text": heading} for heading in headings],
+            },
+        },
+    )
+    return SkillCandidate(
+        procedure=procedure,
+        score=score,
+        reason=reason,
+        provenance=provenance,
+        trust_mode=trust_mode,
+        trust_state=trust_state,
+        warnings=(),
+    )
+
+
+def _render_target(
+    candidate: SkillCandidate,
+    *,
+    config=None,
+    trace_id: str = "trace-one",
+    rank: int = 1,
+):
+    config = copy.deepcopy(config or _renderer_config())
+    config["retrieval"]["top_k"] = max(config["retrieval"]["top_k"], rank)
+    fillers = [
+        _renderer_candidate(
+            name=f"filler-{index}",
+            procedure_id=f"filler-{index}",
+            source_path=f"/stored/filler-{index}/SKILL.md",
+            body=f"# Filler {index}\n\nFiller content.\n",
+            headings=(f"Filler {index}",),
+        )
+        for index in range(1, rank)
+    ]
+    result = ContextRenderer(config).render(
+        [*fillers, candidate],
+        trace_id=trace_id,
+    )
+    assert len(result.skills) == rank
+    return result, result.skills[-1]
+
+
+def _candidate_with_skill_metadata(candidate: SkillCandidate, **updates):
+    metadata = copy.deepcopy(candidate.procedure.metadata)
+    metadata["skill"].update(updates)
+    procedure = replace(candidate.procedure, metadata=metadata)
+    return replace(candidate, procedure=procedure)
+
+
+@pytest.mark.parametrize(
+    (
+        "source_path",
+        "metadata_source_path",
+        "procedure_id",
+        "expected_identity",
+    ),
+    [
+        (
+            "/stored/primary/SKILL.md",
+            "/stored/metadata/SKILL.md",
+            "stable-id",
+            "path:/stored/primary/SKILL.md",
+        ),
+        (
+            None,
+            "/stored/metadata/SKILL.md",
+            "stable-id",
+            "path:/stored/metadata/SKILL.md",
+        ),
+        (None, None, "stable-id", "id:stable-id"),
+        (123, None, "stable-id", "id:stable-id"),
+        (None, 123, 456, None),
+        (None, None, "", None),
+    ],
+)
+def test_renderer_uses_stable_activation_identity(
+    source_path,
+    metadata_source_path,
+    procedure_id,
+    expected_identity,
+):
+    candidate = _renderer_candidate(
+        source_path=source_path,
+        metadata_source_path=metadata_source_path,
+        procedure_id=procedure_id,
+    )
+
+    result, rendered = _render_target(candidate)
+
+    assert rendered.identity == expected_identity
+    metadata = selected_skill_metadata(rendered)
+    assert metadata["identity"] == expected_identity
+    assert metadata["activation_fingerprint"] == rendered.activation_fingerprint
+    if expected_identity is None:
+        assert rendered.activation_fingerprint is None
+        assert "activation_identity_unavailable" in result.warnings
+    else:
+        assert len(rendered.activation_fingerprint or "") == 64
+        assert "activation_identity_unavailable" not in result.warnings
+
+
+def test_renderer_uses_metadata_path_when_primary_path_is_malformed():
+    candidate = _renderer_candidate(
+        source_path=123,
+        metadata_source_path="/stored/metadata/SKILL.md",
+        procedure_id="stable-id",
+    )
+
+    _result, rendered = _render_target(candidate)
+
+    assert rendered.identity == "path:/stored/metadata/SKILL.md"
+    assert 'source_path="/stored/metadata/SKILL.md"' in rendered.xml
+    assert selected_skill_metadata(rendered)["source_path"] == (
+        "/stored/metadata/SKILL.md"
+    )
+
+
+def test_pathless_activation_fingerprint_tracks_a_b_a_transitions():
+    rendered = []
+    for body, raw_sha in (
+        ("# Stable\n\nPayload A\n", "sha-a-first"),
+        ("# Stable\n\nPayload B\n", "sha-b"),
+        ("# Stable\n\nPayload A\n", "sha-a-second"),
+    ):
+        candidate = _renderer_candidate(
+            procedure_id="stable-pathless-id",
+            source_path=None,
+            metadata_source_path=None,
+            body=body,
+            headings=("Stable",),
+            sha256=raw_sha,
+        )
+        _result, skill = _render_target(candidate)
+        rendered.append(skill)
+
+    assert [skill.identity for skill in rendered] == [
+        "id:stable-pathless-id",
+        "id:stable-pathless-id",
+        "id:stable-pathless-id",
+    ]
+    fingerprints = [skill.activation_fingerprint for skill in rendered]
+    assert fingerprints[0] != fingerprints[1]
+    assert fingerprints[1] != fingerprints[2]
+    assert fingerprints[0] == fingerprints[2]
+
+
+@pytest.mark.parametrize(
+    "volatile_field",
+    [
+        "rank",
+        "score",
+        "reason",
+        "provenance",
+        "trust_state",
+        "trace_id",
+        "timestamps",
+        "prompt",
+        "raw_sha",
+        "rendering_format",
+    ],
+)
+def test_activation_fingerprint_excludes_volatile_fields(volatile_field):
+    base_candidate = _renderer_candidate()
+    base_config = _renderer_config()
+    base_trace = "trace-one"
+    changed_candidate = base_candidate
+    changed_config = copy.deepcopy(base_config)
+    changed_trace = base_trace
+    changed_rank = 1
+
+    if volatile_field == "rank":
+        changed_rank = 2
+    elif volatile_field == "score":
+        changed_candidate = replace(base_candidate, score=0.123)
+    elif volatile_field == "reason":
+        changed_candidate = replace(base_candidate, reason="another reason")
+    elif volatile_field == "provenance":
+        changed_candidate = replace(base_candidate, provenance="remote")
+    elif volatile_field == "trust_state":
+        changed_candidate = replace(base_candidate, trust_state="unknown")
+    elif volatile_field == "trace_id":
+        changed_trace = "trace-two"
+    elif volatile_field == "timestamps":
+        procedure = replace(
+            base_candidate.procedure,
+            created_at="1999-01-01T00:00:00",
+            updated_at="2099-01-01T00:00:00",
+        )
+        changed_candidate = replace(base_candidate, procedure=procedure)
+    elif volatile_field == "prompt":
+        changed_config["prompt"] = "an unrelated user prompt"
+    elif volatile_field == "raw_sha":
+        changed_candidate = _candidate_with_skill_metadata(
+            base_candidate,
+            sha256="a-new-raw-skill-sha",
+        )
+    elif volatile_field == "rendering_format":
+        changed_config["rendering"]["format"] = "arbitrary-config-format"
+
+    _base_result, base = _render_target(
+        base_candidate,
+        config=base_config,
+        trace_id=base_trace,
+    )
+    _changed_result, changed = _render_target(
+        changed_candidate,
+        config=changed_config,
+        trace_id=changed_trace,
+        rank=changed_rank,
+    )
+
+    assert changed.identity == base.identity
+    assert changed.activation_fingerprint == base.activation_fingerprint
+    if volatile_field == "rank":
+        assert changed.rank != base.rank
+        assert changed.xml != base.xml
+
+
+@pytest.mark.parametrize(
+    ("field", "changed_value"),
+    [
+        ("identity", "id:changed"),
+        ("name", "changed-name"),
+        ("source_path", "/changed/SKILL.md"),
+        ("trust_mode", "data"),
+        ("when_to_use", "Use for a changed task."),
+        ("headings", ("Changed heading",)),
+        ("content", "Changed content"),
+        ("truncated", True),
+    ],
+)
+def test_activation_fingerprint_includes_every_emitted_semantic_field(
+    field,
+    changed_value,
+):
+    semantics = skill_context_module._RenderedSkillSemantics(
+        identity="id:stable",
+        name="semantic-skill",
+        source_path="",
+        trust_mode="instruction",
+        when_to_use="Use for semantic tests.",
+        headings=("Semantic heading",),
+        content="Semantic content",
+        truncated=False,
+    )
+
+    baseline = skill_context_module._activation_fingerprint(semantics)
+    changed = skill_context_module._activation_fingerprint(
+        replace(semantics, **{field: changed_value})
+    )
+
+    assert changed != baseline
+
+
+def test_activation_fingerprint_uses_hard_coded_renderer_version(monkeypatch):
+    candidate = _renderer_candidate()
+    _result, before = _render_target(candidate)
+
+    monkeypatch.setattr(
+        skill_context_module,
+        "_ACTIVATION_FORMAT",
+        "selected_skills_xml_v1.activation_v2",
+    )
+    _result, after = _render_target(candidate)
+
+    assert after.xml == before.xml
+    assert after.activation_fingerprint != before.activation_fingerprint
+
+
+def test_activation_fingerprint_matches_canonical_unicode_semantics():
+    name = '技能 <& "quote"'
+    source_path = "/stored/技能<&/SKILL.md"
+    description = "使用 <xml> & data"
+    heading = "标题 <&"
+    body = "正文 <tag> & café 😀"
+    candidate = _renderer_candidate(
+        name=name,
+        source_path=source_path,
+        description=description,
+        headings=(heading,),
+        body=body,
+    )
+
+    _result, rendered = _render_target(candidate)
+
+    payload = {
+        "format": "selected_skills_xml_v1.activation_v1",
+        "identity": f"path:{source_path}",
+        "name": name,
+        "source_path": source_path,
+        "trust_mode": "instruction",
+        "when_to_use": description,
+        "headings": (heading,),
+        "content": body,
+        "truncated": False,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    assert rendered.activation_fingerprint == expected
+    assert 'name="技能 &lt;&amp; &quot;quote&quot;"' in rendered.xml
+    assert 'source_path="/stored/技能&lt;&amp;/SKILL.md"' in rendered.xml
+    assert "<heading>标题 &lt;&amp;</heading>" in rendered.xml
+    assert "正文 &lt;tag&gt; &amp; café 😀" in rendered.xml
+
+
+def test_renderer_keeps_unfingerprintable_unicode_skill_in_baseline():
+    candidate = _renderer_candidate(
+        body="# Unfingerprintable\n\nPayload with an unpaired surrogate: \ud800\n",
+        headings=("Unfingerprintable",),
+    )
+
+    result, rendered = _render_target(candidate)
+
+    assert result.skills == (rendered,)
+    assert rendered.xml in result.xml
+    assert "\ud800" in result.xml
+    assert rendered.identity == "path:/stored/renderer-skill/SKILL.md"
+    assert rendered.activation_fingerprint is None
+    assert selected_skill_metadata(rendered)["activation_fingerprint"] is None
+    assert "activation_fingerprint_unavailable" in result.warnings
+
+
+def test_empty_content_fallback_keeps_unfingerprintable_skill(monkeypatch):
+    candidate = _renderer_candidate(
+        name="fallback-\ud800",
+        body="fallback body " * 500,
+        headings=("Fallback",),
+    )
+    budget = 1_000
+    original_render_skill_xml = skill_context_module._render_skill_xml
+    render_calls = 0
+
+    def exhaust_iterative_render_budget(semantics, rank):
+        nonlocal render_calls
+        render_calls += 1
+        if render_calls <= 8:
+            return "x" * (budget + 1)
+        return original_render_skill_xml(semantics, rank)
+
+    monkeypatch.setattr(
+        skill_context_module,
+        "_render_skill_xml",
+        exhaust_iterative_render_budget,
+    )
+
+    render_result = skill_context_module._render_skill_with_budget(
+        candidate,
+        rank=1,
+        budget=budget,
+    )
+
+    assert render_result is not None
+    rendered, warnings = render_result
+    assert render_calls == 9
+    assert "fallback-\ud800" in rendered.xml
+    assert rendered.identity == "path:/stored/renderer-skill/SKILL.md"
+    assert rendered.activation_fingerprint is None
+    assert "activation_fingerprint_unavailable" in warnings
+
+
+def test_renderer_does_not_swallow_fingerprint_base_exceptions(monkeypatch):
+    def interrupt_fingerprint(_semantics):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        skill_context_module,
+        "_activation_fingerprint",
+        interrupt_fingerprint,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        _render_target(_renderer_candidate())
+
+
+def test_activation_fingerprint_uses_only_eight_emitted_headings():
+    headings = tuple(f"Heading {index}" for index in range(1, 10))
+    baseline_candidate = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=headings,
+    )
+    ninth_changed = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=(*headings[:8], "Changed ninth heading"),
+    )
+    eighth_changed = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=(*headings[:7], "Changed eighth heading", headings[8]),
+    )
+
+    _result, baseline = _render_target(baseline_candidate)
+    _result, after_ninth = _render_target(ninth_changed)
+    _result, after_eighth = _render_target(eighth_changed)
+
+    assert baseline.activation_fingerprint == after_ninth.activation_fingerprint
+    assert baseline.xml == after_ninth.xml
+    assert "<heading>Heading 8</heading>" in baseline.xml
+    assert "<heading>Heading 9</heading>" not in baseline.xml
+    assert baseline.activation_fingerprint != after_eighth.activation_fingerprint
+
+
+def test_activation_fingerprint_represents_fallback_heading_semantics():
+    fallback_candidate = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=(),
+    )
+    explicit_equivalent = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=("No headings indexed.",),
+    )
+    changed_heading = _renderer_candidate(
+        body="Body without parsed headings.",
+        headings=("A real heading",),
+    )
+
+    _result, fallback = _render_target(fallback_candidate)
+    _result, equivalent = _render_target(explicit_equivalent)
+    _result, changed = _render_target(changed_heading)
+
+    assert "<heading>No headings indexed.</heading>" in fallback.xml
+    assert fallback.xml == equivalent.xml
+    assert fallback.activation_fingerprint == equivalent.activation_fingerprint
+    assert fallback.activation_fingerprint != changed.activation_fingerprint
+
+
+def test_activation_fingerprint_ignores_undelivered_raw_tail():
+    common_prefix = "P" * 2_000
+    config = _renderer_config(max_chars_per_skill=600)
+    first_candidate = _renderer_candidate(
+        body=f"{common_prefix}TAIL-A",
+        sha256="tail-a-sha",
+    )
+    second_candidate = _renderer_candidate(
+        body=f"{common_prefix}TAIL-B",
+        sha256="tail-b-sha",
+    )
+
+    _result, first = _render_target(first_candidate, config=config)
+    _result, second = _render_target(second_candidate, config=config)
+
+    assert 'truncated="true"' in first.xml
+    assert first.xml == second.xml
+    assert first.activation_fingerprint == second.activation_fingerprint
+
+
+def test_activation_fingerprint_changes_at_truncation_boundary():
+    candidate = _renderer_candidate(
+        body="# Boundary\n\n" + "boundary content " * 40,
+        headings=("Boundary",),
+    )
+    _result, full = _render_target(candidate)
+    exact_config = _renderer_config(max_chars_per_skill=full.rendered_chars)
+    below_config = _renderer_config(max_chars_per_skill=full.rendered_chars - 1)
+
+    _result, exact = _render_target(candidate, config=exact_config)
+    _result, below = _render_target(candidate, config=below_config)
+
+    assert 'truncated="false"' in exact.xml
+    assert exact.xml == full.xml
+    assert exact.activation_fingerprint == full.activation_fingerprint
+    assert 'truncated="true"' in below.xml
+    assert below.activation_fingerprint != exact.activation_fingerprint
 
 
 def test_hook_input_and_config_map_to_skill_context_request(tmp_path):
