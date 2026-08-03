@@ -149,7 +149,7 @@ def seed_memflow_corpus(
         # This avoids deleting unrelated procedures from the same store.
         print("Clearing existing procedures...")
         try:
-            existing = memflow.store.list_all(user_id=user_id)
+            existing = memflow.store.list(user_id=user_id)
             deleted_count = 0
             for proc in existing:
                 if proc.id in corpus_ids:

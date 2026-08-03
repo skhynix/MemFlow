@@ -189,7 +189,7 @@ def main() -> None:
     memflow = MemFlow(sync_mode=args.sync)
 
     # Get corpus size from existing procedures
-    existing = memflow.store.list_all(user_id=args.user_id)
+    existing = memflow.store.list(user_id=args.user_id)
     corpus_size = len(list(existing))
 
     if corpus_size == 0:

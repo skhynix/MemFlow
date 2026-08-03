@@ -128,12 +128,12 @@ def _collect_corpus_ids(corpus_path: str | Path) -> set[str]:
 
 def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
     try:
-        return {proc.id for proc in memflow.store.list_all(user_id=user_id) if proc.id}
+        return {proc.id for proc in memflow.store.list(user_id=user_id) if proc.id}
     except Exception as exc:
         raise RuntimeError(
             "Failed to list existing procedures before WikiHow corpus reuse for "
             f"user_id={user_id!r}; refusing to seed because duplicate corpus IDs "
-            "could be created. Resolve the list_all error before rerunning; use "
+            "could be created. Resolve the list error before rerunning; use "
             "--clear-existing only for an intentional fresh reseed."
         ) from exc
 
@@ -171,7 +171,7 @@ def seed_wikihow_corpus(
     if clear_existing:
         print("Clearing existing WikiHow procedures...")
         corpus_ids = _collect_corpus_ids(corpus_path)
-        for proc in memflow.store.list_all(user_id=user_id):
+        for proc in memflow.store.list(user_id=user_id):
             if proc.id in corpus_ids:
                 memflow.store.delete(proc.id)
                 stats.num_deleted += 1

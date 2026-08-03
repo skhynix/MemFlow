@@ -55,7 +55,7 @@ class FakeStore:
         self.existing = existing or []
         self.deleted: list[str] = []
 
-    def list_all(
+    def list(
         self, user_id: str | None = None, kind: str | None = None
     ) -> list[Procedure]:
         procs = list(self.existing)
@@ -484,7 +484,7 @@ def test_seed_wikihow_corpus_raises_when_reuse_listing_fails(tmp_path) -> None:
     )
 
     class FailingStore(FakeStore):
-        def list_all(
+        def list(
             self, user_id: str | None = None, kind: str | None = None
         ) -> list[Procedure]:
             raise ValueError("store unavailable")
