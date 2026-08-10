@@ -50,7 +50,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memflow": {
         "env_file": ".env",
         "reuse_existing_config": True,
-        "store": "PgVectorStore",
+        # Informational only; the actual backend is selected by MEMFLOW_BACKEND
+        # in .env (read by MemFlow.__init__). No code reads this key today.
+        "store": "QdrantStore",
         "user_id": "default",
     },
     "claude": {
