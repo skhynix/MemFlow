@@ -56,6 +56,11 @@ from memflow.models import Procedure, SearchResult, procedure_search_text  # noq
 logger = logging.getLogger(__name__)
 
 
+def _id_to_uuid(id_str: str) -> str:
+    """Convert any string ID to a deterministic UUID for Qdrant point IDs."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, id_str))
+
+
 def _text_score(text: str, query: str) -> float:
     """Word-overlap relevance score in [0, 1]."""
     if not query.strip():
@@ -1511,7 +1516,7 @@ class QdrantStore(VectorStore):
         }
 
         point = models.PointStruct(
-            id=procedure.id, vector=emb, payload=payload
+            id=_id_to_uuid(procedure.id), vector=emb, payload=payload
         )
 
         self._client.upsert(collection_name=self._collection_name, points=[point])
@@ -1752,7 +1757,7 @@ class QdrantStore(VectorStore):
         try:
             points = self._client.retrieve(
                 collection_name=self._collection_name,
-                ids=[id],
+                ids=[_id_to_uuid(id)],
                 with_payload=True,
                 with_vectors=False,
             )
@@ -1789,7 +1794,7 @@ class QdrantStore(VectorStore):
                     return 0
                 self._client.delete(
                     collection_name=self._collection_name,
-                    points_selector=models.PointIdsList(points=[id]),
+                    points_selector=models.PointIdsList(points=[_id_to_uuid(id)]),
                 )
                 return 1
             except Exception:
