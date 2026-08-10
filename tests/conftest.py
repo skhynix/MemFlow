@@ -60,11 +60,21 @@ def clean_env():
         "MEMMACHINE_ORG_ID",
         "MEMMACHINE_PROJECT",
         "MEMMACHINE_API_KEY",
-        "PGVECTOR_BASE_URL",
-        "PGVECTOR_EMBEDDING_MODEL",
-        "PGVECTOR_EMBEDDING_API_BASE",
-        "PGVECTOR_EMBEDDING_API_KEY",
-        "PGVECTOR_EMBEDDING_DIMENSIONS",
+        # Vector DB embedding config (shared)
+        "VECTOR_EMBEDDING_MODEL",
+        "VECTOR_EMBEDDING_API_BASE",
+        "VECTOR_EMBEDDING_API_KEY",
+        "VECTOR_EMBEDDING_DIMENSIONS",
+        "VECTOR_EMBEDDING_MAX_TOKENS",
+        "VECTOR_EMBEDDING_QUERY_INSTRUCTION",
+        # Qdrant-specific
+        "QDRANT_BASE_URL",
+        "QDRANT_API_KEY",
+        "QDRANT_COLLECTION_NAME",
+        "QDRANT_INDEX_TYPE",
+        "QDRANT_INDEX_M",
+        "QDRANT_INDEX_EF_CONSTRUCT",
+        "QDRANT_DISTANCE",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:

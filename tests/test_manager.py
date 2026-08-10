@@ -949,15 +949,15 @@ class TestLoadEnvFile:
         with tempfile.TemporaryDirectory() as tmpdir:
             env_file = Path(tmpdir) / ".env"
             env_file.write_text(
-                "PGVECTOR_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
+                "VECTOR_EMBEDDING_API_BASE=http://10.78.59.136:8001/v1 # Required\n",
                 encoding="utf-8",
             )
 
-            os.environ.pop("PGVECTOR_EMBEDDING_API_BASE", None)
+            os.environ.pop("VECTOR_EMBEDDING_API_BASE", None)
             _load_env_file(str(env_file))
 
             assert (
-                os.environ.get("PGVECTOR_EMBEDDING_API_BASE")
+                os.environ.get("VECTOR_EMBEDDING_API_BASE")
                 == "http://10.78.59.136:8001/v1"
             )
 
