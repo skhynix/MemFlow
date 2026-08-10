@@ -227,28 +227,6 @@ class TestMemFlowFromEnv:
         assert manager is not None
 
     @patch("memflow.manager.LLMFactory")
-    @patch("memflow.manager.PgVectorStore")
-    def test_from_env_with_pgvector_backend(
-        self, mock_store_class, mock_factory, clean_env
-    ):
-        """Test initialization with use_env=True with pgvector backend."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        mock_store = MagicMock()
-        mock_store_class.return_value = mock_store
-
-        os.environ["MEMFLOW_BACKEND"] = "pgvector"
-        os.environ["PGVECTOR_BASE_URL"] = "postgresql://test:5432/testdb"
-        os.environ["PGVECTOR_EMBEDDING_API_BASE"] = "http://test-api:8000/v1"
-        os.environ["PGVECTOR_EMBEDDING_DIMENSIONS"] = "2560"
-
-        manager = MemFlow(use_env=True)
-
-        mock_store_class.assert_called_once()
-        assert manager.store == mock_store
-
-    @patch("memflow.manager.LLMFactory")
     def test_from_env_with_openai_provider(self, mock_factory, clean_env):
         """Test initialization with use_env=True with openai-compatible provider."""
         mock_llm = MagicMock()

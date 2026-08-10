@@ -3,13 +3,12 @@
 
 """Unit tests for MemFlow storage backends."""
 
-import logging
 import os
 import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -19,7 +18,6 @@ from memflow.store import (
     FileStore,
     MemMachineBypass,
     MemMachineStore,
-    PgVectorStore,
 )
 
 
@@ -564,140 +562,6 @@ class TestMemMachineStore:
         assert len(procs) == 2
         assert procs[0].title == "Proc 1"
         assert procs[1].title == "Proc 2"
-
-
-class TestPgVectorStore:
-    """Tests for PostgreSQL + pgvector store."""
-
-    def test_register_vector_called_on_init(self):
-        """Verify register_vector() is called in _init_db."""
-        with (
-            patch("memflow.store.register_vector") as mock_register,
-            patch("memflow.store.create_engine") as mock_create_engine,
-        ):
-            # Setup mock engine and connection
-            mock_engine = MagicMock()
-            mock_conn = MagicMock()
-            mock_raw_conn = MagicMock()
-
-            # Setup context manager
-            mock_engine.connect.return_value.__enter__.return_value = mock_conn
-            mock_conn.connection.dbapi_connection = mock_raw_conn
-
-            mock_create_engine.return_value = mock_engine
-
-            # Initialize PgVectorStore (register_vector should be called)
-            with patch.dict(
-                "os.environ",
-                {
-                    "PGVECTOR_EMBEDDING_API_BASE": "http://test-api",
-                    "PGVECTOR_EMBEDDING_DIMENSIONS": "2560",
-                    "PGVECTOR_TABLE_NAME": "procedures",
-                },
-            ):
-                PgVectorStore(base_url="postgresql://test:5432/testdb")
-
-            # Verify register_vector was called with raw_conn
-            mock_register.assert_called_once_with(mock_raw_conn)
-            executed_sql = "\n".join(
-                str(call.args[0]) for call in mock_conn.execute.call_args_list
-            )
-            assert "kind TEXT NOT NULL DEFAULT 'skill'" in executed_sql
-            assert "source_path TEXT" in executed_sql
-            assert "metadata JSONB NOT NULL DEFAULT '{}'" in executed_sql
-            assert "updated_at TEXT NOT NULL" in executed_sql
-            assert "idx_procedures_kind" in executed_sql
-            assert "idx_procedures_user_kind" in executed_sql
-            assert "idx_procedures_source_path" in executed_sql
-
-    def test_compute_emb_warns_on_hash_fallback(self, caplog):
-        """Test embedding failures are visible when fallback is used."""
-        store = object.__new__(PgVectorStore)
-        store._emb_model = "test-model"
-        store._emb_api_base = "http://test-api"
-        store._emb_api_key = "EMPTY"
-        store._emb_dim = 8
-
-        with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
-            with caplog.at_level(logging.WARNING, logger="memflow.store"):
-                emb = store._compute_emb("deploy service")
-
-        assert len(emb) == 8
-        assert "RuntimeError: boom" in caplog.text
-        assert "falling back to hash-based pseudo-embedding" in caplog.text
-
-    def test_to_text_uses_skill_search_text(self):
-        """Test PgVector embedding input uses skill-aware search text."""
-        store = object.__new__(PgVectorStore)
-        proc = Procedure(
-            title="commit-craft",
-            content="# Body",
-            metadata={
-                "skill": {
-                    "description": "Split commits",
-                    "aliases": ["patch series"],
-                }
-            },
-        )
-
-        text = store._to_text(proc)
-
-        assert "Split commits" in text
-        assert "patch series" in text
-
-    def test_insert_persists_expanded_fields(self):
-        """Test PgVector insert includes expanded Procedure fields."""
-        store = object.__new__(PgVectorStore)
-        mock_engine = MagicMock()
-        mock_conn = MagicMock()
-        mock_engine.connect.return_value.__enter__.return_value = mock_conn
-        store._engine = mock_engine
-        store._table_name = "procedures"
-        proc = Procedure(
-            id="skill-id",
-            title="commit-craft",
-            content="raw",
-            category="development",
-            tags=["git"],
-            source_path="/tmp/commit-craft/SKILL.md",
-            metadata={"skill": {"name": "commit-craft"}},
-            created_at="2026-06-01T10:00:00",
-            updated_at="2026-06-02T10:00:00",
-        )
-
-        store._insert_procedure(proc, [0.1, 0.2])
-
-        sql = str(mock_conn.execute.call_args.args[0])
-        params = mock_conn.execute.call_args.args[1]
-        assert "kind, source_path" in sql
-        assert params["kind"] == "skill"
-        assert params["source_path"] == "/tmp/commit-craft/SKILL.md"
-        assert params["metadata"] == '{"skill": {"name": "commit-craft"}}'
-        assert params["updated_at"] == "2026-06-02T10:00:00"
-
-    def test_procedure_from_row_round_trips_expanded_fields(self):
-        """Test PgVector row hydration restores expanded Procedure fields."""
-        row = SimpleNamespace(
-            id="skill-id",
-            user_id="default",
-            title="commit-craft",
-            content="raw",
-            category="development",
-            tags='["git"]',
-            kind="skill",
-            source_path="/tmp/commit-craft/SKILL.md",
-            metadata={"skill": {"name": "commit-craft"}},
-            created_at="2026-06-01T10:00:00",
-            updated_at="2026-06-02T10:00:00",
-        )
-
-        proc = PgVectorStore._procedure_from_row(row)
-
-        assert proc.tags == ["git"]
-        assert proc.kind == "skill"
-        assert proc.source_path == "/tmp/commit-craft/SKILL.md"
-        assert proc.metadata == {"skill": {"name": "commit-craft"}}
-        assert proc.updated_at == "2026-06-02T10:00:00"
 
 
 class TestMemMachineBypass:
