@@ -670,7 +670,7 @@ def test_wikihow_adapter_excludes_query_source_and_refills_top_k() -> None:
         memflow=memflow,
         user_id="bench-user",
         corpus_size=3,
-        backend="pgvector",
+        backend="qdrant",
         llm_provider="ollama",
         llm_model="test-model",
     )

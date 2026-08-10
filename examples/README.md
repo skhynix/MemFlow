@@ -40,7 +40,7 @@ cp .env.example .env
 
 Example `.env` file:
 ```bash
-# Backend: emulated | file | memmachine | pgvector
+# Backend: emulated | file | memmachine | qdrant
 MEMFLOW_BACKEND=emulated
 
 # LLM Configuration
