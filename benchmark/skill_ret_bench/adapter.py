@@ -6,14 +6,51 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator
 
 from memflow import MemFlow, Procedure
 
 SKILL_RET_CORPUS_SOURCE = "SkillRet"
+
+# Rough chars-per-token ratio for the char-based token estimate used when
+# truncating long skill texts before seeding. Qwen3 BPE averages ~3.5 chars
+# per token for English-ish content; we err on the low side so the truncation
+# point stays safely under the embedding server's context window.
+_CHARS_PER_TOKEN = 3.5
+
+
+def _resolve_max_text_tokens(explicit: int | None) -> int:
+    """Resolve the per-text token cap from arg, env, or default."""
+    if explicit is not None:
+        return explicit
+    for env_name in ("VECTOR_EMBEDDING_MAX_TOKENS",):
+        val = os.getenv(env_name)
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                pass
+    return 8192
+
+
+def _truncate_record_content(
+    record: SkillRetRecord, max_tokens: int
+) -> tuple[SkillRetRecord, bool]:
+    """Truncate ``record.content`` to ~``max_tokens`` if it exceeds the cap.
+
+    Returns ``(possibly_new_record, was_truncated)``. Char-based estimate;
+    truncation preserves the beginning of the skill (front matter + first
+    steps), which carries the most signal for retrieval.
+    """
+    max_chars = int(max_tokens * _CHARS_PER_TOKEN)
+    if len(record.content) <= max_chars:
+        return record, False
+    truncated = replace(record, content=record.content[:max_chars])
+    return truncated, True
 
 
 @dataclass
@@ -39,6 +76,7 @@ class CorpusSeedStats:
     num_reused: int = 0
     num_skipped: int = 0
     num_deleted: int = 0
+    num_truncated: int = 0
     category_counts: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -152,7 +190,7 @@ def skill_record_to_procedure(
     """Convert a SkillRet corpus record into a MemFlow Procedure.
 
     All SkillRet metadata is preserved in Procedure.metadata['skill']
-    for storage in PgVectorStore's JSONB column and inclusion in embeddings.
+    for storage in the vector store's payload/JSONB column and inclusion in embeddings.
     """
     normalized = (
         normalize_skill_ret_record(record) if isinstance(record, dict) else record
@@ -189,13 +227,16 @@ def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
         ) from exc
 
 
-def seed_skill_ret_corpus(
+async def seed_skill_ret_corpus(
     memflow: MemFlow,
     user_id: str,
     corpus_path: str | Path,
     clear_existing: bool = False,
     batch_size: int = 100,
     max_records: int | None = None,
+    max_workers: int = 12,
+    use_sync: bool = False,
+    max_text_tokens: int | None = None,
 ) -> CorpusSeedStats:
     """Seed SkillRet corpus into MemFlow using batch operations.
 
@@ -206,6 +247,15 @@ def seed_skill_ret_corpus(
         clear_existing: Whether to clear existing procedures first
         batch_size: Number of procedures to add in each batch
         max_records: Maximum number of records to seed (default: all)
+        max_workers: Max concurrent embedding/upsert requests (async mode only)
+        use_sync: Use synchronous ``memflow.add`` instead of ``memflow.add_async``
+            (ignores ``max_workers``)
+        max_text_tokens: Truncate each skill's content to roughly this many
+            tokens (char-based estimate, ~3.5 chars/token) before seeding.
+            Long texts sent whole to the batch embedding endpoint can exceed
+            the server's context window and stall the whole batch; truncating
+            up-front keeps every batch request within the safe limit. ``None``
+            (default) reads ``VECTOR_EMBEDDING_MAX_TOKENS`` from the environment, else 8192.
 
     Returns:
         CorpusSeedStats with seeding statistics
@@ -235,6 +285,7 @@ def seed_skill_ret_corpus(
         print(f"Reusing existing procedures by ID ({len(existing_ids)} available)")
 
     categories: Counter[str] = Counter()
+    max_tokens = _resolve_max_text_tokens(max_text_tokens)
     print("Streaming procedures from JSONL...")
 
     # Collect procedures to seed
@@ -250,16 +301,30 @@ def seed_skill_ret_corpus(
             stats.num_reused += 1
             continue
 
+        record, was_truncated = _truncate_record_content(record, max_tokens)
+        if was_truncated:
+            stats.num_truncated += 1
+
         procedure = skill_record_to_procedure(record, user_id=user_id)
         procedures_to_seed.append(procedure)
 
-        # Check max_records limit
-        if max_records is not None and len(procedures_to_seed) >= max_records:
-            break
-
         # Add in batches
         if len(procedures_to_seed) >= batch_size:
-            result = memflow.add(procedure=procedures_to_seed)
+            # Trim to remaining max_records budget to avoid over-seeding.
+            if max_records is not None:
+                remaining = max_records - stats.num_seeded
+                if remaining <= 0:
+                    break
+                if len(procedures_to_seed) > remaining:
+                    stats.num_skipped += len(procedures_to_seed) - remaining
+                    procedures_to_seed = procedures_to_seed[:remaining]
+            result = (
+                memflow.add(procedure=procedures_to_seed)
+                if use_sync
+                else await memflow.add_async(
+                    procedure=procedures_to_seed, max_workers=max_workers
+                )
+            )
             stats.num_seeded += result.get("num_seeded", 0)
             stats.num_skipped += result.get("num_skipped", 0)
             print(
@@ -269,9 +334,27 @@ def seed_skill_ret_corpus(
             )
             procedures_to_seed = []
 
+        # Check max_records limit against total seeded so far
+        if max_records is not None and stats.num_seeded >= max_records:
+            break
+
     # Add remaining procedures
     if procedures_to_seed:
-        result = memflow.add(procedure=procedures_to_seed)
+        # Trim to remaining max_records budget to avoid over-seeding.
+        if max_records is not None:
+            remaining = max_records - stats.num_seeded
+            if remaining <= 0:
+                pass
+            elif len(procedures_to_seed) > remaining:
+                stats.num_skipped += len(procedures_to_seed) - remaining
+                procedures_to_seed = procedures_to_seed[:remaining]
+        result = (
+            memflow.add(procedure=procedures_to_seed)
+            if use_sync
+            else await memflow.add_async(
+                procedure=procedures_to_seed, max_workers=max_workers
+            )
+        )
         stats.num_seeded += result.get("num_seeded", 0)
         stats.num_skipped += result.get("num_skipped", 0)
 

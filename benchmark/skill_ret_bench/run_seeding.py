@@ -24,6 +24,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import argparse  # noqa: E402
+import asyncio  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
@@ -95,6 +96,17 @@ def _parse_args() -> argparse.Namespace:
         help="Maximum number of records to seed (default: all)",
     )
     parser.add_argument(
+        "--max-text-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Truncate each skill's content to roughly this many tokens "
+            "(char-based estimate) before seeding, so long texts don't blow "
+            "past the embedding server's context window. Default: read "
+            "VECTOR_EMBEDDING_MAX_TOKENS from env, else 8192."
+        ),
+    )
+    parser.add_argument(
         "--results-dir",
         type=Path,
         default=DEFAULT_RESULTS_DIR,
@@ -129,6 +141,7 @@ def _print_summary(
     print(f"Reused: {seed_stats.get('num_reused', 0)}")
     print(f"Skipped: {seed_stats.get('num_skipped', 0)}")
     print(f"Deleted: {seed_stats.get('num_deleted', 0)}")
+    print(f"Truncated: {seed_stats.get('num_truncated', 0)}")
     print(f"Execution time: {execution_time:.3f}s")
 
 
@@ -155,13 +168,18 @@ def main() -> None:
 
     start = time.perf_counter()
 
-    seed_stats = seed_skill_ret_corpus(
-        memflow=memflow,
-        user_id=args.user_id,
-        corpus_path=args.corpus_path,
-        clear_existing=args.clear_existing,
-        batch_size=args.max_batches,
-        max_records=args.max_records,
+    seed_stats = asyncio.run(
+        seed_skill_ret_corpus(
+            memflow=memflow,
+            user_id=args.user_id,
+            corpus_path=args.corpus_path,
+            clear_existing=args.clear_existing,
+            batch_size=args.max_batches,
+            max_records=args.max_records,
+            max_workers=args.max_workers,
+            use_sync=args.sync,
+            max_text_tokens=args.max_text_tokens,
+        )
     )
 
     elapsed = time.perf_counter() - start
