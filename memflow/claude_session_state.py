@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 import time
 from dataclasses import dataclass
@@ -625,17 +626,18 @@ def _make_private_directories(path: Path) -> None:
     current = path
     while True:
         try:
-            if not current.is_dir():
-                if current.exists():
-                    raise NotADirectoryError(current)
-                raise FileNotFoundError(current)
-            break
+            current_mode = current.stat().st_mode
         except FileNotFoundError:
             missing.append(current)
             parent = current.parent
             if parent == current:
                 raise
             current = parent
+            continue
+
+        if not stat.S_ISDIR(current_mode):
+            raise NotADirectoryError(current)
+        break
 
     for directory in reversed(missing):
         try:

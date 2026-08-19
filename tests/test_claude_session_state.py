@@ -25,6 +25,7 @@ from memflow.claude_session_state import (
 )
 
 SESSION_ID = "raw-session-id-must-not-be-stored"
+CONCURRENCY_TEST_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def _activation(
@@ -103,7 +104,10 @@ def _record_worker(
     results,
 ) -> None:
     barrier.wait(timeout=10)
-    result = ClaudeSessionStateStore(state_dir).record_activations(
+    result = ClaudeSessionStateStore(
+        state_dir,
+        lock_timeout_seconds=CONCURRENCY_TEST_LOCK_TIMEOUT_SECONDS,
+    ).record_activations(
         SESSION_ID,
         [_activation(identity, fingerprint)],
         expected_generation=0,
@@ -113,7 +117,10 @@ def _record_worker(
 
 def _advance_worker(state_dir: str, barrier, results) -> None:
     barrier.wait(timeout=10)
-    result = ClaudeSessionStateStore(state_dir).advance_context_generation(
+    result = ClaudeSessionStateStore(
+        state_dir,
+        lock_timeout_seconds=CONCURRENCY_TEST_LOCK_TIMEOUT_SECONDS,
+    ).advance_context_generation(
         SESSION_ID,
         reason="future_compaction",
     )
@@ -122,7 +129,10 @@ def _advance_worker(state_dir: str, barrier, results) -> None:
 
 def _racing_record_worker(state_dir: str, barrier, results) -> None:
     barrier.wait(timeout=10)
-    result = ClaudeSessionStateStore(state_dir).record_activations(
+    result = ClaudeSessionStateStore(
+        state_dir,
+        lock_timeout_seconds=CONCURRENCY_TEST_LOCK_TIMEOUT_SECONDS,
+    ).record_activations(
         SESSION_ID,
         [_activation("path:/repo/raced/SKILL.md", "raced")],
         expected_generation=0,
@@ -255,6 +265,43 @@ def test_state_creation_preserves_preexisting_parent_permissions(tmp_path):
     assert result.status == "recorded"
     assert stat.S_IMODE(existing_parent.stat().st_mode) == 0o755
     assert stat.S_IMODE((existing_parent / "new").stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+
+
+def test_state_creation_accepts_concurrent_directory_creator(monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    store = ClaudeSessionStateStore(state_dir)
+    original_is_dir = Path.is_dir
+    original_stat = Path.stat
+    raced = False
+
+    def report_not_directory_after_concurrent_creation(path):
+        nonlocal raced
+        if path == state_dir and not raced:
+            raced = True
+            state_dir.mkdir(mode=0o700)
+            return False
+        return original_is_dir(path)
+
+    def create_directory_after_missing_observation(path, *args, **kwargs):
+        nonlocal raced
+        if path == state_dir and not raced:
+            raced = True
+            state_dir.mkdir(mode=0o700)
+            raise FileNotFoundError(state_dir)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", report_not_directory_after_concurrent_creation)
+    monkeypatch.setattr(Path, "stat", create_directory_after_missing_observation)
+
+    result = store.record_activations(
+        SESSION_ID,
+        [_activation("path:/repo/alpha/SKILL.md", "alpha")],
+        expected_generation=0,
+    )
+
+    assert raced is True
+    assert result.status == "recorded"
     assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
 
 
