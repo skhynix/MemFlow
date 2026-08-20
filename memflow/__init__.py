@@ -36,6 +36,7 @@ from memflow.store import (
     MemMachineBypass,
     MemMachineStore,
     PgVectorStore,
+    QdrantStore,
     VectorStore,
 )
 
@@ -72,6 +73,7 @@ __all__ = [
     "MemMachineStore",
     "MemMachineBypass",
     "PgVectorStore",
+    "QdrantStore",
     # Phase 3 components
     "LLMPlanner",
     "ToolRegistry",

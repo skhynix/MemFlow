@@ -8,6 +8,7 @@ EmulatedStore     — in-memory dict, word-overlap search (testing / demos)
 FileStore         — Markdown files on disk, word-overlap search (local dev)
 MemMachineStore   — MemMachine VectorDB, semantic search (production)
 VectorStore       — Abstract base for vector DB backends with embedding logic
+QdrantStore       — Qdrant vector DB, cosine/dot/euclid distance (production)
 PgVectorStore     — PostgreSQL + pgvector VectorDB, cosine similarity search (production)
 """
 
@@ -144,15 +145,13 @@ class BaseStore(ABC):
     @abstractmethod
     def list(self, user_id: str | None = None) -> list[Procedure]: ...
 
-    # Async methods - only PgVectorStore implements these
+    # Async methods - only QdrantStore implements these
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
     async def search_async(
         self,
@@ -162,18 +161,14 @@ class BaseStore(ABC):
         kind: str | None = "skill",
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
     async def delete_async(
         self,
         id: str | list[str],
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
 
 class EmulatedStore(BaseStore):
@@ -1252,6 +1247,586 @@ class VectorStore(BaseStore):
         if "\x00" in procedure.content:
             return replace(procedure, content=procedure.content.replace("\x00", ""))
         return procedure
+
+
+class QdrantStore(VectorStore):
+    """
+    Qdrant vector database backed store for procedural memory.
+
+    Qdrant vector DB implementation for procedural memory. Procedures are
+    stored as points with embeddings for semantic search using cosine
+    similarity.
+
+    Embeddings are computed via OpenAI-compatible API with hash-based fallback
+    (shared logic inherited from ``VectorStore``).
+
+    Collection schema (payload fields map to Procedure attributes):
+        id: point id (UUID string)
+        user_id: keyword (filterable)
+        title: text
+        content: text
+        category: text
+        tags: keyword array
+        kind: keyword (filterable)
+        source_path: text
+        metadata: json
+        created_at: text
+        updated_at: text
+        emb: dense vector of size emb_dim
+
+    Qdrant-specific environment variables:
+        QDRANT_BASE_URL              — Qdrant server URL
+        QDRANT_API_KEY               — Optional API key for secured clusters
+        QDRANT_COLLECTION_NAME       — Collection name (default: procedures)
+        QDRANT_INDEX_TYPE            — Index type: hnsw or flat (default: hnsw)
+        QDRANT_DISTANCE              — Distance metric: Cosine, Dot, or Euclid (default: Cosine)
+        QDRANT_INDEX_M               — HNSW max connections per layer (default: 16)
+        QDRANT_INDEX_EF_CONSTRUCT    — HNSW search depth during build (default: 100)
+
+    Embedding configuration (shared, read from VECTOR_* env):
+        VECTOR_EMBEDDING_MODEL       — Embedding model
+        VECTOR_EMBEDDING_API_BASE    — API base URL (required)
+        VECTOR_EMBEDDING_API_KEY     — API key for embedding endpoint
+        VECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
+        VECTOR_EMBEDDING_MAX_TOKENS  — Max tokens per chunk (optional, default 8192)
+        VECTOR_EMBEDDING_QUERY_INSTRUCTION — Query instruction prefix (optional)
+
+    Note:
+        VECTOR_EMBEDDING_API_BASE must be set via environment variable or
+        passed explicitly. No hardcoded default - use .env file or set
+        VECTOR_EMBEDDING_API_BASE before instantiating.
+    """
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        collection_name: str | None = None,
+        index_type: str | None = None,
+        distance: str | None = None,
+        hnsw_m: int | None = None,
+        hnsw_ef_construct: int | None = None,
+        emb_model: str | None = None,
+        emb_api_base: str | None = None,
+        emb_api_key: str | None = None,
+        emb_dim: int | None = None,
+        query_instruction: str | None = None,
+        emb_max_tokens: int | None = None,
+    ) -> None:
+        # Load Qdrant-specific config from QDRANT_* env when not provided
+        if base_url is None:
+            base_url = os.getenv("QDRANT_BASE_URL", "http://localhost:6333")
+        if api_key is None:
+            api_key = os.getenv("QDRANT_API_KEY")
+        if collection_name is None:
+            collection_name = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
+        if index_type is None:
+            index_type = os.getenv("QDRANT_INDEX_TYPE", "hnsw")
+        if distance is None:
+            distance = os.getenv("QDRANT_DISTANCE", "Cosine")
+        if hnsw_m is None:
+            hnsw_m = int(os.getenv("QDRANT_INDEX_M", "16"))
+        if hnsw_ef_construct is None:
+            hnsw_ef_construct = int(os.getenv("QDRANT_INDEX_EF_CONSTRUCT", "100"))
+
+        # Load embedding config from VECTOR_* env when not provided
+        if emb_model is None:
+            emb_model = os.getenv("VECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+        if emb_api_base is None:
+            emb_api_base = os.getenv("VECTOR_EMBEDDING_API_BASE")
+            if emb_api_base is None:
+                raise ValueError(
+                    "VECTOR_EMBEDDING_API_BASE must be set. "
+                    "Add to .env file or set environment variable."
+                )
+        if emb_api_key is None:
+            emb_api_key = os.getenv("VECTOR_EMBEDDING_API_KEY", "EMPTY")
+        if emb_dim is None:
+            emb_dim = int(os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "2560"))
+        if query_instruction is None:
+            query_instruction = os.getenv("VECTOR_EMBEDDING_QUERY_INSTRUCTION", "")
+        if emb_max_tokens is None:
+            env_max = os.getenv("VECTOR_EMBEDDING_MAX_TOKENS")
+            if env_max:
+                try:
+                    emb_max_tokens = int(env_max)
+                except ValueError:
+                    logger.warning(
+                        "Invalid VECTOR_EMBEDDING_MAX_TOKENS=%r, using default",
+                        env_max,
+                    )
+
+        # Initialize VectorStore with embedding config
+        super().__init__(
+            emb_model=emb_model,
+            emb_api_base=emb_api_base,
+            emb_api_key=emb_api_key,
+            emb_dim=emb_dim,
+            query_instruction=query_instruction,
+            emb_max_tokens=emb_max_tokens,
+        )
+
+        # Qdrant-specific attributes
+        self._base_url = base_url
+        self._api_key = api_key
+        self._collection_name = collection_name
+        self._index_type = index_type
+        self._distance = distance
+        self._hnsw_m = hnsw_m
+        self._hnsw_ef_construct = hnsw_ef_construct
+
+        self._client: Any = None
+        self._lock = threading.Lock()
+        self._init_collection()
+
+    # ------------------------------------------------------------------
+    # Collection initialization
+    # ------------------------------------------------------------------
+
+    def _init_collection(self) -> None:
+        """Initialize Qdrant client and collection."""
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError as exc:
+            raise ImportError(
+                "qdrant-client is required for QdrantStore. "
+                "Install with: uv sync --extra qdrant"
+            ) from exc
+
+        self._client = QdrantClient(url=self._base_url, api_key=self._api_key)
+
+        try:
+            from qdrant_client import models
+
+            # Map distance string to Qdrant Distance enum
+            distance_map = {
+                "Cosine": models.Distance.COSINE,
+                "Dot": models.Distance.DOT,
+                "Euclid": models.Distance.EUCLID,
+            }
+            distance_enum = distance_map.get(self._distance, models.Distance.COSINE)
+
+            # Create collection if it doesn't exist
+            if not self._client.collection_exists(self._collection_name):
+                vectors_config = models.VectorParams(
+                    size=self._emb_dim, distance=distance_enum
+                )
+
+                if self._index_type == "hnsw":
+                    hnsw_config = models.HnswConfigDiff(
+                        m=self._hnsw_m, ef_construct=self._hnsw_ef_construct
+                    )
+                    self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=vectors_config,
+                        hnsw_config=hnsw_config,
+                    )
+                else:
+                    # flat index — Qdrant default
+                    self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=vectors_config,
+                    )
+
+            # Create payload field indexes for efficient filtering
+            try:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name="user_id",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # Index may already exist
+            try:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name="kind",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # Index may already exist
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize Qdrant collection: {exc}"
+            ) from exc
+
+    def _to_text(self, procedure: Procedure) -> str:
+        """Convert procedure to text for embedding."""
+        return procedure_search_text(procedure)
+
+    # ------------------------------------------------------------------
+    # CRUD operations
+    # ------------------------------------------------------------------
+
+    def _point_to_procedure(self, point: Any) -> Procedure:
+        """Convert a Qdrant point to a Procedure object."""
+        payload = point.payload or {}
+
+        tags = payload.get("tags", [])
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except Exception:
+                tags = []
+        if not isinstance(tags, list):
+            tags = []
+
+        metadata = payload.get("metadata", {})
+        if isinstance(metadata, str):
+            metadata = _metadata_json(metadata)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        return Procedure(
+            id=payload.get("id", str(point.id)),
+            user_id=payload.get("user_id", "default"),
+            title=payload.get("title", ""),
+            content=payload.get("content", ""),
+            category=payload.get("category", "general"),
+            tags=tags or [],
+            kind=payload.get("kind", "skill"),
+            source_path=payload.get("source_path"),
+            metadata=metadata,
+            created_at=payload.get("created_at", ""),
+            updated_at=payload.get("updated_at", payload.get("created_at", "")),
+        )
+
+    def _upsert_point(self, procedure: Procedure, emb: list[float]) -> None:
+        """Upsert a procedure as a Qdrant point with pre-computed embedding."""
+        from qdrant_client import models
+
+        payload = {
+            "id": procedure.id,
+            "user_id": procedure.user_id,
+            "title": procedure.title,
+            "content": procedure.content,
+            "category": procedure.category,
+            "tags": procedure.tags,
+            "kind": procedure.kind,
+            "source_path": procedure.source_path,
+            "metadata": procedure.metadata,
+            "created_at": procedure.created_at,
+            "updated_at": procedure.updated_at,
+        }
+
+        point = models.PointStruct(
+            id=procedure.id, vector=emb, payload=payload
+        )
+
+        self._client.upsert(collection_name=self._collection_name, points=[point])
+
+    def add(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 10,
+    ) -> int:
+        """Add a procedure or procedures.
+
+        Args:
+            procedure: Single Procedure or list of Procedures
+            batch_size: Batch size for embedding API calls (default: 10)
+
+        Returns:
+            1 for single, number of inserted procedures for batch
+        """
+        if isinstance(procedure, list):
+            if not procedure:
+                return 0
+            procedure = [self._sanitize_content(proc) for proc in procedure]
+            texts = [self._to_text(proc) for proc in procedure]
+            embeddings = self._compute_embs_batch(texts, batch_size=batch_size)
+            num_inserted = 0
+            for proc, emb in zip(procedure, embeddings):
+                try:
+                    self._upsert_point(proc, emb)
+                    num_inserted += 1
+                except Exception:
+                    pass
+            return num_inserted
+        else:
+            procedure = self._sanitize_content(procedure)
+            text_content = self._to_text(procedure)
+            emb = self._compute_emb(text_content)
+            self._upsert_point(procedure, emb)
+            return 1
+
+    async def add_async(
+        self,
+        procedure: Procedure | list[Procedure],
+        batch_size: int = 10,
+        max_workers: int = 10,
+    ) -> int:
+        """Add a procedure or procedures asynchronously.
+
+        Args:
+            procedure: Single Procedure or list of Procedures
+            batch_size: Batch size for embedding API calls (default: 10)
+            max_workers: Max concurrent embedding requests (default: 10)
+
+        Returns:
+            1 for single, number of inserted procedures for batch
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(procedure, list):
+            if not procedure:
+                return 0
+            procedure = [self._sanitize_content(proc) for proc in procedure]
+            texts = [self._to_text(proc) for proc in procedure]
+            embeddings = await self._compute_embs_batch_async(
+                texts, batch_size, max_workers
+            )
+            semaphore = Semaphore(max_workers)
+
+            async def insert_single(proc: Procedure, emb: list[float]) -> int:
+                async with semaphore:
+                    try:
+                        await asyncio.to_thread(self._upsert_point, proc, emb)
+                        return 1
+                    except Exception:
+                        return 0
+
+            tasks = [
+                insert_single(proc, emb) for proc, emb in zip(procedure, embeddings)
+            ]
+            results = await asyncio.gather(*tasks)
+            return sum(results)
+        else:
+            procedure = self._sanitize_content(procedure)
+            text_content = self._to_text(procedure)
+            emb = await self._compute_emb_async(text_content)
+            self._upsert_point(procedure, emb)
+            return 1
+
+    def _search_with_emb(
+        self,
+        query_emb: list[float],
+        top_k: int,
+        user_id: str | None = None,
+        kind: str | None = "skill",
+    ) -> list[SearchResult]:
+        """Search using pre-computed query embedding."""
+        from qdrant_client import models
+
+        must = []
+        if user_id:
+            must.append(
+                models.FieldCondition(
+                    key="user_id", match=models.MatchValue(value=user_id)
+                )
+            )
+        if kind is not None:
+            must.append(
+                models.FieldCondition(key="kind", match=models.MatchValue(value=kind))
+            )
+        query_filter = models.Filter(must=must) if must else None
+
+        response = self._client.query_points(
+            collection_name=self._collection_name,
+            query=query_emb,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        return [
+            SearchResult(procedure=self._point_to_procedure(p), score=float(p.score))
+            for p in response.points
+        ]
+
+    def search(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        kind: str | None = "skill",
+        batch_size: int = 10,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search for procedures by semantic similarity.
+
+        Args:
+            query: Single query string or list of queries
+            top_k: Number of results per query
+            user_id: User ID for filtering
+            batch_size: Batch size for embedding API calls (default: 10) - QdrantStore only
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        if isinstance(query, list):
+            query_embs = self._compute_embs_batch(
+                query, batch_size=batch_size, is_query=True
+            )
+            results = []
+            for query_emb in query_embs:
+                search_results = self._search_with_emb(query_emb, top_k, user_id, kind)
+                results.append(search_results)
+            return results
+        else:
+            query_emb = self._compute_emb(query, is_query=True)
+            return self._search_with_emb(query_emb, top_k, user_id, kind)
+
+    async def search_async(
+        self,
+        query: str | list[str],
+        top_k: int = 5,
+        user_id: str | None = None,
+        kind: str | None = "skill",
+        batch_size: int = 10,
+        max_workers: int = 10,
+    ) -> list[SearchResult] | list[list[SearchResult]]:
+        """Search for procedures by semantic similarity asynchronously.
+
+        Args:
+            query: Single query string or list of queries
+            top_k: Number of results per query
+            user_id: User ID for filtering
+            batch_size: Batch size for embedding API calls (default: 10) - QdrantStore only
+            max_workers: Max concurrent requests (default: 10)
+
+        Returns:
+            Single list for single query, list of lists for batch
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(query, list):
+            query_embs = await self._compute_embs_batch_async(
+                query, batch_size=batch_size, max_workers=max_workers, is_query=True
+            )
+            semaphore = Semaphore(max_workers)
+
+            async def search_single(query_emb: list[float]) -> list[SearchResult]:
+                async with semaphore:
+                    return await asyncio.to_thread(
+                        self._search_with_emb, query_emb, top_k, user_id, kind
+                    )
+
+            tasks = [search_single(qe) for qe in query_embs]
+            return await asyncio.gather(*tasks)
+        else:
+            query_emb = await self._compute_emb_async(query, is_query=True)
+            return await asyncio.to_thread(
+                self._search_with_emb, query_emb, top_k, user_id, kind
+            )
+
+    async def delete_async(
+        self,
+        id: str | list[str],
+        max_workers: int = 50,
+    ) -> int:
+        """Delete a procedure or procedures asynchronously.
+
+        Args:
+            id: Single ID or list of IDs
+            max_workers: Max concurrent operations (default: 50)
+
+        Returns:
+            int: Number of procedures deleted
+        """
+        import asyncio
+        from asyncio import Semaphore
+
+        if isinstance(id, list):
+            semaphore = Semaphore(max_workers)
+
+            async def delete_single(i: str) -> int:
+                async with semaphore:
+                    try:
+                        return await asyncio.to_thread(self.delete, i)
+                    except Exception:
+                        return 0
+
+            tasks = [delete_single(i) for i in id]
+            results = await asyncio.gather(*tasks)
+            return sum(results)
+        else:
+            result = await asyncio.to_thread(self.delete, id)
+            return result
+
+    def get(self, id: str) -> Procedure | None:
+        """Get a procedure by ID."""
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection_name,
+                ids=[id],
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            return None
+
+        if not points:
+            return None
+
+        return self._point_to_procedure(points[0])
+
+    def delete(
+        self,
+        id: str | list[str],
+    ) -> int:
+        """Delete a procedure or procedures by ID.
+
+        Returns:
+            int: Number of procedures deleted
+        """
+        if isinstance(id, list):
+            num_deleted = 0
+            for i in id:
+                if self.delete(i):
+                    num_deleted += 1
+            return num_deleted
+        else:
+            try:
+                from qdrant_client import models
+
+                # Check existence first to return accurate count
+                existing = self.get(id)
+                if existing is None:
+                    return 0
+                self._client.delete(
+                    collection_name=self._collection_name,
+                    points_selector=models.PointIdsList(points=[id]),
+                )
+                return 1
+            except Exception:
+                return 0
+
+    def list(self, user_id: str | None = None) -> list[Procedure]:
+        """List all procedures, optionally filtered by user_id."""
+        from qdrant_client import models
+
+        must = []
+        if user_id:
+            must.append(
+                models.FieldCondition(
+                    key="user_id", match=models.MatchValue(value=user_id)
+                )
+            )
+        query_filter = models.Filter(must=must) if must else None
+
+        all_points = []
+        offset = None
+        limit = 256
+
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=query_filter,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            all_points.extend(results)
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return [self._point_to_procedure(p) for p in all_points]
 
 
 class PgVectorStore(BaseStore):
