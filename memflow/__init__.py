@@ -36,6 +36,7 @@ from memflow.store import (
     MemMachineBypass,
     MemMachineStore,
     PgVectorStore,
+    VectorStore,
 )
 
 __all__ = [
@@ -65,6 +66,7 @@ __all__ = [
     "OpenAICompatibleLLM",
     # Store
     "BaseStore",
+    "VectorStore",
     "EmulatedStore",
     "FileStore",
     "MemMachineStore",

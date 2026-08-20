@@ -7,6 +7,7 @@ Storage backends for MemFlow.
 EmulatedStore     — in-memory dict, word-overlap search (testing / demos)
 FileStore         — Markdown files on disk, word-overlap search (local dev)
 MemMachineStore   — MemMachine VectorDB, semantic search (production)
+VectorStore       — Abstract base for vector DB backends with embedding logic
 PgVectorStore     — PostgreSQL + pgvector VectorDB, cosine similarity search (production)
 """
 
@@ -39,6 +40,15 @@ DEFAULT_MAX_WORKERS = 48
 # estimation only — see _count_tokens. Chunk boundaries are approximate; quality
 # impact is bounded since chunks are mean-pooled before indexing.
 DEFAULT_EMBEDDING_MAX_TOKENS = 8192
+
+# Timeout (seconds) for a single embedding API request. Lowered from 300s so a
+# wedged/unresponsive embedding server doesn't stall the whole gather for 5
+# minutes — the per-text fallback (hash embedding) kicks in much sooner.
+EMBEDDING_REQUEST_TIMEOUT = float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "60"))
+
+# Max retry attempts for transient embedding API errors (connect/timeout/
+# 5xx). A failed text falls back to a hash/zero vector rather than stalling.
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "2"))
 
 from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
 
@@ -754,6 +764,494 @@ class MemMachineStore(BaseStore):
                 continue
             procs.append(proc)
         return procs
+
+
+class VectorStore(BaseStore):
+    """Abstract base for vector DB backends with embedding logic.
+
+    Owns embedding configuration (model, API base/key, dimensions, query
+    instruction, max tokens) and all embedding computation methods (chunking,
+    batch, async, hash fallback, mean pool, truncate dim).
+
+    Subclasses (QdrantStore, future PgVectorStore) pass embedding config
+    via ``super().__init__()``. CRUD operations remain abstract — subclasses
+    implement ``add``, ``search``, ``get``, ``delete``, ``list`` (and async
+    variants where supported) using the shared embedding helpers here.
+    """
+
+    def __init__(
+        self,
+        emb_model: str,
+        emb_api_base: str,
+        emb_api_key: str,
+        emb_dim: int,
+        query_instruction: str = "",
+        emb_max_tokens: int | None = None,
+    ) -> None:
+        self._emb_model = emb_model
+        self._emb_api_base = emb_api_base
+        self._emb_api_key = emb_api_key
+        self._emb_dim = emb_dim
+        self._query_instruction = query_instruction
+        self._emb_max_tokens = emb_max_tokens
+
+    # ------------------------------------------------------------------
+    # Embedding helpers
+    # ------------------------------------------------------------------
+
+    def _get_emb_config(self) -> dict:
+        return {
+            "api_base": self._emb_api_base,
+            "api_key": self._emb_api_key,
+            "model": self._emb_model,
+            "dim": self._emb_dim,
+        }
+
+    def _get_max_tokens(self) -> int:
+        """Get max tokens for the current embedding model.
+
+        Priority:
+        1. ``self._emb_max_tokens`` (set from ``VECTOR_EMBEDDING_MAX_TOKENS``)
+        2. ``DEFAULT_EMBEDDING_MAX_TOKENS`` (8192, matches Qwen3-Embedding-4B)
+        """
+        emb_max_tokens = getattr(self, "_emb_max_tokens", None)
+        if emb_max_tokens is not None:
+            return emb_max_tokens
+        return DEFAULT_EMBEDDING_MAX_TOKENS
+
+    def _count_tokens(self, text: str) -> int:
+        """Estimate token count in text.
+
+        Uses a character-based heuristic (~4 chars per token). This is an
+        approximation — chunk boundaries affect embedding quality since each
+        chunk is embedded independently then mean-pooled. For the default
+        Qwen3-Embedding-4B model the estimate is conservative; set
+        ``VECTOR_EMBEDDING_MAX_TOKENS`` explicitly to tune chunking frequency.
+        """
+        return len(text) // 4
+
+    def _compute_emb(
+        self, text: str, max_tokens: int | None = None, is_query: bool = False
+    ) -> list[float]:
+        """Compute embedding vector using OpenAI-compatible API.
+
+        For long texts exceeding max_tokens, splits into chunks,
+        embeds each chunk, and returns the mean embedding.
+        """
+        if is_query and self._query_instruction:
+            text = f"Instruct: {self._query_instruction}\nQuery: {text}"
+
+        if max_tokens is None:
+            max_tokens = self._get_max_tokens()
+
+        config = self._get_emb_config()
+
+        # Count tokens to check if chunking is needed
+        text_tokens = self._count_tokens(text)
+
+        # Split text into chunks if too long
+        if text_tokens <= max_tokens:
+            chunks = [text]
+        else:
+            logger.info(
+                "Text has %d tokens (max %d), splitting into chunks",
+                text_tokens,
+                max_tokens,
+            )
+            chunks = self._split_text_by_tokens(text, max_tokens)
+
+        if len(chunks) == 1:
+            # Single chunk - direct embedding
+            try:
+                return self._embed_chunk(chunks[0], config)
+            except Exception as exc:
+                logger.warning(
+                    "Embedding API failed (%s: %s); falling back to "
+                    "hash-based pseudo-embedding — search results will not "
+                    "be semantically meaningful until the endpoint is reachable.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return self._hash_emb(chunks[0], config["dim"])
+
+        # Multiple chunks - embed each and average
+        chunk_embeddings = []
+        for chunk in chunks:
+            try:
+                emb = self._embed_chunk(chunk, config)
+                chunk_embeddings.append(emb)
+            except Exception as exc:
+                logger.warning(
+                    "Chunk embedding failed (%s: %s); using zero vector for chunk.",
+                    type(exc).__name__,
+                    exc,
+                )
+                chunk_embeddings.append([0.0] * config["dim"])
+
+        # Mean pooling
+        return self._mean_pool(chunk_embeddings)
+
+    def _split_text_by_tokens(self, text: str, max_tokens: int) -> list[str]:
+        """Split long text into chunks by estimated token count.
+
+        Uses character-based token estimation (~4 chars/token) and splits at
+        sentence boundaries when possible. Chunk boundaries are approximate;
+        each chunk is embedded independently then mean-pooled, so boundary
+        placement has bounded impact on final embedding quality.
+        """
+        # Split by sentence endings first
+        sentences = re.split(r"(?<=[.!?।।\n])\s+", text)
+
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+
+        for sentence in sentences:
+            # Estimate tokens for this sentence
+            sentence_tokens = self._count_tokens(sentence)
+
+            if current_tokens + sentence_tokens > max_tokens and current_chunk:
+                # Start new chunk
+                chunks.append(" ".join(current_chunk))
+                current_chunk = [sentence]
+                current_tokens = sentence_tokens
+            else:
+                current_chunk.append(sentence)
+                current_tokens += sentence_tokens
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        # If any chunk still exceeds max_tokens, split by character estimate
+        # (fallback for very long sentences without punctuation)
+        final_chunks = []
+        chars_per_token = len(text) / max(1, self._count_tokens(text)) if text else 4
+        max_chars = int(max_tokens * chars_per_token)
+
+        for chunk in chunks:
+            if len(chunk) > max_chars:
+                # Hard split by characters
+                for i in range(0, len(chunk), max_chars):
+                    final_chunks.append(chunk[i : i + max_chars])
+            else:
+                final_chunks.append(chunk)
+
+        return final_chunks
+
+    def _embed_chunk(self, chunk: str, config: dict) -> list[float]:
+        """Embed a single chunk of text."""
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
+        payload = {
+            "model": config["model"],
+            "input": chunk,
+            "encoding_format": "float",
+        }
+
+        response = httpx.post(
+            url, headers=headers, json=payload, timeout=EMBEDDING_REQUEST_TIMEOUT
+        )
+        response.raise_for_status()
+        data = response.json()
+        emb = data["data"][0]["embedding"]
+        return self._truncate_dim(emb, config.get("dim"))
+
+    def _hash_emb(self, text: str, dim: int) -> list[float]:
+        """Generate a deterministic pseudo-embedding via hashing.
+
+        Word-aware fallback when the embedding API is unavailable: each word
+        contributes an MD5-derived vector so distinct vocabulary yields distinct
+        vectors, and the result is L2-normalized to match real embeddings.
+        """
+        emb = [0.0] * dim
+        words = text.lower().split()
+        for word in words:
+            word_hash = hashlib.md5(word.encode()).hexdigest()
+            for i in range(min(len(word_hash), dim)):
+                val = (int(word_hash[i % len(word_hash)], 16) - 8) / 8.0
+                emb[i] += val / max(len(words), 1)
+        norm = sum(x * x for x in emb) ** 0.5
+        if norm > 0:
+            emb = [x / norm for x in emb]
+        return emb
+
+    @staticmethod
+    def _mean_pool(embeddings: list[list[float]]) -> list[float]:
+        """Compute mean of multiple embedding vectors."""
+        if not embeddings:
+            return []
+        dim = len(embeddings[0])
+        result = [0.0] * dim
+        for emb in embeddings:
+            for i, val in enumerate(emb):
+                result[i] += val
+        for i in range(dim):
+            result[i] /= len(embeddings)
+        return result
+
+    @staticmethod
+    def _truncate_dim(emb: list[float], target_dim: int | None) -> list[float]:
+        """Truncate embedding to target_dim and L2-normalize (Matryoshka-style).
+
+        When the server returns a vector larger than target_dim, keep the first
+        target_dim components and renormalize. This avoids sending the
+        ``dimensions`` parameter (which can cause server-side load/queue issues)
+        while still producing a reduced-dimension embedding suitable for
+        cosine similarity.
+        """
+        if not target_dim or target_dim <= 0 or len(emb) <= target_dim:
+            return emb
+        truncated = emb[:target_dim]
+        norm = sum(x * x for x in truncated) ** 0.5
+        if norm > 0:
+            return [x / norm for x in truncated]
+        return truncated
+
+    async def _compute_emb_async(
+        self, text: str, max_tokens: int | None = None, is_query: bool = False
+    ) -> list[float]:
+        """Compute embedding vector asynchronously using httpx.AsyncClient.
+
+        For long texts exceeding max_tokens, splits into chunks,
+        embeds each chunk, and returns the mean embedding.
+        """
+        if is_query and self._query_instruction:
+            text = f"Instruct: {self._query_instruction}\nQuery: {text}"
+
+        if max_tokens is None:
+            max_tokens = self._get_max_tokens()
+
+        config = self._get_emb_config()
+
+        # Count tokens to check if chunking is needed
+        text_tokens = self._count_tokens(text)
+
+        # Split text into chunks if too long
+        if text_tokens <= max_tokens:
+            chunks = [text]
+        else:
+            logger.info(
+                "Text has %d tokens (max %d), splitting into chunks",
+                text_tokens,
+                max_tokens,
+            )
+            chunks = self._split_text_by_tokens(text, max_tokens)
+
+        if len(chunks) == 1:
+            try:
+                return await self._embed_chunk_async(chunks[0], config)
+            except Exception as exc:
+                logger.warning(
+                    "Async embedding API failed (%s: %s); falling back to "
+                    "hash-based pseudo-embedding — search results will not "
+                    "be semantically meaningful until the endpoint is reachable.",
+                    type(exc).__name__,
+                    exc,
+                )
+                return self._hash_emb(chunks[0], config["dim"])
+
+        # Multiple chunks - embed each sequentially and average
+        chunk_embeddings = []
+        for chunk in chunks:
+            try:
+                emb = await self._embed_chunk_async(chunk, config)
+                chunk_embeddings.append(emb)
+            except Exception as exc:
+                logger.warning(
+                    "Async chunk embedding failed (%s: %s); using zero vector for chunk.",
+                    type(exc).__name__,
+                    exc,
+                )
+                chunk_embeddings.append([0.0] * config["dim"])
+
+        return self._mean_pool(chunk_embeddings)
+
+    async def _embed_chunk_async(self, chunk: str, config: dict) -> list[float]:
+        """Embed a single chunk of text asynchronously.
+
+        Retries transient failures (connect/timeout/5xx) up to
+        ``EMBEDDING_MAX_RETRIES`` times. Non-transient errors (4xx) surface
+        immediately so the caller can fall back to a hash/zero vector.
+        """
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
+        payload = {
+            "model": config["model"],
+            "input": chunk,
+            "encoding_format": "float",
+        }
+
+        last_exc: Exception | None = None
+        for attempt in range(EMBEDDING_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=EMBEDDING_REQUEST_TIMEOUT,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                emb = data["data"][0]["embedding"]
+                return self._truncate_dim(emb, config.get("dim"))
+            except httpx.HTTPStatusError as exc:
+                # 4xx is not transient — don't retry.
+                if exc.response.status_code < 500:
+                    raise
+                last_exc = exc
+            except (
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                last_exc = exc
+
+        raise last_exc if last_exc else RuntimeError("embedding request failed")
+
+    async def _compute_embs_batch_async(
+        self,
+        texts: list[str],
+        batch_size: int = 50,
+        max_workers: int = 10,
+        is_query: bool = False,
+    ) -> list[list[float]]:
+        """Compute embeddings for multiple texts in parallel batches.
+
+        Uses batch API for efficiency, with semaphore to limit concurrent requests.
+        Reduced default max_workers from 50 to 10 to avoid overwhelming the embedding API.
+        """
+        if is_query and self._query_instruction:
+            texts = [f"Instruct: {self._query_instruction}\nQuery: {t}" for t in texts]
+
+        import asyncio
+        from asyncio import Semaphore
+
+        config = self._get_emb_config()
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
+
+        semaphore = Semaphore(max_workers)
+
+        async def compute_batch(batch: list[str]) -> list[list[float]]:
+            """Compute embeddings for a batch of texts using batch API."""
+            try:
+                async with semaphore:
+                    payload = {
+                        "model": config["model"],
+                        "input": batch,
+                        "encoding_format": "float",
+                    }
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            url,
+                            headers=headers,
+                            json=payload,
+                            timeout=EMBEDDING_REQUEST_TIMEOUT,
+                        )
+                    response.raise_for_status()
+                    data = response.json()
+                    return [
+                        self._truncate_dim(item["embedding"], config.get("dim"))
+                        for item in data["data"]
+                    ]
+            except Exception as exc:
+                logger.warning(
+                    "Async batch embedding API failed (%s: %s); falling back to individual embedding.",
+                    type(exc).__name__,
+                    exc,
+                )
+
+                # Fallback: compute individually in parallel, bounded by semaphore
+                async def _embed_one(text: str) -> list[float]:
+                    async with semaphore:
+                        return await self._compute_emb_async(text)
+
+                return await asyncio.gather(*(_embed_one(text) for text in batch))
+
+        # Process in batches for memory efficiency
+        all_embs = []
+        batch_tasks = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            batch_tasks.append(compute_batch(batch))
+
+        results = await asyncio.gather(*batch_tasks)
+        for batch_embs in results:
+            all_embs.extend(batch_embs)
+        return all_embs
+
+    def _compute_embs_batch(
+        self,
+        texts: list[str],
+        batch_size: int = 5,
+        is_query: bool = False,
+    ) -> list[list[float]]:
+        """Compute embeddings for multiple texts using batch API calls.
+
+        Groups texts into batches and sends each batch in a single API request
+        to reduce HTTP overhead. Falls back to per-text _compute_emb (which
+        handles chunking for long texts) when the batch API fails.
+        """
+        if is_query and self._query_instruction:
+            texts = [f"Instruct: {self._query_instruction}\nQuery: {t}" for t in texts]
+
+        config = self._get_emb_config()
+        url = config["api_base"].rstrip("/") + "/embeddings"
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
+
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            try:
+                payload = {
+                    "model": config["model"],
+                    "input": batch,
+                    "encoding_format": "float",
+                }
+                response = httpx.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=EMBEDDING_REQUEST_TIMEOUT,
+                )
+                response.raise_for_status()
+                data = response.json()
+                all_embeddings.extend(
+                    self._truncate_dim(item["embedding"], config.get("dim"))
+                    for item in data["data"]
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Batch embedding API failed (%s: %s); falling back to "
+                    "individual embedding.",
+                    type(exc).__name__,
+                    exc,
+                )
+                for text in batch:
+                    all_embeddings.append(self._compute_emb(text))
+        return all_embeddings
+
+    @staticmethod
+    def _sanitize_content(procedure: Procedure) -> Procedure:
+        """Strip NUL bytes from content so backend payload JSON accepts it.
+
+        NUL (0x00) characters break JSON serialization. Some upstream corpora
+        embed control bytes (e.g. in directory-tree blocks) that must be
+        removed before storage and embedding so both paths see the same
+        cleaned text.
+        """
+        if "\x00" in procedure.content:
+            return replace(procedure, content=procedure.content.replace("\x00", ""))
+        return procedure
 
 
 class PgVectorStore(BaseStore):
