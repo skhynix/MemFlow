@@ -9,6 +9,10 @@ services:
       - "${QDRANT_GRPC_PORT:-6334}:6334"
     environment:
       QDRANT__LOG_LEVEL: ${QDRANT_LOG_LEVEL:-INFO}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 524288
     volumes:
       - ./qdrant_data:/qdrant/storage
     healthcheck:
