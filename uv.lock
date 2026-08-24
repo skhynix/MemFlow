@@ -657,6 +657,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "qdrant-client" },
 ]
 
 [package.optional-dependencies]
@@ -672,9 +673,6 @@ ollama = [
 ]
 openai = [
     { name = "openai" },
-]
-qdrant = [
-    { name = "qdrant-client" },
 ]
 
 [package.dev-dependencies]
@@ -694,9 +692,9 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = "==1.18.0" },
+    { name = "qdrant-client", specifier = "==1.18.0" },
 ]
-provides-extras = ["benchmark", "ollama", "memmachine", "openai", "qdrant"]
+provides-extras = ["benchmark", "ollama", "memmachine", "openai"]
 
 [package.metadata.requires-dev]
 dev = [

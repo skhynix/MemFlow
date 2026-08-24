@@ -9,6 +9,7 @@ dependencies = [
     "prompt-toolkit>=3.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    "qdrant-client==1.18.0",
 ]
 
 [dependency-groups]
@@ -23,7 +24,6 @@ benchmark = ["kaggle>=1.6.0"]
 ollama = ["ollama>=0.6.1"]
 memmachine = ["memmachine-client>=0.3.0"]
 openai = ["openai>=2.30.0"]
-qdrant = ["qdrant-client==1.18.0"]
 
 [project.scripts]
 memflow = "memflow.cli:main"
