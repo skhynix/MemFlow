@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     from memflow.claude_setup import add_claude_subcommands
 
     add_claude_subcommands(claude)
+
+    skill = subparsers.add_parser("skill", help="manage skills in Qdrant")
+    from memflow.skill_cli import add_skill_subcommands
+
+    add_skill_subcommands(skill)
     return parser
 
 
@@ -570,7 +575,7 @@ def _run_chat_args(
 def _uses_legacy_chat_args(argv: list[str]) -> bool:
     if not argv:
         return True
-    if argv[0] in {"chat", "claude", "-h", "--help"}:
+    if argv[0] in {"chat", "claude", "skill", "-h", "--help"}:
         return False
     return True
 
@@ -579,11 +584,13 @@ def main(
     argv: Iterable[str] | None = None,
     *,
     stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
     manager_factory: Callable[[], "MemFlow"] | None = None,
     input_fn: Callable[[str], str] | None = None,
 ) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     out = stdout or sys.stdout
+    err = stderr or sys.stderr
     if _uses_legacy_chat_args(args_list):
         legacy_parser = _build_chat_parser()
         args = legacy_parser.parse_args(args_list)
@@ -603,6 +610,7 @@ def main(
     return handler(
         args,
         stdout=out,
+        stderr=err,
         manager_factory=manager_factory,
         input_fn=input_fn,
     )
