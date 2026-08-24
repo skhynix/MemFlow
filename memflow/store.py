@@ -7,7 +7,8 @@ Storage backends for MemFlow.
 EmulatedStore     — in-memory dict, word-overlap search (testing / demos)
 FileStore         — Markdown files on disk, word-overlap search (local dev)
 MemMachineStore   — MemMachine VectorDB, semantic search (production)
-PgVectorStore     — PostgreSQL + pgvector VectorDB, cosine similarity search (production)
+VectorStore       — Abstract base for vector DB backends with embedding logic
+QdrantStore       — Qdrant vector DB, cosine/dot/euclid distance (production)
 """
 
 from __future__ import annotations
@@ -26,10 +27,6 @@ from typing import Any
 
 import httpx
 
-# Register pgvector for proper vector type handling
-from pgvector.psycopg2 import register_vector
-from sqlalchemy import create_engine, text
-
 # Default constants for batch operations
 DEFAULT_MAX_BATCHES = 32
 DEFAULT_MAX_WORKERS = 48
@@ -40,9 +37,23 @@ DEFAULT_MAX_WORKERS = 48
 # impact is bounded since chunks are mean-pooled before indexing.
 DEFAULT_EMBEDDING_MAX_TOKENS = 8192
 
+# Timeout (seconds) for a single embedding API request. Lowered from 300s so a
+# wedged/unresponsive embedding server doesn't stall the whole gather for 5
+# minutes — the per-text fallback (hash embedding) kicks in much sooner.
+EMBEDDING_REQUEST_TIMEOUT = float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "60"))
+
+# Max retry attempts for transient embedding API errors (connect/timeout/
+# 5xx). A failed text falls back to a hash/zero vector rather than stalling.
+EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "2"))
+
 from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _id_to_uuid(id_str: str) -> str:
+    """Convert any string ID to a deterministic UUID for Qdrant point IDs."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, id_str))
 
 
 def _text_score(text: str, query: str) -> float:
@@ -134,15 +145,13 @@ class BaseStore(ABC):
     @abstractmethod
     def list(self, user_id: str | None = None) -> list[Procedure]: ...
 
-    # Async methods - only PgVectorStore implements these
+    # Async methods - only QdrantStore implements these
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
     async def search_async(
         self,
@@ -152,18 +161,14 @@ class BaseStore(ABC):
         kind: str | None = "skill",
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
     async def delete_async(
         self,
         id: str | list[str],
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
-        raise NotImplementedError(
-            "Async operations are only supported by PgVectorStore"
-        )
+        raise NotImplementedError("Async operations are only supported by QdrantStore")
 
 
 class EmulatedStore(BaseStore):
@@ -443,13 +448,11 @@ class MemMachineBypass:
         org_id: str = "default",
         project_id: str = "memflow",
         api_key: str | None = None,
-        pgvector_store: "PgVectorStore | None" = None,
     ) -> None:
         self._base_url = base_url
         self._org_id = org_id
         self._project_id = project_id
         self._api_key = api_key
-        self._pgvector_store = pgvector_store  # for procedural memory
         self._memory: Any = None
         self._lock = threading.Lock()
 
@@ -472,22 +475,8 @@ class MemMachineBypass:
 
     def add(self, content: str, memory_type: str, user_id: str) -> None:
         """Store content in MemMachine tagged with the given memory type."""
-        if memory_type == "procedural":
-            # Route procedural memory to PgVectorStore
-            if self._pgvector_store is not None:
-                proc = Procedure(
-                    id=str(uuid.uuid4()),
-                    title=f"Procedural: {user_id}",
-                    content=content,
-                    user_id=user_id,
-                    category="procedural",
-                    kind="procedure",
-                )
-                self._pgvector_store.add(proc)
-        else:
-            # Route episodic/semantic to MemMachine
-            meta = {"mm_type": memory_type, "user_id": user_id}
-            self._get_memory().add(content=content, metadata=meta)
+        meta = {"mm_type": memory_type, "user_id": user_id}
+        self._get_memory().add(content=content, metadata=meta)
 
 
 class MemMachineStore(BaseStore):
@@ -756,207 +745,40 @@ class MemMachineStore(BaseStore):
         return procs
 
 
-class PgVectorStore(BaseStore):
-    """
-    PostgreSQL + pgvector backed store for procedural memory.
+class VectorStore(BaseStore):
+    """Abstract base for vector DB backends with embedding logic.
 
-    PgVector's own VectorDB implementation, inspired by MemMachine's semantic memory.
-    Procedures are stored with embeddings for semantic search using cosine similarity.
+    Owns embedding configuration (model, API base/key, dimensions, query
+    instruction, max tokens) and all embedding computation methods (chunking,
+    batch, async, hash fallback, mean pool, truncate dim).
 
-    Embeddings are computed via OpenAI-compatible API with hash-based fallback.
-
-    Index limitation:
-        pgvector's ivfflat and hnsw indexes both support up to 2000 dimensions.
-        For embeddings with dim > 2000 (e.g., Qwen3-Embedding-4B at 2560 dim),
-        no index is created and sequential scan is used instead.
-        To use index, set PGVECTOR_EMBEDDING_DIMENSIONS <= 2000 or use a lower-dim model.
-
-    Schema:
-        CREATE TABLE IF NOT EXISTS <table_name> (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL DEFAULT 'default',
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            category TEXT NOT NULL DEFAULT 'general',
-            tags JSONB NOT NULL DEFAULT '[]',
-            kind TEXT NOT NULL DEFAULT 'skill',
-            source_path TEXT,
-            metadata JSONB NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            emb vector(2560)
-        );
-        CREATE INDEX IF NOT EXISTS idx_<table_name>_emb
-            ON <table_name> USING <index_type> (emb vector_cosine_ops);  -- only if dim <= 2000
-
-    Environment variables:
-        PGVECTOR_BASE_URL              — PostgreSQL URL
-        PGVECTOR_EMBEDDING_MODEL       — Embedding model
-        PGVECTOR_EMBEDDING_API_BASE    — API base URL (required)
-        PGVECTOR_EMBEDDING_API_KEY     — API key
-        PGVECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
-        PGVECTOR_TABLE_NAME            — Table name (default: procedures)
-        PGVECTOR_INDEX_TYPE            — Index type: ivfflat or hnsw (default: hnsw)
-
-    Note:
-        PGVECTOR_EMBEDDING_API_BASE must be set via environment variable or
-        passed explicitly. No hardcoded default - use .env file or set
-        PGVECTOR_EMBEDDING_API_BASE before instantiating.
+    Subclasses (QdrantStore) pass embedding config
+    via ``super().__init__()``. CRUD operations remain abstract — subclasses
+    implement ``add``, ``search``, ``get``, ``delete``, ``list`` (and async
+    variants where supported) using the shared embedding helpers here.
     """
 
     def __init__(
         self,
-        base_url: str | None = None,
-        emb_model: str | None = None,
-        emb_api_base: str | None = None,
-        emb_api_key: str | None = None,
-        emb_dim: int | None = None,
-        table_name: str | None = None,
-        index_type: str | None = None,
+        emb_model: str,
+        emb_api_base: str,
+        emb_api_key: str,
+        emb_dim: int,
+        query_instruction: str = "",
+        emb_max_tokens: int | None = None,
     ) -> None:
-        # Load from environment if not provided
-        if base_url is None:
-            base_url = os.getenv(
-                "PGVECTOR_BASE_URL",
-                "postgresql://pgvector:pgvector_password@localhost:5433/pgvector",
-            )
-        if emb_model is None:
-            emb_model = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
-        if emb_api_base is None:
-            emb_api_base = os.getenv("PGVECTOR_EMBEDDING_API_BASE")
-            if emb_api_base is None:
-                raise ValueError(
-                    "PGVECTOR_EMBEDDING_API_BASE must be set. "
-                    "Add to .env file or set environment variable."
-                )
-        if emb_api_key is None:
-            emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
-        if emb_dim is None:
-            emb_dim = int(os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560"))
-        if table_name is None:
-            table_name = os.getenv("PGVECTOR_TABLE_NAME", "procedures")
-        if index_type is None:
-            index_type = os.getenv("PGVECTOR_INDEX_TYPE", "hnsw")
-        self._base_url = base_url
         self._emb_model = emb_model
         self._emb_api_base = emb_api_base
         self._emb_api_key = emb_api_key
         self._emb_dim = emb_dim
-        self._table_name = table_name
-        self._index_type = index_type
+        self._query_instruction = query_instruction
+        self._emb_max_tokens = emb_max_tokens
 
-        self._engine: Any = None
-        self._lock = threading.Lock()
-        self._init_db()
-
-    def _init_db(self) -> None:
-        """Initialize database connection and tables."""
-        try:
-            engine = create_engine(self._base_url)
-            with engine.connect() as conn:
-                # First, create the vector extension
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                conn.commit()
-
-            # Register pgvector for proper vector type handling
-            # This must be done AFTER extension creation and on a fresh connection
-            with engine.connect() as conn:
-                raw_conn = conn.connection.dbapi_connection
-                if raw_conn is not None:
-                    register_vector(raw_conn)
-
-                # Create table with emb column
-                conn.execute(
-                    text(f"""
-                    CREATE TABLE IF NOT EXISTS {self._table_name} (
-                        id TEXT PRIMARY KEY,
-                        user_id TEXT NOT NULL DEFAULT 'default',
-                        title TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        category TEXT NOT NULL DEFAULT 'general',
-                        tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                        kind TEXT NOT NULL DEFAULT 'skill',
-                        source_path TEXT,
-                        metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        emb vector({self._emb_dim})
-                    )
-                """)
-                )
-
-                # Add missing columns if the table already exists (migration).
-                conn.execute(
-                    text(f"""
-                    ALTER TABLE {self._table_name}
-                    ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'skill'
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    ALTER TABLE {self._table_name}
-                    ADD COLUMN IF NOT EXISTS source_path TEXT
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    ALTER TABLE {self._table_name}
-                    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    ALTER TABLE {self._table_name}
-                    ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    ALTER TABLE {self._table_name}
-                    ADD COLUMN IF NOT EXISTS emb vector({self._emb_dim})
-                """)
-                )
-
-                conn.execute(
-                    text(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_kind
-                    ON {self._table_name} (kind)
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_user_kind
-                    ON {self._table_name} (user_id, kind)
-                """)
-                )
-                conn.execute(
-                    text(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_source_path
-                    ON {self._table_name} (source_path)
-                """)
-                )
-
-                # Create index for semantic search
-                # ivfflat: up to 2000 dimensions
-                # hnsw: also limited to 2000 dimensions in current pgvector
-                if self._emb_dim <= 2000:
-                    conn.execute(
-                        text(f"""
-                        CREATE INDEX IF NOT EXISTS idx_{self._table_name}_emb
-                        ON {self._table_name} USING {self._index_type} (emb vector_cosine_ops)
-                    """)
-                    )
-                # Skip index creation for dimensions > 2000 (sequential scan will be used)
-                conn.commit()
-
-            self._engine = engine
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to initialize PgVectorStore database: {e}"
-            ) from e
+    # ------------------------------------------------------------------
+    # Embedding helpers
+    # ------------------------------------------------------------------
 
     def _get_emb_config(self) -> dict:
-        """Get embedding API configuration."""
         return {
             "api_base": self._emb_api_base,
             "api_key": self._emb_api_key,
@@ -968,18 +790,12 @@ class PgVectorStore(BaseStore):
         """Get max tokens for the current embedding model.
 
         Priority:
-        1. PGVECTOR_EMBEDDING_MAX_TOKENS environment variable
-        2. DEFAULT_EMBEDDING_MAX_TOKENS (8192, matches Qwen3-Embedding-4B)
+        1. ``self._emb_max_tokens`` (set from ``VECTOR_EMBEDDING_MAX_TOKENS``)
+        2. ``DEFAULT_EMBEDDING_MAX_TOKENS`` (8192, matches Qwen3-Embedding-4B)
         """
-        env_max = os.getenv("PGVECTOR_EMBEDDING_MAX_TOKENS")
-        if env_max:
-            try:
-                return int(env_max)
-            except ValueError:
-                logger.warning(
-                    "Invalid PGVECTOR_EMBEDDING_MAX_TOKENS=%r, using default", env_max
-                )
-
+        emb_max_tokens = getattr(self, "_emb_max_tokens", None)
+        if emb_max_tokens is not None:
+            return emb_max_tokens
         return DEFAULT_EMBEDDING_MAX_TOKENS
 
     def _count_tokens(self, text: str) -> int:
@@ -989,16 +805,21 @@ class PgVectorStore(BaseStore):
         approximation — chunk boundaries affect embedding quality since each
         chunk is embedded independently then mean-pooled. For the default
         Qwen3-Embedding-4B model the estimate is conservative; set
-        PGVECTOR_EMBEDDING_MAX_TOKENS explicitly to tune chunking frequency.
+        ``VECTOR_EMBEDDING_MAX_TOKENS`` explicitly to tune chunking frequency.
         """
         return len(text) // 4
 
-    def _compute_emb(self, text: str, max_tokens: int | None = None) -> list[float]:
+    def _compute_emb(
+        self, text: str, max_tokens: int | None = None, is_query: bool = False
+    ) -> list[float]:
         """Compute embedding vector using OpenAI-compatible API.
 
         For long texts exceeding max_tokens, splits into chunks,
         embeds each chunk, and returns the mean embedding.
         """
+        if is_query and self._query_instruction:
+            text = f"Instruct: {self._query_instruction}\nQuery: {text}"
+
         if max_tokens is None:
             max_tokens = self._get_max_tokens()
 
@@ -1099,20 +920,22 @@ class PgVectorStore(BaseStore):
     def _embed_chunk(self, chunk: str, config: dict) -> list[float]:
         """Embed a single chunk of text."""
         url = config["api_base"].rstrip("/") + "/embeddings"
-        headers = {
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
         payload = {
             "model": config["model"],
             "input": chunk,
             "encoding_format": "float",
         }
 
-        response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        response = httpx.post(
+            url, headers=headers, json=payload, timeout=EMBEDDING_REQUEST_TIMEOUT
+        )
         response.raise_for_status()
         data = response.json()
-        return data["data"][0]["embedding"]
+        emb = data["data"][0]["embedding"]
+        return self._truncate_dim(emb, config.get("dim"))
 
     def _hash_emb(self, text: str, dim: int) -> list[float]:
         """Generate a deterministic pseudo-embedding via hashing.
@@ -1147,14 +970,34 @@ class PgVectorStore(BaseStore):
             result[i] /= len(embeddings)
         return result
 
+    @staticmethod
+    def _truncate_dim(emb: list[float], target_dim: int | None) -> list[float]:
+        """Truncate embedding to target_dim and L2-normalize (Matryoshka-style).
+
+        When the server returns a vector larger than target_dim, keep the first
+        target_dim components and renormalize. This avoids sending the
+        ``dimensions`` parameter (which can cause server-side load/queue issues)
+        while still producing a reduced-dimension embedding suitable for
+        cosine similarity.
+        """
+        if not target_dim or target_dim <= 0 or len(emb) <= target_dim:
+            return emb
+        truncated = emb[:target_dim]
+        norm = sum(x * x for x in truncated) ** 0.5
+        if norm > 0:
+            return [x / norm for x in truncated]
+        return truncated
+
     async def _compute_emb_async(
-        self, text: str, max_tokens: int | None = None
+        self, text: str, max_tokens: int | None = None, is_query: bool = False
     ) -> list[float]:
         """Compute embedding vector asynchronously using httpx.AsyncClient.
 
         For long texts exceeding max_tokens, splits into chunks,
         embeds each chunk, and returns the mean embedding.
         """
+        if is_query and self._query_instruction:
+            text = f"Instruct: {self._query_instruction}\nQuery: {text}"
 
         if max_tokens is None:
             max_tokens = self._get_max_tokens()
@@ -1205,46 +1048,73 @@ class PgVectorStore(BaseStore):
         return self._mean_pool(chunk_embeddings)
 
     async def _embed_chunk_async(self, chunk: str, config: dict) -> list[float]:
-        """Embed a single chunk of text asynchronously."""
+        """Embed a single chunk of text asynchronously.
+
+        Retries transient failures (connect/timeout/5xx) up to
+        ``EMBEDDING_MAX_RETRIES`` times. Non-transient errors (4xx) surface
+        immediately so the caller can fall back to a hash/zero vector.
+        """
         url = config["api_base"].rstrip("/") + "/embeddings"
-        headers = {
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
         payload = {
             "model": config["model"],
             "input": chunk,
             "encoding_format": "float",
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                url, headers=headers, json=payload, timeout=60.0
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["data"][0]["embedding"]
+        last_exc: Exception | None = None
+        for attempt in range(EMBEDDING_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=EMBEDDING_REQUEST_TIMEOUT,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                emb = data["data"][0]["embedding"]
+                return self._truncate_dim(emb, config.get("dim"))
+            except httpx.HTTPStatusError as exc:
+                # 4xx is not transient — don't retry.
+                if exc.response.status_code < 500:
+                    raise
+                last_exc = exc
+            except (
+                httpx.TimeoutException,
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                last_exc = exc
+
+        raise last_exc if last_exc else RuntimeError("embedding request failed")
 
     async def _compute_embs_batch_async(
         self,
         texts: list[str],
         batch_size: int = 50,
         max_workers: int = 10,
+        is_query: bool = False,
     ) -> list[list[float]]:
         """Compute embeddings for multiple texts in parallel batches.
 
         Uses batch API for efficiency, with semaphore to limit concurrent requests.
         Reduced default max_workers from 50 to 10 to avoid overwhelming the embedding API.
         """
+        if is_query and self._query_instruction:
+            texts = [f"Instruct: {self._query_instruction}\nQuery: {t}" for t in texts]
+
         import asyncio
         from asyncio import Semaphore
 
         config = self._get_emb_config()
         url = config["api_base"].rstrip("/") + "/embeddings"
-        headers = {
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
 
         semaphore = Semaphore(max_workers)
 
@@ -1259,11 +1129,17 @@ class PgVectorStore(BaseStore):
                     }
                     async with httpx.AsyncClient() as client:
                         response = await client.post(
-                            url, headers=headers, json=payload, timeout=120.0
+                            url,
+                            headers=headers,
+                            json=payload,
+                            timeout=EMBEDDING_REQUEST_TIMEOUT,
                         )
                     response.raise_for_status()
                     data = response.json()
-                    return [item["embedding"] for item in data["data"]]
+                    return [
+                        self._truncate_dim(item["embedding"], config.get("dim"))
+                        for item in data["data"]
+                    ]
             except Exception as exc:
                 logger.warning(
                     "Async batch embedding API failed (%s: %s); falling back to individual embedding.",
@@ -1294,6 +1170,7 @@ class PgVectorStore(BaseStore):
         self,
         texts: list[str],
         batch_size: int = 5,
+        is_query: bool = False,
     ) -> list[list[float]]:
         """Compute embeddings for multiple texts using batch API calls.
 
@@ -1301,12 +1178,14 @@ class PgVectorStore(BaseStore):
         to reduce HTTP overhead. Falls back to per-text _compute_emb (which
         handles chunking for long texts) when the batch API fails.
         """
+        if is_query and self._query_instruction:
+            texts = [f"Instruct: {self._query_instruction}\nQuery: {t}" for t in texts]
+
         config = self._get_emb_config()
         url = config["api_base"].rstrip("/") + "/embeddings"
-        headers = {
-            "Authorization": f"Bearer {config['api_key']}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = f"Bearer {config['api_key']}"
 
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), batch_size):
@@ -1317,10 +1196,18 @@ class PgVectorStore(BaseStore):
                     "input": batch,
                     "encoding_format": "float",
                 }
-                response = httpx.post(url, headers=headers, json=payload, timeout=120.0)
+                response = httpx.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=EMBEDDING_REQUEST_TIMEOUT,
+                )
                 response.raise_for_status()
                 data = response.json()
-                all_embeddings.extend(item["embedding"] for item in data["data"])
+                all_embeddings.extend(
+                    self._truncate_dim(item["embedding"], config.get("dim"))
+                    for item in data["data"]
+                )
             except Exception as exc:
                 logger.warning(
                     "Batch embedding API failed (%s: %s); falling back to "
@@ -1332,22 +1219,286 @@ class PgVectorStore(BaseStore):
                     all_embeddings.append(self._compute_emb(text))
         return all_embeddings
 
-    def _to_text(self, procedure: Procedure) -> str:
-        """Convert procedure to text for embedding."""
-        return procedure_search_text(procedure)
-
     @staticmethod
     def _sanitize_content(procedure: Procedure) -> Procedure:
-        """Strip NUL bytes from content so PostgreSQL text columns accept it.
+        """Strip NUL bytes from content so backend payload JSON accepts it.
 
-        PostgreSQL rejects strings containing NUL (0x00) characters with
-        ValueError. Some upstream corpora embed control bytes (e.g. in
-        directory-tree blocks) that must be removed before storage and
-        embedding so both paths see the same cleaned text.
+        NUL (0x00) characters break JSON serialization. Some upstream corpora
+        embed control bytes (e.g. in directory-tree blocks) that must be
+        removed before storage and embedding so both paths see the same
+        cleaned text.
         """
         if "\x00" in procedure.content:
             return replace(procedure, content=procedure.content.replace("\x00", ""))
         return procedure
+
+
+class QdrantStore(VectorStore):
+    """
+    Qdrant vector database backed store for procedural memory.
+
+    Qdrant vector DB implementation for procedural memory. Procedures are
+    stored as points with embeddings for semantic search using cosine
+    similarity.
+
+    Embeddings are computed via OpenAI-compatible API with hash-based fallback
+    (shared logic inherited from ``VectorStore``).
+
+    Collection schema (payload fields map to Procedure attributes):
+        id: point id (UUID string)
+        user_id: keyword (filterable)
+        title: text
+        content: text
+        category: text
+        tags: keyword array
+        kind: keyword (filterable)
+        source_path: text
+        metadata: json
+        created_at: text
+        updated_at: text
+        emb: dense vector of size emb_dim
+
+    Qdrant-specific environment variables:
+        QDRANT_BASE_URL              — Qdrant server URL
+        QDRANT_API_KEY               — Optional API key for secured clusters
+        QDRANT_COLLECTION_NAME       — Collection name (default: procedures)
+        QDRANT_INDEX_TYPE            — Index type: hnsw or flat (default: hnsw)
+        QDRANT_DISTANCE              — Distance metric: Cosine, Dot, or Euclid (default: Cosine)
+        QDRANT_INDEX_M               — HNSW max connections per layer (default: 16)
+        QDRANT_INDEX_EF_CONSTRUCT    — HNSW search depth during build (default: 100)
+
+    Embedding configuration (shared, read from VECTOR_* env):
+        VECTOR_EMBEDDING_MODEL       — Embedding model
+        VECTOR_EMBEDDING_API_BASE    — API base URL (required)
+        VECTOR_EMBEDDING_API_KEY     — API key for embedding endpoint
+        VECTOR_EMBEDDING_DIMENSIONS  — Embedding dimensions
+        VECTOR_EMBEDDING_MAX_TOKENS  — Max tokens per chunk (optional, default 8192)
+        VECTOR_EMBEDDING_QUERY_INSTRUCTION — Query instruction prefix (optional)
+
+    Note:
+        VECTOR_EMBEDDING_API_BASE must be set via environment variable or
+        passed explicitly. No hardcoded default - use .env file or set
+        VECTOR_EMBEDDING_API_BASE before instantiating.
+    """
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        collection_name: str | None = None,
+        index_type: str | None = None,
+        distance: str | None = None,
+        hnsw_m: int | None = None,
+        hnsw_ef_construct: int | None = None,
+        emb_model: str | None = None,
+        emb_api_base: str | None = None,
+        emb_api_key: str | None = None,
+        emb_dim: int | None = None,
+        query_instruction: str | None = None,
+        emb_max_tokens: int | None = None,
+    ) -> None:
+        # Load Qdrant-specific config from QDRANT_* env when not provided
+        if base_url is None:
+            base_url = os.getenv("QDRANT_BASE_URL", "http://localhost:6333")
+        if api_key is None:
+            api_key = os.getenv("QDRANT_API_KEY")
+        if collection_name is None:
+            collection_name = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
+        if index_type is None:
+            index_type = os.getenv("QDRANT_INDEX_TYPE", "hnsw")
+        if distance is None:
+            distance = os.getenv("QDRANT_DISTANCE", "Cosine")
+        if hnsw_m is None:
+            hnsw_m = int(os.getenv("QDRANT_INDEX_M", "16"))
+        if hnsw_ef_construct is None:
+            hnsw_ef_construct = int(os.getenv("QDRANT_INDEX_EF_CONSTRUCT", "100"))
+
+        # Load embedding config from VECTOR_* env when not provided
+        if emb_model is None:
+            emb_model = os.getenv("VECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+        if emb_api_base is None:
+            emb_api_base = os.getenv("VECTOR_EMBEDDING_API_BASE")
+            if emb_api_base is None:
+                raise ValueError(
+                    "VECTOR_EMBEDDING_API_BASE must be set. "
+                    "Add to .env file or set environment variable."
+                )
+        if emb_api_key is None:
+            emb_api_key = os.getenv("VECTOR_EMBEDDING_API_KEY", "EMPTY")
+        if emb_dim is None:
+            emb_dim = int(os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "2560"))
+        if query_instruction is None:
+            query_instruction = os.getenv("VECTOR_EMBEDDING_QUERY_INSTRUCTION", "")
+        if emb_max_tokens is None:
+            env_max = os.getenv("VECTOR_EMBEDDING_MAX_TOKENS")
+            if env_max:
+                try:
+                    emb_max_tokens = int(env_max)
+                except ValueError:
+                    logger.warning(
+                        "Invalid VECTOR_EMBEDDING_MAX_TOKENS=%r, using default",
+                        env_max,
+                    )
+
+        # Initialize VectorStore with embedding config
+        super().__init__(
+            emb_model=emb_model,
+            emb_api_base=emb_api_base,
+            emb_api_key=emb_api_key,
+            emb_dim=emb_dim,
+            query_instruction=query_instruction,
+            emb_max_tokens=emb_max_tokens,
+        )
+
+        # Qdrant-specific attributes
+        self._base_url = base_url
+        self._api_key = api_key
+        self._collection_name = collection_name
+        self._index_type = index_type
+        self._distance = distance
+        self._hnsw_m = hnsw_m
+        self._hnsw_ef_construct = hnsw_ef_construct
+
+        self._client: Any = None
+        self._lock = threading.Lock()
+        self._init_collection()
+
+    # ------------------------------------------------------------------
+    # Collection initialization
+    # ------------------------------------------------------------------
+
+    def _init_collection(self) -> None:
+        """Initialize Qdrant client and collection."""
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError as exc:
+            raise ImportError(
+                "qdrant-client is required for QdrantStore. "
+                "Install with: uv sync --extra qdrant"
+            ) from exc
+
+        self._client = QdrantClient(url=self._base_url, api_key=self._api_key)
+
+        try:
+            from qdrant_client import models
+
+            # Map distance string to Qdrant Distance enum
+            distance_map = {
+                "Cosine": models.Distance.COSINE,
+                "Dot": models.Distance.DOT,
+                "Euclid": models.Distance.EUCLID,
+            }
+            distance_enum = distance_map.get(self._distance, models.Distance.COSINE)
+
+            # Create collection if it doesn't exist
+            if not self._client.collection_exists(self._collection_name):
+                vectors_config = models.VectorParams(
+                    size=self._emb_dim, distance=distance_enum
+                )
+
+                if self._index_type == "hnsw":
+                    hnsw_config = models.HnswConfigDiff(
+                        m=self._hnsw_m, ef_construct=self._hnsw_ef_construct
+                    )
+                    self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=vectors_config,
+                        hnsw_config=hnsw_config,
+                    )
+                else:
+                    # flat index — Qdrant default
+                    self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=vectors_config,
+                    )
+
+            # Create payload field indexes for efficient filtering
+            try:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name="user_id",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # Index may already exist
+            try:
+                self._client.create_payload_index(
+                    collection_name=self._collection_name,
+                    field_name="kind",
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass  # Index may already exist
+
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize Qdrant collection: {exc}"
+            ) from exc
+
+    def _to_text(self, procedure: Procedure) -> str:
+        """Convert procedure to text for embedding."""
+        return procedure_search_text(procedure)
+
+    # ------------------------------------------------------------------
+    # CRUD operations
+    # ------------------------------------------------------------------
+
+    def _point_to_procedure(self, point: Any) -> Procedure:
+        """Convert a Qdrant point to a Procedure object."""
+        payload = point.payload or {}
+
+        tags = payload.get("tags", [])
+        if isinstance(tags, str):
+            try:
+                tags = json.loads(tags)
+            except Exception:
+                tags = []
+        if not isinstance(tags, list):
+            tags = []
+
+        metadata = payload.get("metadata", {})
+        if isinstance(metadata, str):
+            metadata = _metadata_json(metadata)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        return Procedure(
+            id=payload.get("id", str(point.id)),
+            user_id=payload.get("user_id", "default"),
+            title=payload.get("title", ""),
+            content=payload.get("content", ""),
+            category=payload.get("category", "general"),
+            tags=tags or [],
+            kind=payload.get("kind", "skill"),
+            source_path=payload.get("source_path"),
+            metadata=metadata,
+            created_at=payload.get("created_at", ""),
+            updated_at=payload.get("updated_at", payload.get("created_at", "")),
+        )
+
+    def _upsert_point(self, procedure: Procedure, emb: list[float]) -> None:
+        """Upsert a procedure as a Qdrant point with pre-computed embedding."""
+        from qdrant_client import models
+
+        payload = {
+            "id": procedure.id,
+            "user_id": procedure.user_id,
+            "title": procedure.title,
+            "content": procedure.content,
+            "category": procedure.category,
+            "tags": procedure.tags,
+            "kind": procedure.kind,
+            "source_path": procedure.source_path,
+            "metadata": procedure.metadata,
+            "created_at": procedure.created_at,
+            "updated_at": procedure.updated_at,
+        }
+
+        point = models.PointStruct(
+            id=_id_to_uuid(procedure.id), vector=emb, payload=payload
+        )
+
+        self._client.upsert(collection_name=self._collection_name, points=[point])
 
     def add(
         self,
@@ -1372,7 +1523,7 @@ class PgVectorStore(BaseStore):
             num_inserted = 0
             for proc, emb in zip(procedure, embeddings):
                 try:
-                    self._insert_procedure(proc, emb)
+                    self._upsert_point(proc, emb)
                     num_inserted += 1
                 except Exception:
                     pass
@@ -1381,7 +1532,7 @@ class PgVectorStore(BaseStore):
             procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = self._compute_emb(text_content)
-            self._insert_procedure(procedure, emb)
+            self._upsert_point(procedure, emb)
             return 1
 
     async def add_async(
@@ -1416,7 +1567,7 @@ class PgVectorStore(BaseStore):
             async def insert_single(proc: Procedure, emb: list[float]) -> int:
                 async with semaphore:
                     try:
-                        await asyncio.to_thread(self._insert_procedure, proc, emb)
+                        await asyncio.to_thread(self._upsert_point, proc, emb)
                         return 1
                     except Exception:
                         return 0
@@ -1430,76 +1581,8 @@ class PgVectorStore(BaseStore):
             procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = await self._compute_emb_async(text_content)
-            self._insert_procedure(procedure, emb)
+            self._upsert_point(procedure, emb)
             return 1
-
-    def _insert_procedure(self, procedure: Procedure, emb: list[float]) -> None:
-        """Insert a procedure with pre-computed embedding."""
-        emb_str = "[" + ",".join(str(v) for v in emb) + "]"
-
-        with self._engine.connect() as conn:
-            # Use CAST for the vector type - the ::vector syntax doesn't work with parameters
-            conn.execute(
-                text(f"""
-                INSERT INTO {self._table_name} (
-                    id, user_id, title, content, category, tags, kind, source_path,
-                    metadata, created_at, updated_at, emb
-                )
-                VALUES (
-                    :id, :user_id, :title, :content, :category, :tags, :kind,
-                    :source_path, :metadata, :created_at, :updated_at,
-                    CAST(:emb AS vector)
-                )
-                ON CONFLICT (id) DO UPDATE SET
-                    user_id = EXCLUDED.user_id,
-                    title = EXCLUDED.title,
-                    content = EXCLUDED.content,
-                    category = EXCLUDED.category,
-                    tags = EXCLUDED.tags,
-                    kind = EXCLUDED.kind,
-                    source_path = EXCLUDED.source_path,
-                    metadata = EXCLUDED.metadata,
-                    created_at = EXCLUDED.created_at,
-                    updated_at = EXCLUDED.updated_at,
-                    emb = EXCLUDED.emb
-            """),
-                {
-                    "id": procedure.id,
-                    "user_id": procedure.user_id,
-                    "title": procedure.title,
-                    "content": procedure.content,
-                    "category": procedure.category,
-                    "tags": json.dumps(procedure.tags),
-                    "kind": procedure.kind,
-                    "source_path": procedure.source_path,
-                    "metadata": json.dumps(procedure.metadata),
-                    "created_at": procedure.created_at,
-                    "updated_at": procedure.updated_at,
-                    "emb": emb_str,
-                },
-            )
-            conn.commit()
-
-    @staticmethod
-    def _procedure_from_row(row: Any) -> Procedure:
-        try:
-            tags = json.loads(row.tags) if isinstance(row.tags, str) else row.tags
-        except Exception:
-            tags = []
-
-        return Procedure(
-            id=row.id,
-            user_id=row.user_id,
-            title=row.title,
-            content=row.content,
-            category=row.category,
-            tags=tags or [],
-            kind=getattr(row, "kind", "skill") or "skill",
-            source_path=getattr(row, "source_path", None) or None,
-            metadata=_metadata_json(getattr(row, "metadata", {}) or {}),
-            created_at=row.created_at,
-            updated_at=getattr(row, "updated_at", "") or row.created_at,
-        )
 
     def _search_with_emb(
         self,
@@ -1509,39 +1592,34 @@ class PgVectorStore(BaseStore):
         kind: str | None = "skill",
     ) -> list[SearchResult]:
         """Search using pre-computed query embedding."""
-        emb_str = "[" + ",".join(str(v) for v in query_emb) + "]"
+        from qdrant_client import models
 
-        with self._engine.connect() as conn:
-            filters = []
-            params = {"emb": emb_str, "limit": top_k}
-            if user_id:
-                filters.append("user_id = :user_id")
-                params["user_id"] = user_id
-            if kind is not None:
-                filters.append("kind = :kind")
-                params["kind"] = kind
-            filter_clause = "AND " + " AND ".join(filters) if filters else ""
+        must = []
+        if user_id:
+            must.append(
+                models.FieldCondition(
+                    key="user_id", match=models.MatchValue(value=user_id)
+                )
+            )
+        if kind is not None:
+            must.append(
+                models.FieldCondition(key="kind", match=models.MatchValue(value=kind))
+            )
+        query_filter = models.Filter(must=must) if must else None
 
-            query_sql = text(f"""
-                SELECT
-                    id, user_id, title, content, category, tags, kind, source_path,
-                    metadata, created_at, updated_at,
-                       1 - (emb <=> CAST(:emb AS vector)) AS score
-                FROM {self._table_name}
-                WHERE TRUE {filter_clause}
-                ORDER BY emb <=> CAST(:emb AS vector)
-                LIMIT :limit
-            """)
+        response = self._client.query_points(
+            collection_name=self._collection_name,
+            query=query_emb,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
 
-            result = conn.execute(query_sql, params)
-            rows = result.fetchall()
-
-        results = []
-        for row in rows:
-            proc = self._procedure_from_row(row)
-            results.append(SearchResult(procedure=proc, score=float(row.score)))
-
-        return results
+        return [
+            SearchResult(procedure=self._point_to_procedure(p), score=float(p.score))
+            for p in response.points
+        ]
 
     def search(
         self,
@@ -1557,20 +1635,22 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
-            batch_size: Batch size for embedding API calls (default: 10) - PgVectorStore only
+            batch_size: Batch size for embedding API calls (default: 10) - QdrantStore only
 
         Returns:
             Single list for single query, list of lists for batch
         """
         if isinstance(query, list):
-            query_embs = self._compute_embs_batch(query, batch_size=batch_size)
+            query_embs = self._compute_embs_batch(
+                query, batch_size=batch_size, is_query=True
+            )
             results = []
             for query_emb in query_embs:
                 search_results = self._search_with_emb(query_emb, top_k, user_id, kind)
                 results.append(search_results)
             return results
         else:
-            query_emb = self._compute_emb(query)
+            query_emb = self._compute_emb(query, is_query=True)
             return self._search_with_emb(query_emb, top_k, user_id, kind)
 
     async def search_async(
@@ -1588,7 +1668,7 @@ class PgVectorStore(BaseStore):
             query: Single query string or list of queries
             top_k: Number of results per query
             user_id: User ID for filtering
-            batch_size: Batch size for embedding API calls (default: 10) - PgVectorStore only
+            batch_size: Batch size for embedding API calls (default: 10) - QdrantStore only
             max_workers: Max concurrent requests (default: 10)
 
         Returns:
@@ -1599,7 +1679,7 @@ class PgVectorStore(BaseStore):
 
         if isinstance(query, list):
             query_embs = await self._compute_embs_batch_async(
-                query, batch_size=batch_size, max_workers=max_workers
+                query, batch_size=batch_size, max_workers=max_workers, is_query=True
             )
             semaphore = Semaphore(max_workers)
 
@@ -1612,7 +1692,7 @@ class PgVectorStore(BaseStore):
             tasks = [search_single(qe) for qe in query_embs]
             return await asyncio.gather(*tasks)
         else:
-            query_emb = await self._compute_emb_async(query)
+            query_emb = await self._compute_emb_async(query, is_query=True)
             return await asyncio.to_thread(
                 self._search_with_emb, query_emb, top_k, user_id, kind
             )
@@ -1653,22 +1733,20 @@ class PgVectorStore(BaseStore):
 
     def get(self, id: str) -> Procedure | None:
         """Get a procedure by ID."""
-        with self._engine.connect() as conn:
-            result = conn.execute(
-                text(f"""
-                SELECT
-                    id, user_id, title, content, category, tags, kind, source_path,
-                    metadata, created_at, updated_at
-                FROM {self._table_name} WHERE id = :id
-            """),
-                {"id": id},
+        try:
+            points = self._client.retrieve(
+                collection_name=self._collection_name,
+                ids=[_id_to_uuid(id)],
+                with_payload=True,
+                with_vectors=False,
             )
-            row = result.fetchone()
-
-        if row is None:
+        except Exception:
             return None
 
-        return self._procedure_from_row(row)
+        if not points:
+            return None
+
+        return self._point_to_procedure(points[0])
 
     def delete(
         self,
@@ -1687,40 +1765,49 @@ class PgVectorStore(BaseStore):
             return num_deleted
         else:
             try:
-                with self._engine.connect() as conn:
-                    result = conn.execute(
-                        text(f"""
-                        DELETE FROM {self._table_name} WHERE id = :id
-                    """),
-                        {"id": id},
-                    )
-                    conn.commit()
-                    return result.rowcount
+                from qdrant_client import models
+
+                # Check existence first to return accurate count
+                existing = self.get(id)
+                if existing is None:
+                    return 0
+                self._client.delete(
+                    collection_name=self._collection_name,
+                    points_selector=models.PointIdsList(points=[_id_to_uuid(id)]),
+                )
+                return 1
             except Exception:
                 return 0
 
     def list(self, user_id: str | None = None) -> list[Procedure]:
         """List all procedures, optionally filtered by user_id."""
-        with self._engine.connect() as conn:
-            if user_id:
-                result = conn.execute(
-                    text(f"""
-                    SELECT
-                        id, user_id, title, content, category, tags, kind, source_path,
-                        metadata, created_at, updated_at
-                    FROM {self._table_name} WHERE user_id = :user_id
-                """),
-                    {"user_id": user_id},
-                )
-            else:
-                result = conn.execute(
-                    text(f"""
-                    SELECT
-                        id, user_id, title, content, category, tags, kind, source_path,
-                        metadata, created_at, updated_at
-                    FROM {self._table_name}
-                """),
-                )
-            rows = result.fetchall()
+        from qdrant_client import models
 
-        return [self._procedure_from_row(row) for row in rows]
+        must = []
+        if user_id:
+            must.append(
+                models.FieldCondition(
+                    key="user_id", match=models.MatchValue(value=user_id)
+                )
+            )
+        query_filter = models.Filter(must=must) if must else None
+
+        all_points = []
+        offset = None
+        limit = 256
+
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=query_filter,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            all_points.extend(results)
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return [self._point_to_procedure(p) for p in all_points]

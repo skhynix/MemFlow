@@ -49,7 +49,7 @@ from memflow.store import (
     FileStore,
     MemMachineBypass,
     MemMachineStore,
-    PgVectorStore,
+    QdrantStore,
 )
 
 
@@ -248,13 +248,17 @@ class MemFlow:
         LLM_MODEL                 — Model name
         LLM_API_BASE              — LLM server URL
         LLM_API_KEY               — API key for authenticated endpoints
-        MEMFLOW_BACKEND           — Storage backend: emulated | file | memmachine | pgvector
+        MEMFLOW_BACKEND           — Storage backend: emulated | file | memmachine | qdrant
         MEMFLOW_FILE_DIR          — File directory for FileStore
-        PGVECTOR_BASE_URL         — PostgreSQL URL for PgVectorStore
-        PGVECTOR_EMBEDDING_MODEL  — Embedding model
-        PGVECTOR_EMBEDDING_API_BASE — Embedding API base URL
-        PGVECTOR_EMBEDDING_API_KEY  — Embedding API key
-        PGVECTOR_EMBEDDING_DIMENSIONS — Embedding dimensions
+        VECTOR_EMBEDDING_MODEL    — Embedding model (shared across vector backends)
+        VECTOR_EMBEDDING_API_BASE — Embedding API base URL (shared, required for qdrant)
+        VECTOR_EMBEDDING_API_KEY  — Embedding API key (shared)
+        VECTOR_EMBEDDING_DIMENSIONS — Embedding dimensions (shared)
+        QDRANT_BASE_URL           — Qdrant server URL for QdrantStore
+        QDRANT_API_KEY            — Qdrant API key (optional, for secured clusters)
+        QDRANT_COLLECTION_NAME    — Qdrant collection name
+        QDRANT_INDEX_TYPE         — Index type: hnsw or flat
+        QDRANT_DISTANCE           — Distance metric: Cosine, Dot, or Euclid
         MEMMACHINE_BASE_URL       — MemMachine server URL
         MEMMACHINE_ORG_ID         — MemMachine organization ID
         MEMMACHINE_PROJECT        — MemMachine project ID
@@ -293,8 +297,8 @@ class MemFlow:
         # Determine backend: explicit store type takes priority, then .env, then default
         if store_provided:
             # Infer backend from explicitly provided store type
-            if isinstance(store, PgVectorStore):
-                backend = "pgvector"
+            if isinstance(store, QdrantStore):
+                backend = "qdrant"
             elif isinstance(store, MemMachineStore):
                 backend = "memmachine"
             elif isinstance(store, FileStore):
@@ -318,7 +322,10 @@ class MemFlow:
             )
 
         # Storage Backend
-        backend = os.getenv("MEMFLOW_BACKEND", "emulated")
+        # Only read MEMFLOW_BACKEND from env when a store wasn't explicitly
+        # provided, so the isinstance inference above takes effect.
+        if not store_provided:
+            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
         file_dir = os.getenv("MEMFLOW_FILE_DIR", "./file_data")
 
         # MemMachine Configuration
@@ -327,17 +334,20 @@ class MemFlow:
         mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
         mm_key = os.getenv("MEMMACHINE_API_KEY")
 
-        # PgVector Store Configuration
-        pg_url = os.getenv(
-            "PGVECTOR_BASE_URL",
-            "postgresql://pgvector:pgvector_password@localhost:5433/pgvector",
-        )
-        pg_emb = os.getenv("PGVECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
-        pg_emb_api_base = os.getenv(
-            "PGVECTOR_EMBEDDING_API_BASE"
-        )  # No default - must be set
-        pg_emb_api_key = os.getenv("PGVECTOR_EMBEDDING_API_KEY", "EMPTY")
-        pg_emb_dim = os.getenv("PGVECTOR_EMBEDDING_DIMENSIONS", "2560")
+        # Vector DB embedding configuration (shared across vector backends)
+        vd_emb_model = os.getenv("VECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
+        vd_emb_api_base = os.getenv("VECTOR_EMBEDDING_API_BASE")
+        vd_emb_api_key = os.getenv("VECTOR_EMBEDDING_API_KEY", "EMPTY")
+        vd_emb_dim = os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "2560")
+
+        # Qdrant Store Configuration
+        qd_url = os.getenv("QDRANT_BASE_URL", "http://localhost:6333")
+        qd_api_key = os.getenv("QDRANT_API_KEY")
+        qd_collection = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
+        qd_index_type = os.getenv("QDRANT_INDEX_TYPE", "hnsw")
+        qd_distance = os.getenv("QDRANT_DISTANCE", "Cosine")
+        qd_index_m = os.getenv("QDRANT_INDEX_M", "16")
+        qd_index_ef = os.getenv("QDRANT_INDEX_EF_CONSTRUCT", "100")
 
         if not store_provided and use_env:
             if backend == "file":
@@ -346,27 +356,30 @@ class MemFlow:
                 store = MemMachineStore(
                     base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
                 )
-            elif backend == "pgvector":
-                store = PgVectorStore(
-                    base_url=pg_url,
-                    emb_model=pg_emb,
-                    emb_api_base=pg_emb_api_base,
-                    emb_api_key=pg_emb_api_key,
-                    emb_dim=int(pg_emb_dim),
+            elif backend == "qdrant":
+                store = QdrantStore(
+                    base_url=qd_url,
+                    api_key=qd_api_key,
+                    collection_name=qd_collection,
+                    index_type=qd_index_type,
+                    distance=qd_distance,
+                    hnsw_m=int(qd_index_m),
+                    hnsw_ef_construct=int(qd_index_ef),
+                    emb_model=vd_emb_model,
+                    emb_api_base=vd_emb_api_base,
+                    emb_api_key=vd_emb_api_key,
+                    emb_dim=int(vd_emb_dim),
                 )
             else:
                 store = EmulatedStore()
 
-        if not bypass_provided and use_env and backend in ("memmachine", "pgvector"):
-            bypass_kwargs = {
-                "base_url": mm_url,
-                "org_id": mm_org,
-                "project_id": mm_proj,
-                "api_key": mm_key,
-            }
-            if backend == "pgvector" and store is not None:
-                bypass_kwargs["pgvector_store"] = store
-            bypass = MemMachineBypass(**bypass_kwargs)
+        if not bypass_provided and use_env and backend == "memmachine":
+            bypass = MemMachineBypass(
+                base_url=mm_url,
+                org_id=mm_org,
+                project_id=mm_proj,
+                api_key=mm_key,
+            )
 
         self.llm = llm
         self.store = store or EmulatedStore()

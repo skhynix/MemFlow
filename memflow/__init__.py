@@ -35,7 +35,8 @@ from memflow.store import (
     FileStore,
     MemMachineBypass,
     MemMachineStore,
-    PgVectorStore,
+    QdrantStore,
+    VectorStore,
 )
 
 __all__ = [
@@ -65,11 +66,12 @@ __all__ = [
     "OpenAICompatibleLLM",
     # Store
     "BaseStore",
+    "VectorStore",
     "EmulatedStore",
     "FileStore",
     "MemMachineStore",
     "MemMachineBypass",
-    "PgVectorStore",
+    "QdrantStore",
     # Phase 3 components
     "LLMPlanner",
     "ToolRegistry",

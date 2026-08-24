@@ -1,0 +1,23 @@
+services:
+  # Qdrant vector database for QdrantStore backend
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ${QDRANT_NAME:-memflow-qdrant}
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    environment:
+      QDRANT__LOG_LEVEL: ${QDRANT_LOG_LEVEL:-INFO}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 524288
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && echo -e \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && cat <&3 | grep -q passed'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
