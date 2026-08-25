@@ -1374,7 +1374,7 @@ class QdrantStore(VectorStore):
         except ImportError as exc:
             raise ImportError(
                 "qdrant-client is required for QdrantStore. "
-                "Install with: uv sync --extra qdrant"
+                "Install with: uv sync"
             ) from exc
 
         self._client = QdrantClient(url=self._base_url, api_key=self._api_key)
