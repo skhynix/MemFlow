@@ -7,6 +7,8 @@ import logging
 import os
 import shutil
 import tempfile
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -596,6 +598,32 @@ class TestMemMachineBypass:
         assert call_args[1]["metadata"]["mm_type"] == "episodic"
 
 
+@contextmanager
+def _qdrant_client_network_mocked():
+    """Let the real QdrantClient ctor run, mock its network methods.
+
+    QdrantClient emits the insecure-connection warning during __init__, so
+    we cannot replace the class. Instead we wrap __init__ to stub out the
+    instance methods that _init_collection calls against a live server
+    (collection_exists / create_collection / create_payload_index).
+    """
+    from qdrant_client import QdrantClient
+
+    real_init = QdrantClient.__init__
+
+    def patched_init(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        self.collection_exists = MagicMock(return_value=True)
+        self.create_collection = MagicMock()
+        self.create_payload_index = MagicMock()
+
+    QdrantClient.__init__ = patched_init
+    try:
+        yield
+    finally:
+        QdrantClient.__init__ = real_init
+
+
 class TestQdrantStore:
     """Tests for Qdrant vector store."""
 
@@ -622,6 +650,65 @@ class TestQdrantStore:
             _os.environ.pop("VECTOR_EMBEDDING_API_BASE", None)
             with pytest.raises(ValueError, match="VECTOR_EMBEDDING_API_BASE"):
                 QdrantStore()
+
+    def test_empty_api_key_no_insecure_warning(self):
+        """Empty QDRANT_API_KEY must not raise the insecure-connection warning.
+
+        QdrantClient treats an empty string as a configured key and emits
+        ``UserWarning: Api key is used with an insecure connection.`` when
+        the base URL is HTTP. QdrantStore must normalize the empty value to
+        None so the client treats the connection as unauthenticated.
+        """
+        with patch.dict(
+            "os.environ",
+            {
+                "VECTOR_EMBEDDING_API_BASE": "http://test-api",
+                "QDRANT_BASE_URL": "http://localhost:6333",
+                "QDRANT_API_KEY": "",
+                "QDRANT_COLLECTION_NAME": "test_collection",
+            },
+        ):
+            with _qdrant_client_network_mocked():
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", UserWarning)
+                    QdrantStore()  # must not raise UserWarning
+
+    def test_empty_api_key_arg_no_insecure_warning(self):
+        """Explicit api_key="" must be normalized the same as the env var."""
+        with patch.dict(
+            "os.environ",
+            {
+                "VECTOR_EMBEDDING_API_BASE": "http://test-api",
+                "QDRANT_BASE_URL": "http://localhost:6333",
+            },
+            clear=False,
+        ):
+            import os as _os
+
+            _os.environ.pop("QDRANT_API_KEY", None)
+            with _qdrant_client_network_mocked():
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", UserWarning)
+                    QdrantStore(api_key="")  # must not raise UserWarning
+
+    def test_nonempty_api_key_still_warns_on_http(self):
+        """A real key over HTTP must still warn; normalization must not hide it.
+
+        Guards against over-eager normalization that would suppress the
+        warning for legitimately authenticated but insecure connections.
+        """
+        with patch.dict(
+            "os.environ",
+            {
+                "VECTOR_EMBEDDING_API_BASE": "http://test-api",
+                "QDRANT_BASE_URL": "http://localhost:6333",
+                "QDRANT_API_KEY": "secret-key",
+                "QDRANT_COLLECTION_NAME": "test_collection",
+            },
+        ):
+            with _qdrant_client_network_mocked():
+                with pytest.warns(UserWarning, match="insecure connection"):
+                    QdrantStore()
 
     def test_compute_emb_warns_on_hash_fallback(self, caplog):
         """Test embedding failures are visible when fallback is used."""
