@@ -1302,6 +1302,7 @@ class QdrantStore(VectorStore):
             base_url = os.getenv("QDRANT_BASE_URL", "http://localhost:6333")
         if api_key is None:
             api_key = os.getenv("QDRANT_API_KEY")
+        api_key = api_key or None
         if collection_name is None:
             collection_name = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
         if index_type is None:
