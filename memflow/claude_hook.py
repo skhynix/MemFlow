@@ -29,6 +29,7 @@ from memflow.claude_session_state import (
 from memflow.llm import BaseLLM
 from memflow.skill_context import (
     AuditLogger,
+    CatalogRenderer,
     ContextRenderer,
     RenderedSkill,
     SkillContextRequest,
@@ -43,7 +44,10 @@ DEFAULT_RETRIEVAL_TIMEOUT_MS = 2000
 DEFAULT_SESSION_DEDUPE_ROLLOUT = "off"
 DEFAULT_SESSION_DEDUPE_POLICY = "on_hash_change"
 DEFAULT_SESSION_DEDUPE_STATE_DIR = "claude-sessions"
+DEFAULT_RENDERING_FORMAT = "retrieved_skills_catalog_v1"
+LEGACY_RENDERING_FORMAT = "selected_skills_xml_v1"
 SUPPORTED_SESSION_DEDUPE_ROLLOUTS = {"off", "shadow", "enforce"}
+SUPPORTED_RENDERING_FORMATS = {DEFAULT_RENDERING_FORMAT, LEGACY_RENDERING_FORMAT}
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": "memflow.claude_hook.v1",
@@ -75,7 +79,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_chars": 6000,
         "hard_max_chars": 10000,
         "max_chars_per_skill": 3000,
-        "format": "selected_skills_xml_v1",
+        "format": DEFAULT_RENDERING_FORMAT,
     },
     "logging": {
         "path": ".memflow/logs/skill_context_hook.jsonl",
@@ -208,6 +212,27 @@ def _normalize_session_dedupe_config(
     }
 
 
+def _normalize_rendering_format(config: dict[str, Any]) -> dict[str, Any]:
+    rendering = config.get("rendering")
+    if not isinstance(rendering, dict):
+        rendering = copy.deepcopy(DEFAULT_CONFIG["rendering"])
+        config["rendering"] = rendering
+        return {
+            "format": DEFAULT_RENDERING_FORMAT,
+            "warnings": ["invalid_rendering_format"],
+        }
+
+    raw_format = rendering.get("format", DEFAULT_RENDERING_FORMAT)
+    if not isinstance(raw_format, str) or raw_format not in SUPPORTED_RENDERING_FORMATS:
+        rendering["format"] = DEFAULT_RENDERING_FORMAT
+        return {
+            "format": DEFAULT_RENDERING_FORMAT,
+            "warnings": ["invalid_rendering_format"],
+        }
+    rendering["format"] = raw_format
+    return {"format": raw_format, "warnings": []}
+
+
 def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load hook config, using defaults when the config file is absent."""
     config = copy.deepcopy(DEFAULT_CONFIG)
@@ -246,7 +271,8 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
         minimum=0,
     )
 
-    rendering = config.setdefault("rendering", {})
+    rendering_settings = _normalize_rendering_format(config)
+    rendering = config["rendering"]
     default_rendering = DEFAULT_CONFIG["rendering"]
     rendering["max_chars"] = _as_int(
         rendering.get("max_chars"), default_rendering["max_chars"], minimum=0
@@ -273,6 +299,7 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
         config,
         config_path=config_path,
     )
+    config["_memflow_rendering"] = rendering_settings
     config.setdefault("logging", copy.deepcopy(DEFAULT_CONFIG["logging"]))
     return config
 
@@ -632,6 +659,16 @@ def run_hook(
     if not isinstance(catalog_mode, dict):
         catalog_mode = {}
     catalog_warnings = tuple(str(item) for item in catalog_mode.get("warnings", ()))
+    rendering_settings = config.get("_memflow_rendering", {})
+    if not isinstance(rendering_settings, dict):
+        rendering_settings = {}
+    rendering_warnings = tuple(
+        str(item) for item in rendering_settings.get("warnings", ())
+    )
+    configuration_warnings = (
+        *catalog_warnings,
+        *rendering_warnings,
+    )
     session_dedupe_settings = _session_dedupe_settings(config)
     session_dedupe_config_warnings = tuple(
         str(item) for item in session_dedupe_settings.get("warnings", ())
@@ -642,7 +679,10 @@ def run_hook(
 
     audit_logger = AuditLogger(config, adapter=ADAPTER_NAME)
     selector = SkillContextSelector(config)
-    renderer = ContextRenderer(config)
+    if rendering_settings.get("format") == LEGACY_RENDERING_FORMAT:
+        renderer = ContextRenderer(config)
+    else:
+        renderer = CatalogRenderer(config)
 
     try:
         hook_input = parse_hook_input(stdin_text)
@@ -656,7 +696,7 @@ def run_hook(
                 prompt=prompt,
                 status="fail_open",
                 latency_ms=latency_ms(),
-                warnings=[*catalog_warnings, "unsupported_hook_event"],
+                warnings=[*configuration_warnings, "unsupported_hook_event"],
             )
             audit_logger.write_or_fail(record)
             return ""
@@ -673,7 +713,7 @@ def run_hook(
                 selected_skills=(),
                 rendered_context="",
                 warnings=(
-                    *catalog_warnings,
+                    *configuration_warnings,
                     *session_dedupe_config_warnings,
                     *dedupe_plan.warnings,
                     "empty_query",
@@ -716,7 +756,7 @@ def run_hook(
             selected_skill_metadata(rendered) for rendered in baseline.skills
         )
         warnings = (
-            *catalog_warnings,
+            *configuration_warnings,
             *session_dedupe_config_warnings,
             *selection_warnings,
             *baseline.warnings,
@@ -800,7 +840,7 @@ def run_hook(
         is_user_prompt_submit = (
             hook_input is not None and hook_input.hook_event_name == "UserPromptSubmit"
         )
-        warnings = [*catalog_warnings]
+        warnings = [*configuration_warnings]
         if is_user_prompt_submit:
             warnings.extend(session_dedupe_config_warnings)
         warnings.append(f"{type(exc).__name__}")
