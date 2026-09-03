@@ -46,7 +46,9 @@ from benchmark.skill_ret_bench.evaluation import (  # noqa: E402
 
 # Default paths relative to this script location
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CORPUS_PATH = SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills.jsonl"
+DEFAULT_CORPUS_PATH = (
+    SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills" / "test.jsonl"
+)
 DEFAULT_QUERY_BANK_PATH = (
     SCRIPT_DIR / "data" / "SKILLRET" / "data" / "queries" / "test.jsonl"
 )
