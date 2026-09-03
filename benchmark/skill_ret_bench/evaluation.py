@@ -60,9 +60,9 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _normalize_query(raw: dict[str, Any], idx: int) -> SkillRetBenchmarkQuery:
-    """Normalize a raw query record from anonymous-ed-benchmark/SKILLRET.
+    """Normalize a raw query record from ThakiCloud/SKILLRET.
 
-    Expected schema (HuggingFace: anonymous-ed-benchmark/SKILLRET):
+    Expected schema (HuggingFace: ThakiCloud/SKILLRET):
     - queries: id, query, skill_ids (relevant skill IDs), k (count)
     - qrels: query_id, skill_id, relevance (binary: 1)
     """
@@ -76,7 +76,7 @@ def _normalize_query(raw: dict[str, Any], idx: int) -> SkillRetBenchmarkQuery:
     )
     rejected = raw.get("rejected_close_candidates")
 
-    # Try direct schema first (anonymous-ed-benchmark)
+    # Try direct schema first (ThakiCloud)
     relevant_ids = _string_list(raw.get("skill_ids", []))
     if not relevant_ids:
         # Fallback to combined format

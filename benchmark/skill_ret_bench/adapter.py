@@ -135,9 +135,9 @@ def _string_list(value: Any) -> list[str]:
 
 
 def normalize_skill_ret_record(raw: dict[str, Any]) -> SkillRetRecord:
-    """Normalize a raw SkillRet record from anonymous-ed-benchmark/SKILLRET.
+    """Normalize a raw SkillRet record from ThakiCloud/SKILLRET.
 
-    Expected schema (HuggingFace: anonymous-ed-benchmark/SKILLRET):
+    Expected schema (HuggingFace: ThakiCloud/SKILLRET):
     - id: skill ID
     - name: skill name
     - namespace: skill namespace (e.g., author/repo)
