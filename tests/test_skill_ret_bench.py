@@ -1,7 +1,10 @@
 # Copyright 2026 SK hynix Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the SkillRet benchmark adapter."""
+"""Regression tests for the SkillRet benchmark harness."""
+
+from argparse import Namespace
+from types import SimpleNamespace
 
 from benchmark.skill_ret_bench.adapter import (
     normalize_skill_ret_record,
@@ -55,3 +58,38 @@ def test_skillret_record_falls_back_from_empty_skill_md() -> None:
     record = normalize_skill_ret_record(raw)
 
     assert record.content == raw["description"]
+
+
+def test_integrated_runner_awaits_corpus_seeding(monkeypatch, tmp_path) -> None:
+    from benchmark.skill_ret_bench import run_skill_ret_bench as runner
+
+    awaited = False
+
+    async def fake_seed_skill_ret_corpus(**kwargs):
+        nonlocal awaited
+        awaited = True
+        return SimpleNamespace(
+            active_corpus_size=3,
+            to_dict=lambda: {"num_seeded": 3},
+        )
+
+    args = Namespace(
+        user_id="benchmark",
+        k_values=[1],
+        query_bank_path=None,
+        corpus_path=tmp_path / "skills.jsonl",
+        results_dir=tmp_path,
+        results_filename="seed-result",
+        seed_only=True,
+        clear_existing=False,
+        max_queries=None,
+    )
+    monkeypatch.setattr(runner, "_load_env_file", lambda *_: None)
+    monkeypatch.setattr(runner, "_parse_args", lambda: args)
+    monkeypatch.setattr(runner, "MemFlow", object)
+    monkeypatch.setattr(runner, "seed_skill_ret_corpus", fake_seed_skill_ret_corpus)
+
+    runner.main()
+
+    assert awaited
+    assert (tmp_path / "seed-result.json").exists()
