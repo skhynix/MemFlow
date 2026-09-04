@@ -93,3 +93,12 @@ def test_integrated_runner_awaits_corpus_seeding(monkeypatch, tmp_path) -> None:
 
     assert awaited
     assert (tmp_path / "seed-result.json").exists()
+
+
+def test_runners_default_to_official_evaluation_skill_split() -> None:
+    from benchmark.skill_ret_bench import run_seeding, run_skill_ret_bench
+
+    expected_suffix = "data/SKILLRET/data/skills/test.jsonl"
+
+    assert run_seeding.DEFAULT_CORPUS_PATH.as_posix().endswith(expected_suffix)
+    assert run_skill_ret_bench.DEFAULT_CORPUS_PATH.as_posix().endswith(expected_suffix)
