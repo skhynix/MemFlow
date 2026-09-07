@@ -1,5 +1,10 @@
 # MemFlow Examples Guide
 
+> **Legacy examples:** These scripts cover MemFlow's earlier procedural memory,
+> extraction, and standalone agent workflows. They are preserved for reference
+> and are not the current setup guide. For Claude Code skill retrieval with
+> Qdrant, follow the [project README](../README.md).
+
 This guide provides an overview of all example scripts in the `examples/` directory and how to run them.
 
 ## Prerequisites
