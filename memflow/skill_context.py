@@ -134,6 +134,13 @@ class SkillPolicy:
         return int(self.retrieval.get("candidate_k", 20))
 
     def min_score(self) -> float:
+        """Absolute-similarity gate in dense mode; top-relative under hybrid.
+
+        With hybrid search enabled the scores coming out of ``store.search``
+        are RRF scores rescaled to the top hit (1.0), so this threshold means
+        "fraction of the best hit" rather than a cosine floor — a query
+        unrelated to every skill still passes its top candidate through.
+        """
         return float(self.retrieval.get("min_score", 0.2))
 
     def candidate_from_result(

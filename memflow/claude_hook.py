@@ -69,6 +69,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_k": 3,
         "max_top_k": 5,
         "candidate_k": 20,
+        # Cosine floor for dense search. Under hybrid search the scores are
+        # RRF rescaled to the top hit, so this acts as "fraction of the best
+        # hit" — even an unrelated query keeps its top candidate.
         "min_score": 0.2,
         "include_cwd_in_query": True,
         "timeout_ms": DEFAULT_RETRIEVAL_TIMEOUT_MS,

@@ -46,6 +46,27 @@ EMBEDDING_REQUEST_TIMEOUT = float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "60"))
 # 5xx). A failed text falls back to a hash/zero vector rather than stalling.
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "2"))
 
+# ---------------------------------------------------------------------------
+# Hybrid search constants
+# ---------------------------------------------------------------------------
+# Named-vector names used inside hybrid-enabled Qdrant collections.
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
+
+# FastEmbed BM25 model for client-side sparse vector generation. Self-hosted
+# Qdrant cannot use the Document cloud-inference API, so sparse vectors are
+# produced locally with Qdrant/bm25 (which expects Modifier.IDF on the server
+# side to apply corpus-frequency weighting to the raw term frequencies).
+# Read lazily (not at import time) so QDRANT_SPARSE_MODEL set in .env — which
+# MemFlow loads in its constructor, after this module is imported — takes effect.
+SPARSE_MODEL_DEFAULT = "Qdrant/bm25"
+
+
+def env_flag(name: str, default: str = "off") -> bool:
+    """Read a boolean env var (``1/on/true/yes`` are true)."""
+    return os.getenv(name, default).strip().lower() in ("1", "on", "true", "yes")
+
+
 from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -123,6 +144,11 @@ def _split_file_record(text: str) -> tuple[str, str] | None:
 
 class BaseStore(ABC):
     """Abstract base for all storage backends."""
+
+    #: Whether this backend can serve ``search_hybrid`` (sparse+dense RRF).
+    #: Backends that implement it flip this to True; callers probe it instead
+    #: of try/except'ing the call.
+    supports_hybrid: bool = False
 
     @abstractmethod
     def add(self, procedure: Procedure | list[Procedure]) -> int: ...
@@ -956,6 +982,107 @@ class VectorStore(BaseStore):
             emb = [x / norm for x in emb]
         return emb
 
+    # ------------------------------------------------------------------
+    # Sparse (BM25) embedding helpers
+    # ------------------------------------------------------------------
+
+    # Model cache keyed by model name, shared across instances (loading a
+    # FastEmbed model is expensive). Keyed so stores configured with
+    # different QDRANT_SPARSE_MODEL values don't silently share one model.
+    _sparse_models: dict = {}
+    _sparse_lock = threading.Lock()
+    # fastembed's embed()/query_embed() wrap shared per-model state that is
+    # not documented as thread-safe; since the model instance is cached
+    # class-wide, concurrent add_async/search threads must serialize around
+    # inference. Loading and inference use separate locks so a slow model
+    # load never blocks searches on other stores' models.
+    _sparse_infer_lock = threading.Lock()
+
+    def _get_sparse_model(self) -> Any:
+        """Lazily load the FastEmbed BM25 sparse model (cached by name, thread-safe)."""
+        model_name = os.getenv("QDRANT_SPARSE_MODEL", SPARSE_MODEL_DEFAULT)
+        cached = VectorStore._sparse_models.get(model_name)
+        if cached is not None:
+            return cached
+        with VectorStore._sparse_lock:
+            cached = VectorStore._sparse_models.get(model_name)
+            if cached is None:
+                try:
+                    from fastembed import SparseTextEmbedding
+                except ImportError as exc:
+                    raise ImportError(
+                        "fastembed is required for BM25 sparse vectors on this "
+                        "collection (it has a sparse vector schema). Install "
+                        "with: uv sync --extra hybrid"
+                    ) from exc
+
+                cached = SparseTextEmbedding(model_name=model_name)
+                VectorStore._sparse_models[model_name] = cached
+        return cached
+
+    def _compute_sparse(self, text: str, is_query: bool = False) -> Any:
+        """Compute a BM25 sparse vector (indices + values) for one text.
+
+        Returns a ``qdrant_client.models.SparseVector``, or ``None`` when the
+        text yields no BM25 tokens (e.g. stopword-only) — callers skip the
+        sparse vector rather than sending an empty one, which Qdrant rejects.
+        For documents the FastEmbed BM25 model yields term-frequency-style
+        values; the IDF re-weighting is applied server-side by Qdrant's
+        ``Modifier.IDF``. For queries, ``query_embed`` emits binary presence
+        (values of 1).
+        """
+        from qdrant_client import models
+
+        model = self._get_sparse_model()
+        # Materialize the generator inside the lock: fastembed yields lazily
+        # and its wrapper is not thread-safe under concurrent calls.
+        with VectorStore._sparse_infer_lock:
+            vectors = list(model.query_embed(text) if is_query else model.embed(text))
+        for sparse in vectors:
+            if len(sparse.indices) == 0:
+                return None
+            return models.SparseVector(
+                indices=list(sparse.indices), values=[float(v) for v in sparse.values]
+            )
+        # Empty text — no tokens, no sparse vector.
+        return None
+
+    def _compute_sparse_batch(self, texts: list[str]) -> list[Any]:
+        """Compute BM25 sparse vectors for a batch of documents.
+
+        Entries whose text yields no BM25 tokens are returned as ``None`` so
+        the upsert path skips the sparse vector instead of sending an empty
+        one; the dense vector is still written for such documents.
+        """
+        from qdrant_client import models
+
+        model = self._get_sparse_model()
+        results: list[Any] = []
+        num_empty = 0
+        # Serialize inference — see _sparse_infer_lock comment.
+        with VectorStore._sparse_infer_lock:
+            sparse_vectors = list(model.embed(texts))
+        for sparse in sparse_vectors:
+            if len(sparse.indices) == 0:
+                results.append(None)
+                num_empty += 1
+                continue
+            results.append(
+                models.SparseVector(
+                    indices=list(sparse.indices),
+                    values=[float(v) for v in sparse.values],
+                )
+            )
+        if num_empty:
+            logger.warning(
+                "Sparse embedding produced no tokens for %d/%d documents; "
+                "they will be indexed without a sparse vector (invisible to "
+                "BM25 search).",
+                num_empty,
+                len(texts),
+            )
+        return results
+
     @staticmethod
     def _mean_pool(embeddings: list[list[float]]) -> list[float]:
         """Compute mean of multiple embedding vectors."""
@@ -1341,6 +1468,15 @@ class QdrantStore(VectorStore):
                         env_max,
                     )
 
+        # Hybrid search config. The collection's actual schema (named
+        # dense+sparse vs single unnamed dense) is DETECTED from Qdrant in
+        # _init_collection, never configured by the user — the only env var
+        # read here is MEMFLOW_HYBRID_SEARCH_ENABLED, and only to decide the
+        # schema for a brand-new collection (sparse included so hybrid can be
+        # enabled later without re-seeding). Switching hybrid on/off against an
+        # existing collection just follows whatever schema it already has.
+        self._create_with_sparse = env_flag("MEMFLOW_HYBRID_SEARCH_ENABLED")
+
         # Initialize VectorStore with embedding config
         super().__init__(
             emb_model=emb_model,
@@ -1359,10 +1495,22 @@ class QdrantStore(VectorStore):
         self._distance = distance
         self._hnsw_m = hnsw_m
         self._hnsw_ef_construct = hnsw_ef_construct
+        # Schema flags — authoritative values set by _init_collection from the
+        # actual collection (or its creation). Defaults avoid attribute gaps if
+        # init fails partway.
+        self._named_schema = False
+        self._sparse_enabled = False
 
         self._client: Any = None
         self._lock = threading.Lock()
         self._init_collection()
+
+    @property
+    def supports_hybrid(self) -> bool:
+        """True when the (auto-detected) collection schema has the sparse
+        vector — i.e. hybrid/sparse search can actually be served. Callers
+        should probe this instead of try/except'ing ``search_hybrid``."""
+        return self._sparse_enabled
 
     # ------------------------------------------------------------------
     # Collection initialization
@@ -1392,9 +1540,35 @@ class QdrantStore(VectorStore):
 
             # Create collection if it doesn't exist
             if not self._client.collection_exists(self._collection_name):
-                vectors_config = models.VectorParams(
-                    size=self._emb_dim, distance=distance_enum
-                )
+                if self._create_with_sparse:
+                    # New collection, hybrid enabled — create with named
+                    # vectors (dense + sparse BM25) from the start so hybrid
+                    # can be turned on later without re-seeding. The sparse
+                    # vector uses Modifier.IDF so Qdrant applies
+                    # corpus-frequency weighting to the raw BM25 term
+                    # frequencies emitted by the client-side fastembed model
+                    # (self-hosted Qdrant cannot use the cloud Document
+                    # inference API).
+                    vectors_config = {
+                        DENSE_VECTOR_NAME: models.VectorParams(
+                            size=self._emb_dim, distance=distance_enum
+                        ),
+                    }
+                    sparse_vectors_config = {
+                        SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                            index=models.SparseIndexParams(),
+                            modifier=models.Modifier.IDF,
+                        ),
+                    }
+                    self._named_schema = True
+                    self._sparse_enabled = True
+                else:
+                    vectors_config = models.VectorParams(
+                        size=self._emb_dim, distance=distance_enum
+                    )
+                    sparse_vectors_config = None
+                    self._named_schema = False
+                    self._sparse_enabled = False
 
                 if self._index_type == "hnsw":
                     hnsw_config = models.HnswConfigDiff(
@@ -1404,13 +1578,43 @@ class QdrantStore(VectorStore):
                         collection_name=self._collection_name,
                         vectors_config=vectors_config,
                         hnsw_config=hnsw_config,
+                        sparse_vectors_config=sparse_vectors_config,
                     )
                 else:
                     # flat index — Qdrant default
                     self._client.create_collection(
                         collection_name=self._collection_name,
                         vectors_config=vectors_config,
+                        sparse_vectors_config=sparse_vectors_config,
                     )
+            else:
+                # Collection exists — adopt its actual schema regardless of
+                # env config. upsert/search then use the same vector layout
+                # the collection was created with, so a schema/env mismatch
+                # can never corrupt or crash them. Hybrid (mode != "dense")
+                # additionally requires the sparse vector; when missing it is
+                # disabled here (supports_hybrid stays False) and callers
+                # route to dense instead of probing an exception.
+                info = self._client.get_collection(self._collection_name)
+                # For a single unnamed vector Qdrant returns VectorParams
+                # (a model, not a dict); named collections return a dict of
+                # name -> VectorParams. Only the dict form is a named schema.
+                vectors_config = info.config.params.vectors
+                self._named_schema = (
+                    isinstance(vectors_config, dict)
+                    and DENSE_VECTOR_NAME in vectors_config
+                )
+                sparse_names = set((info.config.params.sparse_vectors or {}).keys())
+                self._sparse_enabled = SPARSE_VECTOR_NAME in sparse_names
+                if self._sparse_enabled and not self._named_schema:
+                    logger.warning(
+                        "Collection %r has a sparse vector but no named %r "
+                        "dense vector — unexpected schema; hybrid will be "
+                        "skipped.",
+                        self._collection_name,
+                        DENSE_VECTOR_NAME,
+                    )
+                    self._sparse_enabled = False
 
             # Create payload field indexes for efficient filtering
             try:
@@ -1476,8 +1680,16 @@ class QdrantStore(VectorStore):
             updated_at=payload.get("updated_at", payload.get("created_at", "")),
         )
 
-    def _upsert_point(self, procedure: Procedure, emb: list[float]) -> None:
-        """Upsert a procedure as a Qdrant point with pre-computed embedding."""
+    def _upsert_point(
+        self, procedure: Procedure, emb: list[float], sparse_vec: Any = None
+    ) -> None:
+        """Upsert a procedure as a Qdrant point with pre-computed embedding.
+
+        The vector layout follows the collection's detected schema: named
+        collections always receive the named ``dense`` vector (plus ``sparse``
+        when a ``sparse_vec`` was computed); unnamed collections receive the
+        bare dense vector.
+        """
         from qdrant_client import models
 
         payload = {
@@ -1494,8 +1706,15 @@ class QdrantStore(VectorStore):
             "updated_at": procedure.updated_at,
         }
 
+        if self._named_schema:
+            vector = {DENSE_VECTOR_NAME: emb}
+            if sparse_vec is not None:
+                vector[SPARSE_VECTOR_NAME] = sparse_vec
+        else:
+            vector = emb
+
         point = models.PointStruct(
-            id=_id_to_uuid(procedure.id), vector=emb, payload=payload
+            id=_id_to_uuid(procedure.id), vector=vector, payload=payload
         )
 
         self._client.upsert(collection_name=self._collection_name, points=[point])
@@ -1520,10 +1739,14 @@ class QdrantStore(VectorStore):
             procedure = [self._sanitize_content(proc) for proc in procedure]
             texts = [self._to_text(proc) for proc in procedure]
             embeddings = self._compute_embs_batch(texts, batch_size=batch_size)
+            sparse_vecs = (
+                self._compute_sparse_batch(texts) if self._sparse_enabled else None
+            )
             num_inserted = 0
-            for proc, emb in zip(procedure, embeddings):
+            for i, (proc, emb) in enumerate(zip(procedure, embeddings)):
                 try:
-                    self._upsert_point(proc, emb)
+                    sv = sparse_vecs[i] if sparse_vecs is not None else None
+                    self._upsert_point(proc, emb, sparse_vec=sv)
                     num_inserted += 1
                 except Exception:
                     pass
@@ -1532,7 +1755,10 @@ class QdrantStore(VectorStore):
             procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = self._compute_emb(text_content)
-            self._upsert_point(procedure, emb)
+            sparse_vec = (
+                self._compute_sparse(text_content) if self._sparse_enabled else None
+            )
+            self._upsert_point(procedure, emb, sparse_vec=sparse_vec)
             return 1
 
     async def add_async(
@@ -1562,18 +1788,25 @@ class QdrantStore(VectorStore):
             embeddings = await self._compute_embs_batch_async(
                 texts, batch_size, max_workers
             )
+            # Sparse BM25 is computed locally (CPU-bound) — offload to a thread
+            # to avoid blocking the event loop. One batched call per upsert.
+            if self._sparse_enabled:
+                sparse_vecs = await asyncio.to_thread(self._compute_sparse_batch, texts)
+            else:
+                sparse_vecs = None
             semaphore = Semaphore(max_workers)
 
-            async def insert_single(proc: Procedure, emb: list[float]) -> int:
+            async def insert_single(proc: Procedure, emb: list[float], sv: Any) -> int:
                 async with semaphore:
                     try:
-                        await asyncio.to_thread(self._upsert_point, proc, emb)
+                        await asyncio.to_thread(self._upsert_point, proc, emb, sv)
                         return 1
                     except Exception:
                         return 0
 
             tasks = [
-                insert_single(proc, emb) for proc, emb in zip(procedure, embeddings)
+                insert_single(proc, emb, sparse_vecs[i] if sparse_vecs else None)
+                for i, (proc, emb) in enumerate(zip(procedure, embeddings))
             ]
             results = await asyncio.gather(*tasks)
             return sum(results)
@@ -1581,7 +1814,11 @@ class QdrantStore(VectorStore):
             procedure = self._sanitize_content(procedure)
             text_content = self._to_text(procedure)
             emb = await self._compute_emb_async(text_content)
-            self._upsert_point(procedure, emb)
+            if self._sparse_enabled:
+                sparse_vec = await asyncio.to_thread(self._compute_sparse, text_content)
+            else:
+                sparse_vec = None
+            self._upsert_point(procedure, emb, sparse_vec=sparse_vec)
             return 1
 
     def _search_with_emb(
@@ -1592,6 +1829,33 @@ class QdrantStore(VectorStore):
         kind: str | None = "skill",
     ) -> list[SearchResult]:
         """Search using pre-computed query embedding."""
+        query_filter = self._build_query_filter(user_id, kind)
+
+        # Hybrid collections store the dense vector under a named slot ("dense");
+        # dense-only collections use the unnamed default. Pass `using=` only for
+        # named-vector collections so Qdrant resolves the right vector.
+        dense_using = DENSE_VECTOR_NAME if self._named_schema else None
+
+        response = self._client.query_points(
+            collection_name=self._collection_name,
+            query=query_emb,
+            using=dense_using,
+            query_filter=query_filter,
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        return [
+            SearchResult(procedure=self._point_to_procedure(p), score=float(p.score))
+            for p in response.points
+        ]
+
+    # ------------------------------------------------------------------
+    # Hybrid search (dense + sparse RRF fusion via query_points)
+    # ------------------------------------------------------------------
+
+    def _build_query_filter(self, user_id: str | None, kind: str | None) -> Any:
         from qdrant_client import models
 
         must = []
@@ -1605,20 +1869,229 @@ class QdrantStore(VectorStore):
             must.append(
                 models.FieldCondition(key="kind", match=models.MatchValue(value=kind))
             )
-        query_filter = models.Filter(must=must) if must else None
+        return models.Filter(must=must) if must else None
 
-        response = self._client.query_points(
-            collection_name=self._collection_name,
-            query=query_emb,
-            query_filter=query_filter,
-            limit=top_k,
-            with_payload=True,
-            with_vectors=False,
-        )
+    def search_hybrid(
+        self,
+        query: str,
+        rrf_top_k: int = 10,
+        user_id: str | None = None,
+        kind: str | None = "skill",
+        mode: str = "hybrid",
+        rrf_weights: list[float] | None = None,
+        sparse_top_k: int = 200,
+        dense_top_k: int = 200,
+        hnsw_ef: int | None = None,
+        rrf_k: int = 60,
+        dense_emb: list[float] | None = None,
+        sparse_vec: Any = None,
+    ) -> list[SearchResult]:
+        """Hybrid sparse+dense retrieval with weighted RRF fusion.
+
+        Single ``query_points`` call: dense + sparse prefetches are fused
+        server-side via ``RrfQuery(Rrf(weights=[dense_w, sparse_w], k))``. When
+        ``mode`` is ``"dense"`` or ``"sparse"`` that channel's vector is
+        queried directly — no prefetch, no fusion (used for isolated Recall@K
+        measurement in experiment 4.1).
+
+        Requires a collection whose (auto-detected) schema includes the named
+        sparse vector — probe ``supports_hybrid`` before calling. For
+        ``mode="dense"`` any collection works — legacy unnamed vectors are
+        queried by position rather than name.
+
+        The three Top-K parameters in the hybrid-search pipeline:
+
+        - ``sparse_top_k`` — SPARSE_SEARCH_TOP_K: sparse (BM25) prefetch depth.
+        - ``dense_top_k`` — DENSE_SEARCH_TOP_K: dense (embedding) prefetch depth.
+        - ``rrf_top_k`` — RRF_TOP_K: number of candidates the RRF fusion returns.
+
+        Args:
+            query: query string
+            rrf_top_k: RRF_TOP_K — number of fused candidates to return. In
+                dense/sparse-only mode this is the single-channel result count.
+            mode: ``"hybrid"`` | ``"dense"`` | ``"sparse"``
+            rrf_weights: ``(dense_weight, sparse_weight)`` per-prefetch weights
+                for the RRF fusion (Qdrant v1.17+ extension; multiplies each
+                channel's ``1/(k+rank)`` score). ``None`` → equal ``(0.5, 0.5)``.
+            sparse_top_k: SPARSE_SEARCH_TOP_K — sparse prefetch limit.
+            dense_top_k: DENSE_SEARCH_TOP_K — dense prefetch limit.
+            hnsw_ef: optional HNSW ``ef`` search param (higher = more thorough
+                graph traversal).
+            rrf_k: RRF constant ``k`` in ``score = 1/(k + rank)`` (default 60 —
+                the standard IR value; lower k rewards top ranks more
+                aggressively).
+            dense_emb: pre-computed dense query embedding. When ``None`` the
+                embedding is computed on the fly (one API call). Experiment
+                harnesses pass a pre-computed vector to amortize the embedding
+                API cost across many configs over the same query.
+            sparse_vec: pre-computed sparse query vector (same purpose as
+                ``dense_emb``).
+
+        Returns:
+            List of ``SearchResult`` ranked by fused score. In hybrid mode the
+            RRF scores are rescaled to 0~1 relative to the top hit (top hit =
+            1.0) so cosine-calibrated threshold consumers don't filter
+            everything out; the scores are top-relative, not absolute
+            relevance, and not comparable across queries. Operational
+            consequence: an absolute-similarity gate (e.g. the hook's
+            ``min_score``) is effectively disabled on the fused path — the top
+            hit is 1.0 by construction, so even a query unrelated to every
+            skill still yields at least one candidate, and RRF's slow
+            rank decay lets deep results through too (with the default
+            weights/k, roughly anything within the prefetch depth passes a
+            0.2 gate). Exception: a token-less query (no BM25 terms) runs the
+            dense leg alone and keeps raw cosine scores.
+        """
+        if not self._sparse_enabled and mode != "dense":
+            raise RuntimeError(
+                f"search_hybrid(mode={mode!r}) requires a collection with a "
+                f"sparse vector; collection {self._collection_name!r} was "
+                f"created without one. Recreate the collection with "
+                f"MEMFLOW_HYBRID_SEARCH_ENABLED=on (the existing one keeps "
+                f"its schema regardless of the switch) or use mode='dense'. "
+                f"(Probe store.supports_hybrid before calling.)"
+            )
+
+        from qdrant_client import models
+
+        query_filter = self._build_query_filter(user_id, kind)
+        params = models.SearchParams(hnsw_ef=hnsw_ef) if hnsw_ef is not None else None
+
+        use_named = self._named_schema
+        dense_using = DENSE_VECTOR_NAME if use_named else None
+
+        # Single-channel modes query the vector directly (no fusion needed).
+        # Hybrid mode builds a prefetch list and fuses via RrfQuery below.
+        if mode == "dense":
+            # Single channel — no fusion needed; query with the dense vector.
+            if dense_emb is None:
+                dense_emb = self._compute_emb(query, is_query=True)
+            response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=dense_emb,
+                using=dense_using,
+                query_filter=query_filter,
+                search_params=params,
+                limit=rrf_top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+        elif mode == "sparse":
+            if sparse_vec is None:
+                sparse_vec = self._compute_sparse(query, is_query=True)
+            if sparse_vec is None:
+                # Token-less query — BM25 has nothing to match on.
+                return []
+            response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=sparse_vec,
+                using=SPARSE_VECTOR_NAME,
+                query_filter=query_filter,
+                # hnsw_ef only tunes the dense HNSW traversal; the sparse
+                # index ignores it (same reasoning as the sparse prefetch in
+                # hybrid mode below).
+                limit=rrf_top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+        elif mode == "hybrid":
+            if dense_emb is None:
+                dense_emb = self._compute_emb(query, is_query=True)
+            if sparse_vec is None:
+                sparse_vec = self._compute_sparse(query, is_query=True)
+            if sparse_vec is None:
+                # Token-less query (e.g. stopword-only): BM25 contributes
+                # nothing and Qdrant rejects an empty sparse query, so run
+                # the dense leg alone. Returns RAW cosine scores — deliberately
+                # NOT passed through the RRF rescale below, which would turn a
+                # weak top hit into a guaranteed 1.0. Consumers therefore see
+                # cosine semantics on this path and top-relative semantics on
+                # the fused path (see test_degraded_hybrid_keeps_raw_scores).
+                response = self._client.query_points(
+                    collection_name=self._collection_name,
+                    query=dense_emb,
+                    using=dense_using,
+                    query_filter=query_filter,
+                    search_params=params,
+                    limit=rrf_top_k,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                return [
+                    SearchResult(
+                        procedure=self._point_to_procedure(p), score=float(p.score)
+                    )
+                    for p in response.points
+                ]
+
+            # Single dense vector + sparse (2-prefetch RRF fusion).
+            if rrf_weights is None:
+                weights = [0.5, 0.5]
+            else:
+                weights = [float(w) for w in rrf_weights]
+                if len(weights) != 2:
+                    raise ValueError(
+                        f"rrf_weights must have 2 entries (dense, sparse), "
+                        f"got {len(weights)}"
+                    )
+            prefetch = [
+                models.Prefetch(
+                    query=dense_emb,
+                    using=dense_using,
+                    filter=query_filter,
+                    params=params,
+                    limit=dense_top_k,
+                ),
+                models.Prefetch(
+                    query=sparse_vec,
+                    using=SPARSE_VECTOR_NAME,
+                    filter=query_filter,
+                    # hnsw_ef only tunes the dense HNSW traversal; the
+                    # sparse index ignores it, so don't pass it here.
+                    limit=sparse_top_k,
+                ),
+            ]
+            rrf = models.RrfQuery(rrf=models.Rrf(weights=weights, k=rrf_k))
+            response = self._client.query_points(
+                collection_name=self._collection_name,
+                query=rrf,
+                prefetch=prefetch,
+                query_filter=query_filter,
+                limit=rrf_top_k,
+                with_payload=True,
+                with_vectors=False,
+            )
+        else:
+            raise ValueError(
+                f"Unknown search mode: {mode!r}. "
+                f"Expected one of: 'dense', 'sparse', 'hybrid'."
+            )
+
+        scores = [float(p.score) for p in response.points]
+        if mode == "hybrid" and scores:
+            # Qdrant's weighted RRF score is a rank-sum (sum of w/(k+rank)),
+            # topping out around 0.016 — raw scores would be filtered out
+            # entirely by cosine-calibrated thresholds (e.g.
+            # SkillContextSelector's min_score=0.2). Rescale so the top hit
+            # scores 1.0 and the rest fall proportionally. NOTE: this makes
+            # scores *relative to the top hit of this query*, not absolute
+            # relevance — score thresholds under hybrid mean "fraction of
+            # the best hit", and scores are not comparable across queries.
+            # Accepted tradeoff: RRF discards absolute similarity, so min_score
+            # is no longer an absolute-similarity gate here. The top hit passes
+            # by construction (irrelevant queries still inject ≥1 candidate)
+            # and the slow 1/(k+rank) decay means the gate filters almost
+            # nothing within the prefetch depth. Mitigation if this becomes a
+            # problem in production: issue a parallel dense query (the query
+            # embedding is already computed) and gate the fused hits on their
+            # raw cosine.
+            top = max(scores)
+            if top > 0:
+                scores = [s / top for s in scores]
 
         return [
-            SearchResult(procedure=self._point_to_procedure(p), score=float(p.score))
-            for p in response.points
+            SearchResult(procedure=self._point_to_procedure(p), score=score)
+            for p, score in zip(response.points, scores)
         ]
 
     def search(

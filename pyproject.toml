@@ -25,6 +25,9 @@ benchmark = ["kaggle>=1.6.0"]
 ollama = ["ollama>=0.6.1"]
 memmachine = ["memmachine-client>=0.3.0"]
 openai = ["openai>=2.30.0"]
+# Client-side BM25 sparse vectors for Qdrant hybrid search (MEMFLOW_HYBRID_SEARCH_ENABLED=on).
+# Imported lazily by QdrantStore, so dense-only deployments don't need it.
+hybrid = ["fastembed>=0.3.0"]
 
 [project.scripts]
 memflow = "memflow.cli:main"

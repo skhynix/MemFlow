@@ -605,7 +605,8 @@ def _qdrant_client_network_mocked():
     QdrantClient emits the insecure-connection warning during __init__, so
     we cannot replace the class. Instead we wrap __init__ to stub out the
     instance methods that _init_collection calls against a live server
-    (collection_exists / create_collection / create_payload_index).
+    (collection_exists / create_collection / create_payload_index /
+    get_collection).
     """
     from qdrant_client import QdrantClient
 
@@ -616,6 +617,21 @@ def _qdrant_client_network_mocked():
         self.collection_exists = MagicMock(return_value=True)
         self.create_collection = MagicMock()
         self.create_payload_index = MagicMock()
+        # Schema auto-detection reads the collection config — present it as a
+        # legacy unnamed-vector collection (real servers return VectorParams,
+        # not a dict) so no live request is made.
+        from qdrant_client import models as _models
+
+        self.get_collection = MagicMock(
+            return_value=SimpleNamespace(
+                config=SimpleNamespace(
+                    params=SimpleNamespace(
+                        vectors=_models.VectorParams(size=8, distance="Cosine"),
+                        sparse_vectors=None,
+                    )
+                )
+            )
+        )
 
     QdrantClient.__init__ = patched_init
     try:
@@ -666,6 +682,7 @@ class TestQdrantStore:
                 "QDRANT_BASE_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "",
                 "QDRANT_COLLECTION_NAME": "test_collection",
+                "MEMFLOW_HYBRID_SEARCH_ENABLED": "off",
             },
         ):
             with _qdrant_client_network_mocked():
@@ -680,6 +697,7 @@ class TestQdrantStore:
             {
                 "VECTOR_EMBEDDING_API_BASE": "http://test-api",
                 "QDRANT_BASE_URL": "http://localhost:6333",
+                "MEMFLOW_HYBRID_SEARCH_ENABLED": "off",
             },
             clear=False,
         ):
@@ -704,6 +722,7 @@ class TestQdrantStore:
                 "QDRANT_BASE_URL": "http://localhost:6333",
                 "QDRANT_API_KEY": "secret-key",
                 "QDRANT_COLLECTION_NAME": "test_collection",
+                "MEMFLOW_HYBRID_SEARCH_ENABLED": "off",
             },
         ):
             with _qdrant_client_network_mocked():
@@ -805,6 +824,8 @@ class TestQdrantStore:
         store = object.__new__(QdrantStore)
         store._client = MagicMock()
         store._collection_name = "test_collection"
+        store._named_schema = False
+        store._sparse_enabled = False
 
         skill_id = "skill:" + "a" * 64
         proc = Procedure(id=skill_id, title="Test", content="body")
@@ -950,3 +971,379 @@ class TestQdrantInstructionPrefix:
 
         mock_batch.assert_called_once()
         assert mock_batch.call_args.kwargs.get("is_query") is True
+
+
+def _make_bare_qdrant_store(sparse_enabled: bool) -> QdrantStore:
+    """Build a QdrantStore without touching the network.
+
+    Bypasses ``__init__`` (which would open a client + create a collection) and
+    wires only the attributes the search paths read. ``sparse_enabled=True``
+    implies the named (dense+sparse) schema, mirroring detection in
+    ``_init_collection``.
+    """
+    store = object.__new__(QdrantStore)
+    store._collection_name = "test_collection"
+    store._named_schema = sparse_enabled
+    store._sparse_enabled = sparse_enabled
+    store._client = MagicMock()
+    store._client.query_points.return_value = SimpleNamespace(points=[])
+    return store
+
+
+class TestQdrantStoreHybrid:
+    """Tests for QdrantStore hybrid (dense + sparse RRF) search."""
+
+    def test_hybrid_mode_sends_two_prefetches_and_rrf(self):
+        """hybrid issues a single query_points with dense+sparse prefetch + RrfQuery."""
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(
+                store,
+                "_compute_sparse",
+                return_value=models.SparseVector(indices=[1], values=[1.0]),
+            ),
+        ):
+            store.search_hybrid(
+                "deploy", mode="hybrid", rrf_weights=(0.6, 0.4), rrf_k=60
+            )
+
+        store._client.query_points.assert_called_once()
+        kwargs = store._client.query_points.call_args.kwargs
+        assert isinstance(kwargs["query"], models.RrfQuery)
+        assert len(kwargs["prefetch"]) == 2
+        # weights preserve (dense, sparse) order
+        assert list(kwargs["query"].rrf.weights) == [0.6, 0.4]
+        assert kwargs["query"].rrf.k == 60
+
+    def test_hybrid_scores_normalized_to_unit_range(self):
+        """RRF rank-sum scores (~0.016 max) are rescaled so the top hit = 1.0.
+
+        Regression test: SkillContextSelector filters results below
+        min_score=0.2 (cosine-calibrated); raw RRF scores are ~0.01 and get
+        entirely filtered, so hybrid must emit 0~1-scale scores.
+        """
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        raw_scores = [0.0164, 0.0148, 0.0082]
+        points = [SimpleNamespace(score=s, payload={}) for s in raw_scores]
+        store._client.query_points.return_value = SimpleNamespace(points=points)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(
+                store,
+                "_compute_sparse",
+                return_value=models.SparseVector(indices=[1], values=[1.0]),
+            ),
+            patch.object(
+                store,
+                "_point_to_procedure",
+                side_effect=lambda p: Procedure(title="t", content="c"),
+            ),
+        ):
+            results = store.search_hybrid("deploy", mode="hybrid")
+
+        scores = [r.score for r in results]
+        assert scores[0] == pytest.approx(1.0)
+        assert scores[1] == pytest.approx(0.0148 / 0.0164)
+        assert scores[2] == pytest.approx(0.5)
+        # rank order preserved
+        assert scores == sorted(scores, reverse=True)
+
+    def test_dense_mode_scores_not_rescaled(self):
+        """dense mode keeps raw similarity scores (already 0~1 scale)."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        points = [SimpleNamespace(score=0.83, payload={})]
+        store._client.query_points.return_value = SimpleNamespace(points=points)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(
+                store,
+                "_point_to_procedure",
+                side_effect=lambda p: Procedure(title="t", content="c"),
+            ),
+        ):
+            results = store.search_hybrid("deploy", mode="dense")
+
+        assert results[0].score == pytest.approx(0.83)
+
+    def test_dense_mode_queries_named_vector(self):
+        """mode=dense queries the named 'dense' vector directly, no prefetch."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(store, "_compute_emb", return_value=[0.1] * 8):
+            store.search_hybrid("deploy", mode="dense", rrf_top_k=5)
+
+        kwargs = store._client.query_points.call_args.kwargs
+        assert kwargs["using"] == "dense"
+        assert "prefetch" not in kwargs
+        assert kwargs["limit"] == 5
+
+    def test_sparse_mode_queries_sparse_vector(self):
+        """mode=sparse queries the named 'sparse' vector directly."""
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(
+            store,
+            "_compute_sparse",
+            return_value=models.SparseVector(indices=[1], values=[1.0]),
+        ):
+            store.search_hybrid("deploy", mode="sparse", rrf_top_k=7)
+
+        kwargs = store._client.query_points.call_args.kwargs
+        assert kwargs["using"] == "sparse"
+        assert "prefetch" not in kwargs
+        assert kwargs["limit"] == 7
+
+    def test_hybrid_raises_without_sparse_for_non_dense_mode(self):
+        """A dense-only collection cannot serve hybrid/sparse → RuntimeError."""
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        with pytest.raises(RuntimeError, match="sparse vector"):
+            store.search_hybrid("deploy", mode="hybrid")
+
+    def test_supports_hybrid_reflects_schema(self):
+        """The supports_hybrid probe mirrors the detected sparse schema."""
+        with_sparse = _make_bare_qdrant_store(sparse_enabled=True)
+        without = _make_bare_qdrant_store(sparse_enabled=False)
+        assert with_sparse.supports_hybrid is True
+        assert without.supports_hybrid is False
+
+    def test_hybrid_empty_sparse_query_degrades_to_dense(self):
+        """A token-less query (sparse vec None) runs the dense leg alone."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(store, "_compute_sparse", return_value=None),
+        ):
+            store.search_hybrid("how do I do this", mode="hybrid")
+
+        kwargs = store._client.query_points.call_args.kwargs
+        assert isinstance(kwargs["query"], list)  # raw dense vector, not RrfQuery
+        assert "prefetch" not in kwargs
+
+    def test_degraded_hybrid_keeps_raw_scores(self):
+        """The token-less hybrid path must NOT rescale: the fused path's
+        top-hit=1.0 normalization applied to cosine scores would turn a weak
+        top hit (0.15) into a guaranteed 1.0, breaking min_score consumers.
+        Degraded hybrid returns raw cosine scores, same as mode="dense"."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        points = [
+            SimpleNamespace(score=0.15, payload={}),
+            SimpleNamespace(score=0.1, payload={}),
+        ]
+        store._client.query_points.return_value = SimpleNamespace(points=points)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(store, "_compute_sparse", return_value=None),
+            patch.object(
+                store,
+                "_point_to_procedure",
+                side_effect=lambda p: Procedure(title="t", content="c"),
+            ),
+        ):
+            results = store.search_hybrid("how do I do this", mode="hybrid")
+
+        assert [r.score for r in results] == [0.15, 0.1]
+
+    def test_sparse_mode_empty_query_returns_empty(self):
+        """mode=sparse with a token-less query has nothing to match → []."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(store, "_compute_sparse", return_value=None):
+            assert store.search_hybrid("the", mode="sparse") == []
+        store._client.query_points.assert_not_called()
+
+    def test_compute_sparse_returns_none_for_tokenless_text(self):
+        """_compute_sparse maps an empty BM25 embedding to None (not an empty
+        SparseVector, which Qdrant rejects)."""
+
+        class _Tok:
+            def __init__(self, n):
+                self.indices = list(range(n))
+                self.values = [1.0] * n
+
+        class _FakeModel:
+            def query_embed(self, text):
+                yield _Tok(0)
+
+            def embed(self, text):
+                yield _Tok(0)
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(store, "_get_sparse_model", return_value=_FakeModel()):
+            assert store._compute_sparse("the", is_query=True) is None
+            assert store._compute_sparse("") is None
+
+    def test_compute_sparse_batch_yields_none_entries_with_warning(self, caplog):
+        """Tokenless docs become None entries (upsert then writes dense-only)
+        and the count is surfaced in one warning."""
+
+        class _Tok:
+            def __init__(self, n):
+                self.indices = list(range(n))
+                self.values = [1.0] * n
+
+        class _FakeModel:
+            def embed(self, texts):
+                yield _Tok(3)
+                yield _Tok(0)
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(store, "_get_sparse_model", return_value=_FakeModel()):
+            with caplog.at_level("WARNING", logger="memflow.store"):
+                vecs = store._compute_sparse_batch(["a b c", "the"])
+
+        assert vecs[0] is not None
+        assert vecs[1] is None
+        assert "1/2" in caplog.text
+
+    def test_upsert_skips_sparse_when_none_on_named_schema(self):
+        """sparse_vec=None on a named schema writes the dense vector only."""
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        proc = Procedure(title="t", content="c")
+
+        store._upsert_point(proc, emb=[0.1] * 8, sparse_vec=None)
+
+        point = store._client.upsert.call_args.kwargs["points"][0]
+        assert set(point.vector.keys()) == {"dense"}
+
+    def test_hnsw_ef_only_applies_to_dense_prefetch(self):
+        """hnsw_ef tunes the dense HNSW traversal only; sparse prefetch omits it."""
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(
+                store,
+                "_compute_sparse",
+                return_value=models.SparseVector(indices=[1], values=[1.0]),
+            ),
+        ):
+            store.search_hybrid("deploy", mode="hybrid", hnsw_ef=128)
+
+        kwargs = store._client.query_points.call_args.kwargs
+        dense_p, sparse_p = kwargs["prefetch"]
+        assert dense_p.params is not None and dense_p.params.hnsw_ef == 128
+        assert sparse_p.params is None
+
+    def test_dense_mode_works_on_legacy_collection(self):
+        """mode=dense on a legacy unnamed collection uses using=None."""
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        with patch.object(store, "_compute_emb", return_value=[0.1] * 8):
+            store.search_hybrid("deploy", mode="dense")
+
+        kwargs = store._client.query_points.call_args.kwargs
+        assert kwargs["using"] is None
+
+    def test_unknown_mode_raises(self):
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with patch.object(store, "_compute_emb", return_value=[0.1] * 8):
+            with pytest.raises(ValueError, match="Unknown search mode"):
+                store.search_hybrid("deploy", mode="bm25")
+
+    def test_bad_rrf_weights_length_raises(self):
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=True)
+        with (
+            patch.object(store, "_compute_emb", return_value=[0.1] * 8),
+            patch.object(
+                store,
+                "_compute_sparse",
+                return_value=models.SparseVector(indices=[1], values=[1.0]),
+            ),
+        ):
+            with pytest.raises(ValueError, match="2 entries"):
+                store.search_hybrid(
+                    "deploy", mode="hybrid", rrf_weights=(0.5, 0.3, 0.2)
+                )
+
+    def test_existing_collection_schema_detected(self):
+        """The store adopts the existing collection's schema, not env config."""
+        store = object.__new__(QdrantStore)
+        store._collection_name = "c"
+        store._emb_dim = 8
+        store._distance = "Cosine"
+        store._index_type = "hnsw"
+        store._hnsw_m = 16
+        store._hnsw_ef_construct = 100
+        store._named_schema = False
+        store._sparse_enabled = False
+        # User wants hybrid but the collection predates sparse support.
+        store._create_with_sparse = True
+        store._base_url = "http://localhost:6333"
+        store._api_key = None
+        from qdrant_client import models
+
+        # A real server returns VectorParams (a model, not a dict) for a
+        # single unnamed-vector collection — mirror that shape exactly.
+        legacy = SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors=models.VectorParams(size=8, distance="Cosine"),
+                    sparse_vectors=None,
+                )
+            )
+        )
+        hybrid = SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors={"dense": object()},
+                    sparse_vectors={"sparse": object()},
+                )
+            )
+        )
+        client = MagicMock()
+        client.collection_exists.return_value = True
+
+        for info, named, sparse in [(legacy, False, False), (hybrid, True, True)]:
+            client.get_collection.return_value = info
+            with patch("qdrant_client.QdrantClient", return_value=client):
+                store._init_collection()
+            assert store._named_schema is named
+            assert store._sparse_enabled is sparse
+
+    def test_sparse_vector_written_on_upsert(self):
+        """When sparse enabled, upsert stores both named dense + sparse vectors."""
+        from qdrant_client import models
+
+        store = object.__new__(QdrantStore)
+        store._collection_name = "c"
+        store._named_schema = True
+        store._sparse_enabled = True
+        store._client = MagicMock()
+        proc = Procedure(title="t", content="c")
+        sparse = models.SparseVector(indices=[1, 2], values=[1.0, 2.0])
+
+        store._upsert_point(proc, emb=[0.1] * 8, sparse_vec=sparse)
+
+        point = store._client.upsert.call_args.kwargs["points"][0]
+        assert set(point.vector.keys()) == {"dense", "sparse"}
+
+    def test_new_collection_created_named_when_hybrid_enabled(self):
+        """A fresh collection with MEMFLOW_HYBRID_SEARCH_ENABLED=on gets named dense+sparse vectors."""
+        store = object.__new__(QdrantStore)
+        store._collection_name = "c"
+        store._emb_dim = 8
+        store._distance = "Cosine"
+        store._index_type = "hnsw"
+        store._hnsw_m = 16
+        store._hnsw_ef_construct = 100
+        store._named_schema = False
+        store._sparse_enabled = False
+        store._create_with_sparse = True
+        store._base_url = "http://localhost:6333"
+        store._api_key = None
+        client = MagicMock()
+        client.collection_exists.return_value = False
+        with patch("qdrant_client.QdrantClient", return_value=client):
+            store._init_collection()
+
+        assert store._named_schema is True
+        assert store._sparse_enabled is True
+        kwargs = client.create_collection.call_args.kwargs
+        assert set(kwargs["vectors_config"].keys()) == {"dense"}
+        assert set(kwargs["sparse_vectors_config"].keys()) == {"sparse"}
