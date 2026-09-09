@@ -2880,8 +2880,9 @@ def test_read_history_lifecycle_is_independent_of_dedupe_rollout(
 ):
     config_path = _read_tracking_config(tmp_path)
     run_hook(_captured_tool_input(), config_path=config_path)
-    assert (
-        run_hook(_hook_input("", event=event, **fields), config_path=config_path) == ""
+    output = run_hook(_hook_input("", event=event, **fields), config_path=config_path)
+    assert bool(output) is (
+        event == "SessionStart" and fields.get("source") == "compact"
     )
     state = (
         claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
@@ -2889,6 +2890,371 @@ def test_read_history_lifecycle_is_independent_of_dedupe_rollout(
         .state
     )
     assert bool(state.skill_reads) is retained
+
+
+@pytest.mark.parametrize("rollout", ["off", "enforce"])
+@pytest.mark.parametrize(
+    ("error", "is_interrupt"),
+    [("store unavailable", False), ("interrupted", True)],
+)
+def test_failed_reread_remains_in_compaction_guidance(
+    tmp_path, rollout, error, is_interrupt
+):
+    config_path = _read_tracking_config(tmp_path, rollout=rollout)
+    manager = _StaticSkillManager(
+        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+    )
+    run_hook(
+        _hook_input("first"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    run_hook(_captured_tool_input(), config_path=config_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    original = store.load("session-123").state.skill_reads["skill:probe"]
+    run_hook(
+        _captured_tool_input(
+            "PostToolUseFailure",
+            tool_input={"skill_id": "skill:probe"},
+            error=error,
+            is_interrupt=is_interrupt,
+        ),
+        config_path=config_path,
+    )
+    for _ in range(2):
+        output = run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        reminder = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        assert '"skill_id": "skill:probe"' in reminder
+        state = store.load("session-123").state
+        assert state.skill_reads["skill:probe"] == replace(
+            original, catalog_fingerprint=None
+        )
+        assert state.activations["id:skill:probe"].activation_fingerprint is None
+
+    assert run_hook(
+        _hook_input("retry"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    assert store.load("session-123").state.skill_reads["skill:probe"] == original
+
+
+def test_compaction_preserves_latest_catalog_fingerprint_across_repeated_reminders(
+    tmp_path,
+):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce")
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    first = _catalog_candidate(
+        name="probe", procedure_id="skill:probe", description="f1"
+    )
+    second = _catalog_candidate(
+        name="probe", procedure_id="skill:probe", description="f2"
+    )
+    assert run_hook(
+        _hook_input("first"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager([first]),
+    )
+    run_hook(_captured_tool_input(), config_path=config_path)
+    assert run_hook(
+        _hook_input("updated"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager([second]),
+    )
+    before = store.load("session-123").state
+    for generation in [1, 2]:
+        output = run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        response = json.loads(output)
+        assert response["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+        assert (
+            '"skill_id": "skill:probe"'
+            in response["hookSpecificOutput"]["additionalContext"]
+        )
+        after = store.load("session-123").state
+        assert after.context_generation == generation
+        assert after.skill_reads == before.skill_reads
+        assert after.activations["id:skill:probe"].activation_fingerprint == (
+            before.activations["id:skill:probe"].activation_fingerprint
+        )
+        assert (
+            run_hook(
+                _hook_input("continue"),
+                config_path=config_path,
+                manager_factory=lambda _: _StaticSkillManager([second]),
+            )
+            == ""
+        )
+    third = _catalog_candidate(
+        name="probe", procedure_id="skill:probe", description="f3"
+    )
+    assert run_hook(
+        _hook_input("new version"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager([third]),
+    )
+
+
+def test_reminder_without_fingerprint_allows_first_catalog_then_suppresses_unchanged(
+    tmp_path,
+):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce")
+    run_hook(_captured_tool_input(), config_path=config_path)
+    assert run_hook(
+        _hook_input("", event="SessionStart", source="compact"), config_path=config_path
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    assert (
+        store.load("session-123")
+        .state.activations["id:skill:probe"]
+        .activation_fingerprint
+        is None
+    )
+    manager = _StaticSkillManager(
+        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+    )
+    assert run_hook(
+        _hook_input("first catalog"),
+        config_path=config_path,
+        manager_factory=lambda _: manager,
+    )
+    assert (
+        store.load("session-123").state.skill_reads["skill:probe"].catalog_fingerprint
+    )
+    assert (
+        run_hook(
+            _hook_input("same catalog"),
+            config_path=config_path,
+            manager_factory=lambda _: manager,
+        )
+        == ""
+    )
+
+
+def test_compaction_discloses_only_included_ids_and_later_offers_omitted_catalog(
+    tmp_path,
+):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce")
+    config = json.loads(config_path.read_text())
+    config["rendering"].update(
+        max_chars=7_000, hard_max_chars=7_000, max_chars_per_skill=6_000
+    )
+    config_path.write_text(json.dumps(config))
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    skill_ids = [f"skill:{index}:" + "x" * 1_900 for index in range(5)]
+    for skill_id in skill_ids:
+        store.record_skill_read("session-123", skill_id, "probe")
+    before = store.load("session-123").state
+    output = run_hook(
+        _hook_input("", event="SessionStart", source="compact"), config_path=config_path
+    )
+    context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    included = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]["lifecycle"][
+        "reminded_skills"
+    ]
+    assert 0 < len(included) < len(skill_ids)
+    assert len(context.encode("utf-16-le")) // 2 <= 8_000
+    after = store.load("session-123").state
+    assert set(after.activations) == {f"id:{skill_id}" for skill_id in included}
+    assert after.skill_reads == before.skill_reads
+    omitted = next(skill_id for skill_id in skill_ids if skill_id not in included)
+    assert run_hook(
+        _hook_input("omitted catalog"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager(
+            [_catalog_candidate(name="probe", procedure_id=omitted)]
+        ),
+    )
+
+
+def test_compaction_with_no_fitting_read_emits_no_reminder_or_disclosures(tmp_path):
+    config_path = _read_tracking_config(tmp_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    store.record_skill_read("session-123", "x" * 8_000, "oversized")
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
+    state = store.load("session-123").state
+    assert state.context_generation == 1
+    assert state.skill_reads
+    assert state.activations == {}
+
+
+def test_compaction_opt_out_still_resets_enabled_dedupe_without_reminder(tmp_path):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce")
+    run_hook(_captured_tool_input(), config_path=config_path)
+    config_path = _read_tracking_config(tmp_path, rollout="enforce", enabled=False)
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
+    state = (
+        claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+        .load("session-123")
+        .state
+    )
+    assert state.context_generation == 1
+    assert state.skill_reads
+    assert state.activations == {}
+
+
+@pytest.mark.parametrize("failure", ["audit", "render", "serialization"])
+def test_reminder_output_failures_keep_reset_but_record_no_disclosures(
+    tmp_path, monkeypatch, failure
+):
+    config_path = _read_tracking_config(tmp_path)
+    run_hook(_captured_tool_input(), config_path=config_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    store.record_activations(
+        "session-123",
+        [
+            claude_session_state_module.ActivationUpdate(
+                "id:skill:probe", "f1", "probe", 50
+            )
+        ],
+        expected_generation=0,
+    )
+    before = store.load("session-123").state
+
+    def unexpected_record(*_args, **_kwargs):
+        pytest.fail("unaudited reminders must not prepare or record disclosures")
+
+    monkeypatch.setattr(
+        claude_hook_module, "_record_compaction_disclosures", unexpected_record
+    )
+    if failure == "audit":
+        monkeypatch.setattr(
+            skill_context_module.AuditLogger, "write_or_fail", lambda *_: False
+        )
+    elif failure == "render":
+
+        def fail_render(*_args, **_kwargs):
+            raise ValueError("render failure")
+
+        monkeypatch.setattr(
+            claude_hook_module, "render_compaction_reminder", fail_render
+        )
+    else:
+        original_dumps = json.dumps
+
+        def fail_serialization(payload, *args, **kwargs):
+            if isinstance(payload, dict) and "hookSpecificOutput" in payload:
+                raise ValueError("serialization failure")
+            return original_dumps(payload, *args, **kwargs)
+
+        monkeypatch.setattr(claude_hook_module.json, "dumps", fail_serialization)
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
+    after = store.load("session-123").state
+    assert after.context_generation == 1
+    assert after.activations == {}
+    assert after.skill_reads == before.skill_reads
+
+
+@pytest.mark.parametrize(
+    ("failure", "record_warnings"),
+    [
+        ("typed", []),
+        ("exception", ["claude_session_state_reminder_record_failed"]),
+        ("stale_generation", ["claude_session_state_stale_generation"]),
+    ],
+)
+def test_reminder_disclosure_record_failure_preserves_prepared_output(
+    tmp_path, monkeypatch, failure, record_warnings
+):
+    config_path = _read_tracking_config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["claude"]["native_catalog_mode"] = "not-a-mode"
+    config["claude"]["session_dedupe"]["policy"] = "not-a-policy"
+    config_path.write_text(json.dumps(config))
+    run_hook(_captured_tool_input(), config_path=config_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    if failure == "stale_generation":
+        original_audit = skill_context_module.AuditLogger.write_or_fail
+
+        def concurrent_reset(logger, record):
+            result = original_audit(logger, record)
+            if record["status"] == "state_reset":
+                store.advance_context_generation(
+                    "session-123", reason="clear", clear_skill_reads=True
+                )
+            return result
+
+        monkeypatch.setattr(
+            skill_context_module.AuditLogger, "write_or_fail", concurrent_reset
+        )
+    else:
+
+        def fail_record(*_args, **_kwargs):
+            if failure == "exception":
+                raise OSError("write failed")
+            return claude_session_state_module.StateOperationResult("write_failed")
+
+        monkeypatch.setattr(
+            claude_session_state_module.ClaudeSessionStateStore,
+            "record_activations",
+            fail_record,
+        )
+    output = run_hook(
+        _hook_input("", event="SessionStart", source="compact"), config_path=config_path
+    )
+    assert (
+        "skill:probe" in json.loads(output)["hookSpecificOutput"]["additionalContext"]
+    )
+    assert store.load("session-123").state.activations == {}
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    original_warnings = [
+        "invalid_native_catalog_mode",
+        "invalid_session_dedupe_policy",
+    ]
+    assert rows[-2]["status"] == "state_reset"
+    assert rows[-2]["warnings"] == original_warnings
+    row = rows[-1]
+    assert row["status"] == "state_record_failed"
+    assert row["audit_event"] == "compaction_reminder_state_record"
+    assert row["warnings"] == [*original_warnings, *record_warnings]
+    if failure == "stale_generation":
+        assert row["lifecycle"]["state_record_status"] == "stale_generation"
+        assert store.load("session-123").state.context_generation == 2
+
+
+def test_reset_failure_does_not_emit_a_reminder_from_the_previous_state(
+    tmp_path, monkeypatch
+):
+    config_path = _read_tracking_config(tmp_path)
+    run_hook(_captured_tool_input(), config_path=config_path)
+    state = (
+        claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+        .load("session-123")
+        .state
+    )
+    monkeypatch.setattr(
+        claude_session_state_module.ClaudeSessionStateStore,
+        "advance_context_generation",
+        lambda *_args, **_kwargs: claude_session_state_module.StateOperationResult(
+            "write_failed", state=state
+        ),
+    )
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
 
 
 @pytest.mark.parametrize("enabled", [False, "false", 1, None, []])

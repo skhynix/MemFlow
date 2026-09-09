@@ -20,8 +20,10 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from memflow.claude_catalog import normalize_native_catalog_mode
+from memflow.claude_compaction import render_compaction_reminder
 from memflow.claude_session_state import (
     ActivationUpdate,
+    ClaudeSessionState,
     ClaudeSessionStateStore,
     StateOperationResult,
     resolve_state_dir,
@@ -431,6 +433,35 @@ def _read_skill_input_id(hook_input: HookInput) -> str | None:
         return None
     skill_id = hook_input.tool_input.get("skill_id")
     return skill_id if isinstance(skill_id, str) and skill_id else None
+
+
+def _record_compaction_disclosures(
+    config: dict[str, Any],
+    session_id: str,
+    state: ClaudeSessionState,
+    included: dict[str, int],
+) -> StateOperationResult:
+    """Record audited reminder disclosures without claiming a successful reread."""
+    try:
+        updates = [
+            ActivationUpdate(
+                identity=f"id:{skill_id}",
+                activation_fingerprint=state.skill_reads[skill_id].catalog_fingerprint,
+                name=state.skill_reads[skill_id].name,
+                emitted_chars=entry_chars,
+            )
+            for skill_id, entry_chars in included.items()
+        ]
+        store = ClaudeSessionStateStore(
+            str(_session_dedupe_settings(config)["state_dir"])
+        )
+        return store.record_activations(
+            session_id, updates, expected_generation=state.context_generation
+        )
+    except Exception:
+        return StateOperationResult(
+            "record_failed", warnings=("claude_session_state_reminder_record_failed",)
+        )
 
 
 def _successful_read_name(response: Any, skill_id: str) -> str | None:
@@ -855,6 +886,30 @@ def run_hook(
             return ""
         if hook_input.hook_event_name in {"SessionStart", "SessionEnd"}:
             reset_result = _reset_session_for_lifecycle(hook_input, config)
+            reminder_context = ""
+            included: dict[str, int] = {}
+            if (
+                hook_input.hook_event_name == "SessionStart"
+                and hook_input.source == "compact"
+                and _reread_after_compaction_enabled(config)
+                and reset_result is not None
+                and reset_result.succeeded
+                and reset_result.state is not None
+            ):
+                reminder_context, included = render_compaction_reminder(
+                    reset_result.state.skill_reads
+                )
+            planned_stdout = ""
+            if reminder_context:
+                planned_stdout = json.dumps(
+                    {
+                        "suppressOutput": True,
+                        "hookSpecificOutput": {
+                            "hookEventName": "SessionStart",
+                            "additionalContext": reminder_context,
+                        },
+                    }
+                )
             record = audit_logger.base_record(
                 trace_id=trace_id,
                 request=context_request,
@@ -885,9 +940,27 @@ def run_hook(
                     if reset_result is not None and reset_result.state is not None
                     else None
                 ),
+                "reminded_skills": list(included),
             }
-            audit_logger.write_or_fail(record)
-            return ""
+            if not audit_logger.write_or_fail(record):
+                return ""
+            if included and reset_result is not None and reset_result.state is not None:
+                recorded = _record_compaction_disclosures(
+                    config, hook_input.session_id, reset_result.state, included
+                )
+                if not recorded.succeeded:
+                    failure_record = {
+                        **record,
+                        "status": "state_record_failed",
+                        "audit_event": "compaction_reminder_state_record",
+                        "warnings": [*record["warnings"], *recorded.warnings],
+                        "lifecycle": {
+                            **record["lifecycle"],
+                            "state_record_status": recorded.status,
+                        },
+                    }
+                    audit_logger.write_or_fail(failure_record)
+            return planned_stdout
         if hook_input.hook_event_name != "UserPromptSubmit":
             record = audit_logger.base_record(
                 trace_id=trace_id,

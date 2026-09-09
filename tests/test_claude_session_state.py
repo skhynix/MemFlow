@@ -86,7 +86,7 @@ def _invalid_payload(variant: str) -> object:
     elif variant == "activation_identity":
         payload["activations"] = {"": next(iter(payload["activations"].values()))}
     elif variant == "activation_fingerprint":
-        next(iter(payload["activations"].values()))["activation_fingerprint"] = None
+        next(iter(payload["activations"].values()))["activation_fingerprint"] = []
     elif variant == "activation_name":
         next(iter(payload["activations"].values()))["name"] = []
     elif variant == "activation_chars":
@@ -819,6 +819,31 @@ def test_skill_reads_store_only_metadata_and_cache_disclosed_fingerprint(tmp_pat
             "catalog_fingerprint": "f1",
         }
     }
+
+
+def test_nullable_reminder_fingerprint_round_trips_without_refreshing_read_time(
+    tmp_path,
+):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    observed = store.record_skill_read(SESSION_ID, "skill:alpha", "alpha")
+    reminder = store.record_activations(
+        SESSION_ID,
+        [ActivationUpdate("id:skill:alpha", None, "alpha", 50)],
+        expected_generation=0,
+    )
+    assert reminder.succeeded
+    assert reminder.state.activations["id:skill:alpha"].activation_fingerprint is None
+    assert reminder.state.skill_reads == observed.state.skill_reads
+    assert store.load(SESSION_ID).state == reminder.state
+
+
+def test_missing_activation_fingerprint_field_is_still_invalid(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.state_dir.mkdir()
+    payload = _valid_payload()
+    next(iter(payload["activations"].values())).pop("activation_fingerprint")
+    store.state_path(SESSION_ID).write_text(json.dumps(payload))
+    assert store.load(SESSION_ID).status == "invalid_state"
 
 
 def test_repeated_read_refreshes_name_and_time_without_claiming_disclosure(

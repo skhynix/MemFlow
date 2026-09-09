@@ -815,7 +815,7 @@ def add_claude_subcommands(parser: argparse.ArgumentParser) -> None:
     configure.add_argument("--catalog", choices=sorted(SUPPORTED_NATIVE_CATALOG_MODES))
     configure.add_argument(
         "--hook-command",
-        help="command string to install for the MemFlow UserPromptSubmit hook",
+        help="command string to install for all managed MemFlow hooks",
     )
     action = configure.add_mutually_exclusive_group()
     action.add_argument(

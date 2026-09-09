@@ -34,7 +34,7 @@ class ActivationUpdate:
     """One rendered activation prepared for hook output."""
 
     identity: str
-    activation_fingerprint: str
+    activation_fingerprint: str | None
     name: str
     emitted_chars: int
 
@@ -43,7 +43,7 @@ class ActivationUpdate:
 class StoredActivation:
     """The latest emitted fingerprint for one stable activation identity."""
 
-    activation_fingerprint: str
+    activation_fingerprint: str | None
     name: str
     emitted_chars: int
     emitted_at: str
@@ -504,7 +504,7 @@ def _validated_updates(
             return {}, "invalid_activations"
         if not isinstance(update.identity, str) or not update.identity:
             return {}, "invalid_activations"
-        if (
+        if update.activation_fingerprint is not None and (
             not isinstance(update.activation_fingerprint, str)
             or not update.activation_fingerprint
         ):
@@ -610,7 +610,10 @@ def _validate_state_payload(
         name = raw_activation.get("name")
         emitted_chars = raw_activation.get("emitted_chars")
         emitted_at = raw_activation.get("emitted_at")
-        if not isinstance(fingerprint, str) or not fingerprint:
+        if "activation_fingerprint" not in raw_activation or (
+            fingerprint is not None
+            and (not isinstance(fingerprint, str) or not fingerprint)
+        ):
             return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
         if not isinstance(name, str):
             return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))

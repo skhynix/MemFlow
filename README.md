@@ -67,7 +67,7 @@ From your project's root directory, run:
 memflow claude configure --apply
 ```
 
-This installs the hook, registers a private MCP server for this project, and
+This installs the hooks, registers a private MCP server for this project, and
 saves the path to your `.env`. Skill commands, the hook, and MCP reuse that
 file. You can safely run the command again with the same settings.
 
@@ -249,6 +249,69 @@ If an embedding API request fails, MemFlow can fall back to hash vectors, which
 do not provide semantic search. Fix the endpoint and re-register affected
 skills with `skill add`. When retrieval fails or times out, Claude continues
 without additional skill context.
+
+## Skill context after compaction and clear
+
+The Quick Start installs `UserPromptSubmit`, `SessionStart`, `SessionEnd`,
+`PostToolUse`, and `PostToolUseFailure` hooks together with the `memflow`
+MCP server. To refresh an existing installation, run these commands from
+your project's root directory:
+
+```bash
+memflow claude configure --apply
+memflow claude status
+```
+
+Status reports missing or incomplete event registrations in
+`hook.missing_events`. To remove all managed hooks, use
+`memflow claude configure --hook off --apply`. This preserves unrelated
+user hooks and the MCP registration; add `--mcp off` to remove both
+integrations.
+
+After manual or automatic compaction, MemFlow clears catalog
+deduplication state and asks
+Claude to reread previously successful skill IDs before continuing the
+current task. The reminder explains how to respect each result's
+`trust_mode` and avoid repeating completed work or one-time setup.
+It prioritizes recent reads within a fixed 8,000 UTF-16-unit limit;
+entries that do not fit are omitted. Only included IDs count as disclosed
+in the new context, and changed catalog fingerprints can still be shown
+again when deduplication is enforced.
+
+The reminder is enabled by default. To disable it and stop tracking new
+successful reads, set this in `.memflow/claude-hook.json`:
+
+```json
+{
+  "claude": {
+    "reread_after_compaction": false
+  }
+}
+```
+
+This option is independent of `claude.session_dedupe.rollout`, whose
+default remains `off`. While rereading is enabled, MemFlow stores session
+metadata even with deduplication off: disclosed catalog fingerprints and
+successful read IDs, names, last-read times, and optional catalog
+fingerprints. The default directory is `.memflow/claude-sessions`.
+Session state does not retain skill bodies, raw tool results, or
+transcripts. Both features must be off to disable session-state access.
+
+`/clear` clears the old session's history and starts the new session
+empty. Startup also starts empty; resume and ordinary session endings
+preserve history. A failed `read_skill` call invalidates that ID's disclosure
+and cached catalog fingerprint so a later prompt can offer it again.
+Successful read history is retained for future compaction reminders,
+including when a later read fails or is interrupted.
+
+Rereading retrieves the current stored skill, rather than a historical
+body snapshot. Emitting a reminder does not prove that Claude reread it;
+successful reads are recorded separately from the reminder. Hook and
+state failures remain best-effort and do not block the conversation.
+
+**NOTE:** Claude subagent events can carry the parent session ID, so a
+subagent compaction may reset shared state. See
+[Claude Code issue 91910](https://github.com/anthropics/claude-code/issues/91910).
 
 ## Benchmarks
 
