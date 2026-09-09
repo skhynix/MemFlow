@@ -127,7 +127,7 @@ def _add_env_file_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--env-file",
         metavar="PATH",
-        help="load Qdrant configuration from this environment file",
+        help="override the saved project environment file (default: .env)",
     )
 
 

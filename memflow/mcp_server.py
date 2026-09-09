@@ -24,12 +24,13 @@ server = FastMCP(
 
 _manager: MemFlow | None = None
 _env_file: str | None = None
+_config_path: str | None = None
 
 
 def _create_manager(env_file: str | None) -> MemFlow:
     from memflow.skill_runtime import create_skill_manager
 
-    return create_skill_manager(env_file)
+    return create_skill_manager(env_file, config_path=_config_path)
 
 
 def _get_manager() -> MemFlow:
@@ -94,19 +95,25 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="memflow-mcp",
         description="Run the local MemFlow MCP server over stdio.",
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
         "--env-file",
         metavar="PATH",
         help="load Qdrant configuration from this environment file",
+    )
+    source.add_argument(
+        "--config", help="read the environment file saved by memflow claude configure"
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     """Run the MemFlow MCP server over stdio."""
-    global _env_file
+    global _env_file, _config_path, _manager
     args: Any = _build_parser().parse_args(argv)
     _env_file = args.env_file
+    _config_path = args.config
+    _manager = None
     server.run(transport="stdio")
 
 

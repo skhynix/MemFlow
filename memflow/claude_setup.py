@@ -25,6 +25,13 @@ from memflow.claude_catalog import (
     normalize_native_catalog_mode,
 )
 from memflow.claude_hook import DEFAULT_CONFIG, DEFAULT_CONFIG_PATH
+from memflow.claude_mcp import (
+    MCPSettingsPlan,
+    apply_mcp_settings_plan,
+    build_mcp_settings_plan,
+    local_mcp_server,
+)
+from memflow.skill_runtime import resolve_env_file
 
 CLAUDE_HOOK_EVENT = "UserPromptSubmit"
 MANAGED_HOOK_MARKER = "# memflow-managed:claude-hook"
@@ -59,6 +66,7 @@ class ClaudeSetupPlan:
     hook_plan: HookSettingsPlan
     catalog_mode: str | None
     catalog_plan: ClaudeCatalogSettingsPlan | None
+    mcp_plan: MCPSettingsPlan | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -75,7 +83,12 @@ class ClaudeSetupPlan:
 
     @property
     def changed(self) -> bool:
-        return self.config_changed or self.settings_changed or self.state_changed
+        return (
+            self.config_changed
+            or self.settings_changed
+            or self.state_changed
+            or (self.mcp_plan is not None and self.mcp_plan.changed)
+        )
 
     def to_status(self, *, applied: bool) -> dict[str, Any]:
         mode = normalize_native_catalog_mode(self.config_after)
@@ -89,6 +102,12 @@ class ClaudeSetupPlan:
             "config_path": str(self.config_path),
             "settings_path": str(self.settings_path),
             "state_path": str(self.state_path),
+            "env_file": str(
+                resolve_env_file(
+                    project_root=self.project_root, config=self.config_after
+                )
+            ),
+            "mcp": self.mcp_plan.to_status() if self.mcp_plan is not None else None,
             "hook": {
                 "requested": self.hook_action,
                 "installed_before": self.hook_plan.installed_before,
@@ -439,9 +458,11 @@ def build_claude_setup_plan(
     hook: str | None = None,
     catalog: str | None = None,
     hook_command: str | None = None,
+    env_file: str | Path | None = None,
+    mcp: str | None = None,
 ) -> ClaudeSetupPlan:
-    if hook is None and catalog is None:
-        raise ValueError("at least one of hook or catalog must be requested")
+    if hook is None and catalog is None and mcp is None and env_file is None:
+        hook = mcp = "on"
 
     project, resolved_config, resolved_settings, resolved_state = _path_options(
         project_root=project_root,
@@ -456,10 +477,46 @@ def build_claude_setup_plan(
     config_after = _config_for_edit(
         config_before,
         config_exists=config_exists,
-        should_create=hook == "on" or catalog is not None,
+        should_create=hook == "on"
+        or mcp == "on"
+        or catalog is not None
+        or env_file is not None,
         include_catalog_defaults=catalog is not None,
     )
     warnings: list[str] = []
+    if env_file is not None or hook == "on" or mcp == "on":
+        resolved_env = resolve_env_file(
+            env_file, project_root=project, config=config_before
+        )
+        if not resolved_env.is_file():
+            raise ValueError(f"environment file is not a file: {resolved_env}")
+        memflow_config = config_after.setdefault("memflow", {})
+        if not isinstance(memflow_config, dict):
+            raise ValueError("skill config memflow must be a JSON object")
+        memflow_config["env_file"] = str(resolved_env)
+
+    mcp_plan = None
+    if mcp is not None:
+        claude_config = config_after.get("claude", {})
+        if not isinstance(claude_config, dict):
+            raise ValueError("skill config claude must be a JSON object")
+        server = {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": ["-m", "memflow.mcp_server", "--config", str(resolved_config)],
+            "env": {},
+        }
+        mcp_plan = build_mcp_settings_plan(
+            project,
+            action=mcp,
+            server=server,
+            managed_server=claude_config.get("mcp_server"),
+        )
+        if mcp == "on":
+            claude_config["mcp_server"] = server
+            config_after["claude"] = claude_config
+        else:
+            claude_config.pop("mcp_server", None)
     if catalog is not None:
         config_after, config_warnings = _set_catalog_mode(config_after, catalog)
         warnings.extend(config_warnings)
@@ -514,11 +571,14 @@ def build_claude_setup_plan(
         hook_plan=hook_plan,
         catalog_mode=catalog,
         catalog_plan=catalog_plan,
+        mcp_plan=mcp_plan,
         warnings=tuple(dict.fromkeys(warnings)),
     )
 
 
 def apply_claude_setup_plan(plan: ClaudeSetupPlan) -> None:
+    if plan.mcp_plan is not None:
+        apply_mcp_settings_plan(plan.mcp_plan)
     if plan.config_changed:
         _write_json_object(plan.config_path, plan.config_after)
     if plan.settings_changed:
@@ -581,11 +641,28 @@ def build_status(
         state_before, catalog_warnings = _read_catalog_state_for_status(resolved_state)
 
     warnings = [*mode.warnings, *catalog_warnings, *hook_warnings]
+    configured_env = resolve_env_file(project_root=project, config=config)
+    mcp_server = local_mcp_server(project)
+    claude_config = config.get("claude", {})
+    expected_mcp = (
+        claude_config.get("mcp_server") if isinstance(claude_config, dict) else None
+    )
+    if expected_mcp is not None and mcp_server != expected_mcp:
+        mismatches.append("mcp_settings")
     return {
         "project_root": str(project),
         "config_path": str(resolved_config),
         "settings_path": str(resolved_settings),
         "state_path": str(resolved_state),
+        "env_file": str(configured_env),
+        "env_file_exists": configured_env.is_file(),
+        "mcp": {
+            "scope": "local",
+            "installed": mcp_server is not None,
+            "matches_config": mcp_server == expected_mcp
+            if expected_mcp is not None
+            else None,
+        },
         "hook": {
             "installed": bool(commands),
             "commands": list(commands),
@@ -632,34 +709,45 @@ def _add_common_path_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _run_status(args: argparse.Namespace, *, stdout: TextIO, **_: Any) -> int:
-    _write_status(
-        stdout,
-        build_status(
+def _run_status(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO, **_: Any
+) -> int:
+    try:
+        status = build_status(
             project_root=args.project_root,
             config_path=args.config_path,
             settings_path=args.settings_path,
             state_path=args.state_path,
-        ),
-    )
+        )
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=stderr)
+        return 1
+    _write_status(stdout, status)
     return 0
 
 
-def _run_configure(args: argparse.Namespace, *, stdout: TextIO, **_: Any) -> int:
-    if args.hook is None and args.catalog is None:
-        raise SystemExit("configure requires --hook, --catalog, or both")
-    plan = build_claude_setup_plan(
-        project_root=args.project_root,
-        config_path=args.config_path,
-        settings_path=args.settings_path,
-        state_path=args.state_path,
-        hook=args.hook,
-        catalog=args.catalog,
-        hook_command=args.hook_command,
-    )
-    if args.apply:
-        apply_claude_setup_plan(plan)
-    _write_status(stdout, plan.to_status(applied=args.apply))
+def _run_configure(
+    args: argparse.Namespace, *, stdout: TextIO, stderr: TextIO, **_: Any
+) -> int:
+    try:
+        plan = build_claude_setup_plan(
+            project_root=args.project_root,
+            config_path=args.config_path,
+            settings_path=args.settings_path,
+            state_path=args.state_path,
+            hook=args.hook,
+            catalog=args.catalog,
+            hook_command=args.hook_command,
+            env_file=args.env_file,
+            mcp=args.mcp,
+        )
+        status = plan.to_status(applied=args.apply)
+        if args.apply:
+            apply_claude_setup_plan(plan)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=stderr)
+        return 1
+    _write_status(stdout, status)
     return 0
 
 
@@ -672,10 +760,26 @@ def add_claude_subcommands(parser: argparse.ArgumentParser) -> None:
 
     configure = subparsers.add_parser(
         "configure",
-        help="preview or apply Claude hook and catalog settings",
+        help="set up the Claude hook and MCP server, or change individual settings",
+        description=(
+            "Enable the hook and project-local MCP server when no --hook, --mcp, "
+            "--catalog, or --env-file option is given. "
+            "Use those options to change individual settings. "
+            "To activate both integrations with a custom environment file, "
+            "use --hook on --mcp on --env-file PATH. "
+            "Preview changes unless --apply is given."
+        ),
     )
     _add_common_path_args(configure)
     configure.add_argument("--hook", choices=("on", "off"))
+    configure.add_argument("--mcp", choices=("on", "off"))
+    configure.add_argument(
+        "--env-file",
+        help=(
+            "save this environment file for the project without changing hook, "
+            "MCP, or catalog settings unless requested separately"
+        ),
+    )
     configure.add_argument("--catalog", choices=sorted(SUPPORTED_NATIVE_CATALOG_MODES))
     configure.add_argument(
         "--hook-command",
@@ -704,7 +808,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Iterable[str] | None = None, *, stdout: TextIO | None = None) -> int:
+def main(
+    argv: Iterable[str] | None = None,
+    *,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     out = stdout or sys.stdout
@@ -712,7 +821,7 @@ def main(argv: Iterable[str] | None = None, *, stdout: TextIO | None = None) -> 
     if handler is None:
         parser.print_help(file=out)
         return 0
-    return handler(args, stdout=out)
+    return handler(args, stdout=out, stderr=stderr or sys.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

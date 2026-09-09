@@ -200,6 +200,7 @@ def test_configure_dry_run_does_not_write_config_settings_or_state(
     tmp_path,
     monkeypatch,
 ):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _write_skill(tmp_path / ".claude" / "skills" / "project-skill")
 
@@ -221,6 +222,7 @@ def test_hook_on_adds_user_prompt_submit_hook_and_preserves_settings(
     tmp_path,
     monkeypatch,
 ):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     settings_path = tmp_path / ".claude" / "settings.local.json"
     settings_path.parent.mkdir(parents=True)
@@ -271,6 +273,7 @@ def test_hook_on_adds_user_prompt_submit_hook_and_preserves_settings(
 
 
 def test_hook_only_setup_does_not_create_catalog_mismatch(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _write_skill(tmp_path / ".claude" / "skills" / "project-skill")
 
@@ -292,6 +295,7 @@ def test_hook_only_setup_does_not_create_catalog_mismatch(tmp_path, monkeypatch)
 
 
 def test_hook_command_override_is_marked_and_installed(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     rc, status = _run_memflow_claude(
@@ -314,6 +318,7 @@ def test_hook_command_override_is_marked_and_installed(tmp_path, monkeypatch):
 
 
 def test_hook_on_is_idempotent(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     _run_memflow_claude(["configure", "--hook", "on", "--apply"], tmp_path=tmp_path)
@@ -425,6 +430,7 @@ def test_missing_and_non_string_hook_commands_are_not_reported_installed(
 
 
 def test_combined_hook_and_catalog_configure_merges_settings(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _write_skill(tmp_path / ".claude" / "skills" / "project-skill")
     settings_path = tmp_path / ".claude" / "settings.local.json"
@@ -466,6 +472,7 @@ def test_combined_hook_and_catalog_configure_merges_settings(tmp_path, monkeypat
 
 
 def test_status_reports_hook_catalog_state_and_mismatches(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     _write_skill(tmp_path / ".claude" / "skills" / "project-skill")
     _run_memflow_claude(

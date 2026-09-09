@@ -36,9 +36,9 @@ from memflow.skill_context import (
     SkillContextSelector,
     selected_skill_metadata,
 )
+from memflow.skill_runtime import DEFAULT_CONFIG_PATH
 
 ADAPTER_NAME = "claude-code-user-prompt-submit"
-DEFAULT_CONFIG_PATH = ".memflow/claude-hook.json"
 DEFAULT_RETRIEVAL_TIMEOUT_MS = 2000
 DEFAULT_SESSION_DEDUPE_ROLLOUT = "off"
 DEFAULT_SESSION_DEDUPE_POLICY = "on_hash_change"
