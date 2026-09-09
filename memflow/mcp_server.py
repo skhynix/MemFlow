@@ -27,9 +27,9 @@ _env_file: str | None = None
 
 
 def _create_manager(env_file: str | None) -> MemFlow:
-    from memflow.skill_cli import _create_skill_manager
+    from memflow.skill_runtime import create_skill_manager
 
-    return _create_skill_manager(env_file)
+    return create_skill_manager(env_file)
 
 
 def _get_manager() -> MemFlow:

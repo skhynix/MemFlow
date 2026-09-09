@@ -26,7 +26,6 @@ from memflow.claude_session_state import (
     StateOperationResult,
     resolve_state_dir,
 )
-from memflow.llm import BaseLLM
 from memflow.skill_context import (
     AuditLogger,
     CatalogRenderer,
@@ -54,8 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "memflow": {
         "env_file": ".env",
         "reuse_existing_config": True,
-        # Informational only; the actual backend is selected by MEMFLOW_BACKEND
-        # in .env (read by MemFlow.__init__). No code reads this key today.
+        # Informational only; the skill runtime supports Qdrant.
         "store": "QdrantStore",
         "user_id": "default",
     },
@@ -121,14 +119,6 @@ ManagerFactory = Callable[[dict[str, Any]], Any]
 
 class RetrievalTimeoutError(TimeoutError):
     """Raised when MemFlow skill retrieval exceeds the hook timeout."""
-
-
-class _HookRetrievalOnlyLLM(BaseLLM):
-    """LLM placeholder for hook paths that only need store-backed retrieval."""
-
-    def generate(self, messages: list[dict]) -> str:
-        del messages
-        raise RuntimeError("Claude hook skill retrieval does not support LLM calls")
 
 
 def _deep_merge(default: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -305,15 +295,14 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
 
 
 def default_manager_factory(config: dict[str, Any]) -> Any:
-    """Build MemFlow from the current environment and optional config env file."""
-    from memflow.manager import MemFlow, _load_env_file
+    """Use the same Qdrant configuration as skill commands and MCP."""
+    from memflow.skill_runtime import create_skill_manager
 
     memflow_config = config.get("memflow", {})
-    if isinstance(memflow_config, dict):
-        env_file = memflow_config.get("env_file")
-        if env_file:
-            _load_env_file(str(env_file))
-    return MemFlow(llm=_HookRetrievalOnlyLLM(), use_env=True)
+    env_file = (
+        memflow_config.get("env_file") if isinstance(memflow_config, dict) else None
+    )
+    return create_skill_manager(env_file)
 
 
 def parse_hook_input(stdin_text: str) -> HookInput:

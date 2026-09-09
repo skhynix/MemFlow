@@ -19,7 +19,6 @@ import memflow.skills as skills_module
 from memflow.claude_hook import (
     ADAPTER_NAME,
     build_skill_context_request,
-    default_manager_factory,
     load_hook_config,
     parse_hook_input,
     run_hook,
@@ -1153,27 +1152,6 @@ def test_memflow_errors_fail_open(tmp_path):
     assert audit["status"] == "fail_open"
     assert audit["warnings"] == ["RuntimeError"]
     assert audit["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
-
-
-def test_default_factory_avoids_optional_llm_dependencies(monkeypatch, tmp_path):
-    import memflow.manager as manager_module
-
-    def fail_if_llm_factory_is_used(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("hook retrieval path should not construct an LLM")
-
-    monkeypatch.setattr(
-        manager_module.LLMFactory, "create", fail_if_llm_factory_is_used
-    )
-    monkeypatch.setenv("MEMFLOW_BACKEND", "emulated")
-    config = load_hook_config(tmp_path / "missing-config.json")
-    config["memflow"]["env_file"] = str(tmp_path / "missing.env")
-
-    manager = default_manager_factory(config)
-
-    assert isinstance(manager.store, EmulatedStore)
-    with pytest.raises(RuntimeError, match="does not support LLM calls"):
-        manager.llm.generate([])
 
 
 def test_retrieval_timeout_fails_open(tmp_path):

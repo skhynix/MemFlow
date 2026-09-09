@@ -7,72 +7,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
-from memflow.llm import BaseLLM
+from memflow.skill_runtime import create_skill_manager
 
 if TYPE_CHECKING:
     from memflow.manager import MemFlow
     from memflow.models import Procedure
 
 TRUST_STATES = ("trusted", "unknown", "blocked")
-SUPPORTED_BACKEND = "qdrant"
-
-
-class _SkillManagementLLM(BaseLLM):
-    """LLM placeholder for commands that only use store-backed skill APIs."""
-
-    def generate(self, messages: list[dict]) -> str:
-        del messages
-        raise RuntimeError("skill management commands do not support LLM calls")
 
 
 def _stable_json(data: object) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
-
-
-def _create_skill_manager(env_file: str | None = None) -> MemFlow:
-    from memflow.manager import MemFlow, QdrantStore, _load_env_file
-
-    if env_file is not None:
-        path = Path(env_file).expanduser()
-        if not path.is_file():
-            raise ValueError(f"environment file is not a file: {path}")
-        _load_env_file(str(path))
-    else:
-        _load_env_file()
-
-    backend = os.getenv("MEMFLOW_BACKEND", "emulated").strip().lower()
-    if backend == "emulated":
-        raise ValueError(
-            "unsupported skill CLI backend 'emulated': state is process-local; "
-            "set MEMFLOW_BACKEND to qdrant"
-        )
-    if backend == "file":
-        raise ValueError(
-            "unsupported skill CLI backend 'file': FileStore does not preserve "
-            "complete skill metadata and source paths; set MEMFLOW_BACKEND to qdrant"
-        )
-    if backend == "memmachine":
-        raise ValueError(
-            "unsupported skill CLI backend 'memmachine': skill records are "
-            "procedural memory, not episodic or semantic memory; set "
-            "MEMFLOW_BACKEND to qdrant"
-        )
-    if backend != SUPPORTED_BACKEND:
-        raise ValueError(
-            f"unsupported skill CLI backend {backend!r}; set MEMFLOW_BACKEND to qdrant"
-        )
-
-    os.environ["MEMFLOW_BACKEND"] = backend
-    return MemFlow(
-        llm=_SkillManagementLLM(),
-        store=QdrantStore(),
-        use_env=False,
-    )
 
 
 def _skill_summary(procedure: Procedure) -> dict[str, object]:
@@ -104,7 +52,7 @@ def _run_operation(
     stderr: TextIO,
 ) -> int:
     try:
-        manager = _create_skill_manager(args.env_file)
+        manager = create_skill_manager(args.env_file)
         result = operation(manager)
     except Exception as exc:
         print(f"error: {exc}", file=stderr)

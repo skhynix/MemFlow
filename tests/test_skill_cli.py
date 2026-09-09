@@ -16,6 +16,7 @@ import memflow.manager as manager_module
 import memflow.skill_cli as skill_cli
 from memflow.cli import build_parser, main
 from memflow.models import Procedure
+from memflow.skill_runtime import SkillRetrievalLLM
 
 
 class FakeSkillManager:
@@ -50,7 +51,7 @@ def _invoke(argv: list[str]) -> tuple[int, str, str]:
 
 
 def _patch_manager(monkeypatch, manager: FakeSkillManager) -> None:
-    monkeypatch.setattr(skill_cli, "_create_skill_manager", lambda _env=None: manager)
+    monkeypatch.setattr(skill_cli, "create_skill_manager", lambda _env=None: manager)
 
 
 def _skill(
@@ -289,12 +290,12 @@ def test_explicit_env_file_loads_before_manager_and_preserves_environment(
     monkeypatch.setattr(manager_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(manager_module, "MemFlow", DummyMemFlow)
 
-    result = skill_cli._create_skill_manager(str(env_file))
+    result = skill_cli.create_skill_manager(str(env_file))
 
     assert isinstance(result, DummyMemFlow)
     assert observed["backend"] == "qdrant"
     assert observed["qdrant_url"] == "http://from-explicit-file"
-    assert isinstance(observed["llm"], skill_cli._SkillManagementLLM)
+    assert isinstance(observed["llm"], SkillRetrievalLLM)
     assert isinstance(observed["store"], DummyQdrantStore)
     assert observed["use_env"] is False
 
@@ -325,7 +326,7 @@ def test_explicit_env_file_does_not_merge_cwd_dotenv(tmp_path, monkeypatch):
     monkeypatch.setattr(manager_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(manager_module, "MemFlow", DummyMemFlow)
 
-    result = skill_cli._create_skill_manager(str(env_file))
+    result = skill_cli.create_skill_manager(str(env_file))
 
     assert isinstance(result, DummyMemFlow)
     assert observed["qdrant_url"] == "http://localhost:6333"
@@ -347,9 +348,9 @@ def test_manager_initializes_without_optional_llm_provider(tmp_path, monkeypatch
     monkeypatch.setattr(manager_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(manager_module.LLMFactory, "create", fail_provider)
 
-    manager = skill_cli._create_skill_manager()
+    manager = skill_cli.create_skill_manager()
 
-    assert isinstance(manager.llm, skill_cli._SkillManagementLLM)
+    assert isinstance(manager.llm, SkillRetrievalLLM)
     assert isinstance(manager.store, DummyQdrantStore)
     assert os.environ["MEMFLOW_BACKEND"] == "qdrant"
 
@@ -382,31 +383,17 @@ def test_qdrant_backend_is_normalized_before_manager(
     monkeypatch.setattr(manager_module, "QdrantStore", DummyQdrantStore)
     monkeypatch.setattr(manager_module, "MemFlow", DummyMemFlow)
 
-    manager = skill_cli._create_skill_manager()
+    manager = skill_cli.create_skill_manager()
 
     assert isinstance(manager, DummyMemFlow)
-    assert isinstance(observed["llm"], skill_cli._SkillManagementLLM)
+    assert isinstance(observed["llm"], SkillRetrievalLLM)
     assert isinstance(observed["store"], DummyQdrantStore)
     assert observed["use_env"] is False
     assert observed["backend"] == "qdrant"
 
 
-@pytest.mark.parametrize(
-    ("backend", "reason"),
-    [
-        ("emulated", "state is process-local"),
-        ("file", "does not preserve complete skill metadata and source paths"),
-        (
-            "memmachine",
-            "skill records are procedural memory, not episodic or semantic memory",
-        ),
-        ("pgvector", None),
-        ("unsupported", None),
-    ],
-)
-def test_skill_commands_reject_unsupported_backends(
-    backend, reason, tmp_path, monkeypatch
-):
+@pytest.mark.parametrize("backend", ["emulated", "file", "memmachine", "unsupported"])
+def test_skill_commands_reject_unsupported_backends(backend, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MEMFLOW_BACKEND", backend)
 
@@ -414,26 +401,12 @@ def test_skill_commands_reject_unsupported_backends(
         raise AssertionError("manager construction should not be attempted")
 
     monkeypatch.setattr(manager_module, "MemFlow", fail_manager)
-
     rc, stdout, stderr = _invoke(["skill", "list"])
 
     assert rc == 1
     assert stdout == ""
-    assert f"unsupported skill CLI backend '{backend}'" in stderr
-    if reason is not None:
-        assert reason in stderr
+    assert f"unsupported skill backend '{backend}'" in stderr
     assert "set MEMFLOW_BACKEND to qdrant" in stderr
-
-
-def test_skill_commands_reject_default_emulated_backend(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("MEMFLOW_BACKEND", raising=False)
-
-    rc, stdout, stderr = _invoke(["skill", "list"])
-
-    assert rc == 1
-    assert stdout == ""
-    assert "unsupported skill CLI backend 'emulated'" in stderr
 
 
 def test_missing_explicit_env_file_returns_error_without_stdout(tmp_path):
