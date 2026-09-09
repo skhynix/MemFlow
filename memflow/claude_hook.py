@@ -44,6 +44,7 @@ DEFAULT_SESSION_DEDUPE_ROLLOUT = "off"
 DEFAULT_SESSION_DEDUPE_POLICY = "on_hash_change"
 DEFAULT_SESSION_DEDUPE_STATE_DIR = "claude-sessions"
 DEFAULT_RENDERING_FORMAT = "retrieved_skills_catalog_v1"
+READ_SKILL_TOOL_NAME = "mcp__memflow__read_skill"
 LEGACY_RENDERING_FORMAT = "selected_skills_xml_v1"
 SUPPORTED_SESSION_DEDUPE_ROLLOUTS = {"off", "shadow", "enforce"}
 SUPPORTED_RENDERING_FORMATS = {DEFAULT_RENDERING_FORMAT, LEGACY_RENDERING_FORMAT}
@@ -59,6 +60,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "claude": {
         "native_catalog_mode": "hidden_or_minimized",
+        "reread_after_compaction": True,
         "session_dedupe": {
             "rollout": DEFAULT_SESSION_DEDUPE_ROLLOUT,
             "policy": DEFAULT_SESSION_DEDUPE_POLICY,
@@ -99,6 +101,9 @@ class HookInput:
     prompt: str
     source: str = ""
     reason: str = ""
+    tool_name: str = ""
+    tool_input: Any = None
+    tool_response: Any = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +299,19 @@ def load_hook_config(config_path: str | Path | None = None) -> dict[str, Any]:
         config,
         config_path=config_path,
     )
+    claude_config = config.get("claude")
+    reread = (
+        claude_config.get("reread_after_compaction", True)
+        if isinstance(claude_config, dict)
+        else False
+    )
+    config["_memflow_reread_after_compaction"] = {
+        "enabled": reread is True
+        and rendering_settings["format"] == DEFAULT_RENDERING_FORMAT,
+        "warnings": []
+        if isinstance(reread, bool)
+        else ["invalid_reread_after_compaction"],
+    }
     config["_memflow_rendering"] = rendering_settings
     config.setdefault("logging", copy.deepcopy(DEFAULT_CONFIG["logging"]))
     return config
@@ -322,6 +340,11 @@ def parse_hook_input(stdin_text: str) -> HookInput:
         prompt=str(payload.get("prompt") or ""),
         source=str(payload.get("source") or ""),
         reason=str(payload.get("reason") or ""),
+        tool_name=(
+            payload["tool_name"] if isinstance(payload.get("tool_name"), str) else ""
+        ),
+        tool_input=payload.get("tool_input"),
+        tool_response=payload.get("tool_response"),
     )
 
 
@@ -358,13 +381,19 @@ def _session_dedupe_settings(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _reread_after_compaction_enabled(config: dict[str, Any]) -> bool:
+    return config.get("_memflow_reread_after_compaction", {}).get("enabled") is True
+
+
 def _reset_session_for_lifecycle(
     hook_input: HookInput,
     config: dict[str, Any],
 ) -> StateOperationResult | None:
     """Invalidate prior-context disclosures before attempting any output audit."""
     settings = _session_dedupe_settings(config)
-    if settings.get("rollout") == "off":
+    if settings.get("rollout") == "off" and not _reread_after_compaction_enabled(
+        config
+    ):
         return None
 
     if hook_input.hook_event_name == "SessionStart":
@@ -385,11 +414,81 @@ def _reset_session_for_lifecycle(
         )
     try:
         store = ClaudeSessionStateStore(str(settings["state_dir"]))
-        return store.advance_context_generation(hook_input.session_id, reason=reason)
+        return store.advance_context_generation(
+            hook_input.session_id, reason=reason, clear_skill_reads=reason != "compact"
+        )
     except Exception:
         return StateOperationResult(
             "reset_failed",
             warnings=("claude_session_state_reset_failed",),
+        )
+
+
+def _read_skill_input_id(hook_input: HookInput) -> str | None:
+    if hook_input.tool_name != READ_SKILL_TOOL_NAME:
+        return None
+    if not isinstance(hook_input.tool_input, dict):
+        return None
+    skill_id = hook_input.tool_input.get("skill_id")
+    return skill_id if isinstance(skill_id, str) and skill_id else None
+
+
+def _successful_read_name(response: Any, skill_id: str) -> str | None:
+    """Validate Claude's JSON-string result or the direct result object."""
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except (ValueError, RecursionError):
+            return None
+    if not isinstance(response, dict) or set(response) != {
+        "id",
+        "name",
+        "content",
+        "trust_mode",
+    }:
+        return None
+    if not all(isinstance(value, str) for value in response.values()):
+        return None
+    if response["id"] != skill_id or response["trust_mode"] not in {
+        "instruction",
+        "data",
+    }:
+        return None
+    return response["name"]
+
+
+def _record_tool_skill_read(
+    hook_input: HookInput, config: dict[str, Any]
+) -> StateOperationResult | None:
+    """Apply observed read outcomes before auditing, without inspecting error prose."""
+    if config["_memflow_rendering"]["format"] != DEFAULT_RENDERING_FORMAT:
+        return None
+    settings = _session_dedupe_settings(config)
+    reread_enabled = _reread_after_compaction_enabled(config)
+    failed = hook_input.hook_event_name == "PostToolUseFailure"
+    if not reread_enabled and (not failed or settings.get("rollout") == "off"):
+        return None
+    skill_id = _read_skill_input_id(hook_input)
+    if skill_id is None:
+        return None
+    name = None if failed else _successful_read_name(hook_input.tool_response, skill_id)
+    if not failed and name is None:
+        return StateOperationResult(
+            "response_unrecognized", warnings=("skill_read_response_unrecognized",)
+        )
+    if not hook_input.session_id:
+        return StateOperationResult(
+            "missing_session_id", warnings=("session_dedupe_missing_session_id",)
+        )
+    try:
+        store = ClaudeSessionStateStore(str(settings["state_dir"]))
+        if failed:
+            return store.invalidate_skill_disclosure(hook_input.session_id, skill_id)
+        assert name is not None
+        return store.record_skill_read(hook_input.session_id, skill_id, name)
+    except Exception:
+        return StateOperationResult(
+            "record_failed", warnings=("claude_session_state_skill_read_failed",)
         )
 
 
@@ -446,7 +545,7 @@ def _plan_session_dedupe(
     policy = str(settings.get("policy") or DEFAULT_SESSION_DEDUPE_POLICY)
     baseline = tuple(baseline_skills)
 
-    if rollout == "off":
+    if rollout == "off" and not _reread_after_compaction_enabled(config):
         return _baseline_dedupe_plan(
             config,
             baseline,
@@ -486,7 +585,11 @@ def _plan_session_dedupe(
 
     assert loaded.state is not None
     try:
-        matching = _matching_activations(baseline, loaded.state.activations)
+        matching = (
+            ()
+            if rollout == "off"
+            else _matching_activations(baseline, loaded.state.activations)
+        )
         matching_object_ids = {id(rendered) for rendered in matching}
         retained = tuple(
             rendered for rendered in baseline if id(rendered) not in matching_object_ids
@@ -699,6 +802,7 @@ def run_hook(
     configuration_warnings = (
         *catalog_warnings,
         *rendering_warnings,
+        *config["_memflow_reread_after_compaction"]["warnings"],
     )
     session_dedupe_settings = _session_dedupe_settings(config)
     session_dedupe_config_warnings = tuple(
@@ -719,6 +823,36 @@ def run_hook(
         hook_input = parse_hook_input(stdin_text)
         context_request = build_skill_context_request(hook_input, config)
         prompt = context_request.prompt
+        if hook_input.hook_event_name in {"PostToolUse", "PostToolUseFailure"}:
+            read_result = _record_tool_skill_read(hook_input, config)
+            if read_result is None:
+                read_status = "skill_read_ignored"
+            elif not read_result.succeeded:
+                read_status = "fail_open"
+            elif hook_input.hook_event_name == "PostToolUseFailure":
+                read_status = "skill_disclosure_invalidated"
+            else:
+                read_status = "skill_read_recorded"
+            record = audit_logger.base_record(
+                trace_id=trace_id,
+                request=context_request,
+                hook_event=hook_input.hook_event_name,
+                prompt="",
+                status=read_status,
+                latency_ms=latency_ms(),
+                warnings=[
+                    *configuration_warnings,
+                    *session_dedupe_config_warnings,
+                    *(read_result.warnings if read_result is not None else ()),
+                ],
+            )
+            record["skill_read"] = {
+                "state_record_status": (
+                    read_result.status if read_result is not None else "not_needed"
+                ),
+            }
+            audit_logger.write_or_fail(record)
+            return ""
         if hook_input.hook_event_name in {"SessionStart", "SessionEnd"}:
             reset_result = _reset_session_for_lifecycle(hook_input, config)
             record = audit_logger.base_record(

@@ -13,7 +13,7 @@ import os
 import stat
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - depends on the host platform
     fcntl = None  # type: ignore[assignment]
 
 
-SESSION_STATE_SCHEMA_VERSION = "memflow.claude_session_state.v1"
+SESSION_STATE_SCHEMA_VERSION = "memflow.claude_session_state.v2"
 MAX_STATE_FILE_BYTES = 1_048_576
 DEFAULT_LOCK_TIMEOUT_SECONDS = 0.1
 
@@ -50,6 +50,15 @@ class StoredActivation:
 
 
 @dataclass(frozen=True)
+class StoredSkillRead:
+    """Metadata for an observed successful read, keyed by its exact skill ID."""
+
+    name: str
+    read_at: str
+    catalog_fingerprint: str | None
+
+
+@dataclass(frozen=True)
 class ClaudeSessionState:
     """Validated state for one hashed Claude session identifier."""
 
@@ -58,6 +67,7 @@ class ClaudeSessionState:
     last_reset_reason: str | None
     updated_at: str | None
     activations: dict[str, StoredActivation]
+    skill_reads: dict[str, StoredSkillRead]
 
 
 @dataclass(frozen=True)
@@ -214,6 +224,7 @@ class ClaudeSessionStateStore:
                 )
             timestamp = _utc_now()
             merged = dict(current.activations)
+            skill_reads = dict(current.skill_reads)
             for update in updates.values():
                 merged[update.identity] = StoredActivation(
                     activation_fingerprint=update.activation_fingerprint,
@@ -221,8 +232,19 @@ class ClaudeSessionStateStore:
                     emitted_chars=update.emitted_chars,
                     emitted_at=timestamp,
                 )
+                if update.identity.startswith("id:"):
+                    skill_id = update.identity[3:]
+                    if skill_id in skill_reads:
+                        skill_reads[skill_id] = replace(
+                            skill_reads[skill_id],
+                            catalog_fingerprint=update.activation_fingerprint,
+                        )
             for identity in invalidations:
                 merged.pop(identity, None)
+                if identity.startswith("id:") and identity[3:] in skill_reads:
+                    skill_reads[identity[3:]] = replace(
+                        skill_reads[identity[3:]], catalog_fingerprint=None
+                    )
             return (
                 "recorded",
                 ClaudeSessionState(
@@ -231,6 +253,7 @@ class ClaudeSessionStateStore:
                     last_reset_reason=current.last_reset_reason,
                     updated_at=timestamp,
                     activations=merged,
+                    skill_reads=skill_reads,
                 ),
             )
 
@@ -241,6 +264,7 @@ class ClaudeSessionStateStore:
         session_id: str,
         *,
         reason: str,
+        clear_skill_reads: bool = False,
     ) -> StateOperationResult:
         """Atomically advance context generation and clear all activations."""
         if not isinstance(reason, str) or not reason.strip():
@@ -261,7 +285,68 @@ class ClaudeSessionStateStore:
                     last_reset_reason=reason,
                     updated_at=timestamp,
                     activations={},
+                    skill_reads={} if clear_skill_reads else current.skill_reads,
                 ),
+            )
+
+        return self._mutate(session_id, transform)
+
+    def record_skill_read(
+        self, session_id: str, skill_id: str, name: str
+    ) -> StateOperationResult:
+        """Record a successful exact-ID read without retaining the skill body."""
+        if not isinstance(skill_id, str) or not skill_id or not isinstance(name, str):
+            return StateOperationResult(
+                "invalid_skill_read", warnings=_warning("invalid_skill_read")
+            )
+
+        def transform(current: ClaudeSessionState) -> tuple[str, ClaudeSessionState]:
+            timestamp = _utc_now()
+            skill_reads = dict(current.skill_reads)
+            activation = current.activations.get(f"id:{skill_id}")
+            previous = skill_reads.get(skill_id)
+            fingerprint = (
+                activation.activation_fingerprint
+                if activation is not None
+                else previous.catalog_fingerprint
+                if previous is not None
+                else None
+            )
+            skill_reads[skill_id] = StoredSkillRead(name, timestamp, fingerprint)
+            return "recorded", replace(
+                current, updated_at=timestamp, skill_reads=skill_reads
+            )
+
+        return self._mutate(session_id, transform)
+
+    def invalidate_skill_disclosure(
+        self, session_id: str, skill_id: str
+    ) -> StateOperationResult:
+        """Invalidate a failed read's disclosure while preserving successful history."""
+        if not isinstance(skill_id, str) or not skill_id:
+            return StateOperationResult(
+                "invalid_skill_read", warnings=_warning("invalid_skill_read")
+            )
+
+        def transform(
+            current: ClaudeSessionState,
+        ) -> StateOperationResult | tuple[str, ClaudeSessionState]:
+            identity = f"id:{skill_id}"
+            previous_read = current.skill_reads.get(skill_id)
+            if identity not in current.activations and (
+                previous_read is None or previous_read.catalog_fingerprint is None
+            ):
+                return StateOperationResult("unchanged", state=current)
+            skill_reads = dict(current.skill_reads)
+            if previous_read is not None:
+                skill_reads[skill_id] = replace(previous_read, catalog_fingerprint=None)
+            activations = dict(current.activations)
+            activations.pop(identity, None)
+            return "recorded", replace(
+                current,
+                updated_at=_utc_now(),
+                activations=activations,
+                skill_reads=skill_reads,
             )
 
         return self._mutate(session_id, transform)
@@ -486,28 +571,32 @@ def _validate_state_payload(
 ) -> StateLoadResult:
     if not isinstance(payload, dict):
         return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
-    if payload.get("schema_version") != SESSION_STATE_SCHEMA_VERSION:
-        return StateLoadResult(
-            "schema_mismatch",
-            warnings=_warning("schema_mismatch"),
-        )
     if payload.get("session_id_hash") != expected_session_hash:
         return StateLoadResult(
             "session_mismatch",
             warnings=_warning("session_mismatch"),
         )
-
+    if payload.get("schema_version") == "memflow.claude_session_state.v1":
+        return StateLoadResult(
+            "obsolete_schema", state=_empty_state(expected_session_hash)
+        )
+    if payload.get("schema_version") != SESSION_STATE_SCHEMA_VERSION:
+        return StateLoadResult(
+            "schema_mismatch",
+            warnings=_warning("schema_mismatch"),
+        )
     generation = payload.get("context_generation")
     last_reset_reason = payload.get("last_reset_reason")
     updated_at = payload.get("updated_at")
     raw_activations = payload.get("activations")
+    raw_skill_reads = payload.get("skill_reads")
     if not _is_non_negative_int(generation):
         return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
     if last_reset_reason is not None and not isinstance(last_reset_reason, str):
         return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
     if not isinstance(updated_at, str) or not updated_at:
         return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
-    if not isinstance(raw_activations, dict):
+    if not isinstance(raw_activations, dict) or not isinstance(raw_skill_reads, dict):
         return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
 
     activations: dict[str, StoredActivation] = {}
@@ -536,6 +625,30 @@ def _validate_state_payload(
             emitted_at=emitted_at,
         )
 
+    skill_reads: dict[str, StoredSkillRead] = {}
+    for skill_id, raw_read in raw_skill_reads.items():
+        if (
+            not isinstance(skill_id, str)
+            or not skill_id
+            or not isinstance(raw_read, dict)
+        ):
+            return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
+        name = raw_read.get("name")
+        read_at = raw_read.get("read_at")
+        fingerprint = raw_read.get("catalog_fingerprint")
+        if (
+            not isinstance(name, str)
+            or not isinstance(read_at, str)
+            or not read_at
+            or "catalog_fingerprint" not in raw_read
+            or (
+                fingerprint is not None
+                and (not isinstance(fingerprint, str) or not fingerprint)
+            )
+        ):
+            return StateLoadResult("invalid_state", warnings=_warning("invalid_state"))
+        skill_reads[skill_id] = StoredSkillRead(name, read_at, fingerprint)
+
     return StateLoadResult(
         "ok",
         state=ClaudeSessionState(
@@ -544,6 +657,7 @@ def _validate_state_payload(
             last_reset_reason=last_reset_reason,
             updated_at=updated_at,
             activations=activations,
+            skill_reads=skill_reads,
         ),
     )
 
@@ -555,6 +669,7 @@ def _empty_state(session_id_hash: str) -> ClaudeSessionState:
         last_reset_reason=None,
         updated_at=None,
         activations={},
+        skill_reads={},
     )
 
 
@@ -573,6 +688,14 @@ def _atomic_write_state(path: Path, state: ClaudeSessionState) -> None:
                 "emitted_at": activation.emitted_at,
             }
             for identity, activation in state.activations.items()
+        },
+        "skill_reads": {
+            skill_id: {
+                "name": read.name,
+                "read_at": read.read_at,
+                "catalog_fingerprint": read.catalog_fingerprint,
+            }
+            for skill_id, read in state.skill_reads.items()
         },
     }
     serialized = (

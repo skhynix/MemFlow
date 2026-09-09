@@ -24,7 +24,11 @@ from memflow.claude_catalog import (
     build_claude_catalog_settings_plan,
     normalize_native_catalog_mode,
 )
-from memflow.claude_hook import DEFAULT_CONFIG, DEFAULT_CONFIG_PATH
+from memflow.claude_hook import (
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_PATH,
+    READ_SKILL_TOOL_NAME,
+)
 from memflow.claude_mcp import (
     MCPSettingsPlan,
     apply_mcp_settings_plan,
@@ -37,6 +41,8 @@ MANAGED_HOOK_EVENTS = {
     "UserPromptSubmit": "",
     "SessionStart": "startup|clear|compact",
     "SessionEnd": "clear",
+    "PostToolUse": READ_SKILL_TOOL_NAME,
+    "PostToolUseFailure": READ_SKILL_TOOL_NAME,
 }
 MANAGED_HOOK_MARKER = "# memflow-managed:claude-hook"
 

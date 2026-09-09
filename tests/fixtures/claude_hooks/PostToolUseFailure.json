@@ -1,0 +1,19 @@
+{
+  "session_id": "session-123",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "cwd": "/work/project",
+  "prompt_id": "d6b67e09-2e99-46e8-9042-34b9923c84e3",
+  "permission_mode": "dontAsk",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "mcp__memflow__read_skill",
+  "tool_input": {
+    "skill_id": "skill:missing"
+  },
+  "tool_use_id": "toolu_probe_failure",
+  "error": "Error executing tool read_skill: skill not found: skill:missing",
+  "is_interrupt": false,
+  "duration_ms": 4
+}

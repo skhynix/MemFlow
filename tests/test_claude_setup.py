@@ -257,7 +257,9 @@ def test_status_reports_prompt_only_install_as_incomplete(tmp_path):
     rc, status = _run_memflow_claude(["status"], tmp_path=tmp_path)
     assert rc == 0
     assert status["hook"]["installed"] is False
-    assert status["hook"]["missing_events"] == ["SessionStart", "SessionEnd"]
+    assert status["hook"]["missing_events"] == [
+        event for event in MANAGED_HOOK_EVENTS if event != "UserPromptSubmit"
+    ]
 
 
 def _write_skill(root, *, name: str | None = None) -> None:

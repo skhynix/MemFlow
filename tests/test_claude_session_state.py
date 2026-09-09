@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import stat
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,7 @@ def _valid_payload(session_id: str = SESSION_ID) -> dict:
         "context_generation": 0,
         "last_reset_reason": None,
         "updated_at": "2026-07-22T12:00:00Z",
+        "skill_reads": {},
         "activations": {
             "path:/repo/alpha/SKILL.md": {
                 "activation_fingerprint": "fingerprint-alpha",
@@ -793,6 +795,235 @@ def test_generation_advance_clears_state_and_rejects_stale_record(tmp_path, reas
     assert stale.succeeded is False
     assert store.state_path(SESSION_ID).read_bytes() == after_advance
     assert loaded.state == advanced.state
+
+
+def test_skill_reads_store_only_metadata_and_cache_disclosed_fingerprint(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    skill_id = "skill:alpha"
+    store.record_activations(
+        SESSION_ID,
+        [_activation(f"id:{skill_id}", "f1", name="alpha")],
+        expected_generation=0,
+    )
+    assert store.load(SESSION_ID).state.skill_reads == {}
+
+    recorded = store.record_skill_read(SESSION_ID, skill_id, "alpha")
+    assert recorded.succeeded
+    assert recorded.state.skill_reads[skill_id].catalog_fingerprint == "f1"
+    assert store.load(SESSION_ID).state == recorded.state
+    payload = json.loads(store.state_path(SESSION_ID).read_text())
+    assert payload["skill_reads"] == {
+        skill_id: {
+            "name": "alpha",
+            "read_at": recorded.state.updated_at,
+            "catalog_fingerprint": "f1",
+        }
+    }
+
+
+def test_repeated_read_refreshes_name_and_time_without_claiming_disclosure(
+    tmp_path, monkeypatch
+):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    timestamps = iter(["2026-09-09T00:00:00Z", "2026-09-09T00:01:00Z"])
+    monkeypatch.setattr(session_state_module, "_utc_now", lambda: next(timestamps))
+    first = store.record_skill_read(SESSION_ID, "skill:alpha", "alpha")
+    second = store.record_skill_read(SESSION_ID, "skill:alpha", "renamed")
+    read = second.state.skill_reads["skill:alpha"]
+    assert read.name == "renamed"
+    assert read.read_at > first.state.skill_reads["skill:alpha"].read_at
+    assert read.catalog_fingerprint is None
+    assert second.state.activations == {}
+
+
+def test_later_disclosure_refreshes_cached_fingerprint_without_changing_read_time(
+    tmp_path,
+):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.record_activations(
+        SESSION_ID,
+        [_activation("id:skill:alpha", "f1", name="alpha")],
+        expected_generation=0,
+    )
+    read = store.record_skill_read(SESSION_ID, "skill:alpha", "alpha")
+    disclosed = store.record_activations(
+        SESSION_ID,
+        [_activation("id:skill:alpha", "f2", name="alpha")],
+        expected_generation=0,
+    )
+    cached = disclosed.state.skill_reads["skill:alpha"]
+    assert cached.catalog_fingerprint == "f2"
+    assert cached.read_at == read.state.skill_reads["skill:alpha"].read_at
+
+    compacted = store.advance_context_generation(SESSION_ID, reason="compact")
+    assert compacted.state.activations == {}
+    assert compacted.state.skill_reads == disclosed.state.skill_reads
+    cleared = store.advance_context_generation(
+        SESSION_ID, reason="clear", clear_skill_reads=True
+    )
+    assert cleared.state.skill_reads == {}
+
+
+def test_missing_disclosure_fingerprint_invalidates_read_cache_without_forgetting_read(
+    tmp_path,
+):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.record_activations(
+        SESSION_ID,
+        [_activation("id:skill:alpha", "f1", name="alpha")],
+        expected_generation=0,
+    )
+    read = store.record_skill_read(SESSION_ID, "skill:alpha", "alpha")
+    invalidated = store.record_activations(
+        SESSION_ID, [], expected_generation=0, invalidated_identities=["id:skill:alpha"]
+    )
+    assert invalidated.state.activations == {}
+    assert invalidated.state.skill_reads["skill:alpha"].catalog_fingerprint is None
+    assert invalidated.state.skill_reads["skill:alpha"].read_at == (
+        read.state.skill_reads["skill:alpha"].read_at
+    )
+
+
+def test_invalidating_disclosure_preserves_successful_reads(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    for name in ("alpha", "beta"):
+        store.record_skill_read(SESSION_ID, f"skill:{name}", name)
+        store.record_activations(
+            SESSION_ID,
+            [_activation(f"id:skill:{name}", name, name=name)],
+            expected_generation=0,
+        )
+    before = store.load(SESSION_ID).state
+    invalidated = store.invalidate_skill_disclosure(SESSION_ID, "skill:alpha")
+    assert invalidated.succeeded
+    assert invalidated.state.skill_reads == {
+        "skill:alpha": replace(
+            before.skill_reads["skill:alpha"], catalog_fingerprint=None
+        ),
+        "skill:beta": before.skill_reads["skill:beta"],
+    }
+    assert invalidated.state.activations == {
+        "id:skill:beta": before.activations["id:skill:beta"]
+    }
+    assert (
+        store.invalidate_skill_disclosure(SESSION_ID, "skill:alpha").status
+        == "unchanged"
+    )
+
+
+@pytest.mark.parametrize("disclosed", [False, True])
+def test_invalidating_disclosure_does_not_create_read_history(tmp_path, disclosed):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    if disclosed:
+        store.record_activations(
+            SESSION_ID,
+            [_activation("id:skill:alpha", "f1", name="alpha")],
+            expected_generation=0,
+        )
+    invalidated = store.invalidate_skill_disclosure(SESSION_ID, "skill:alpha")
+    assert invalidated.succeeded
+    assert invalidated.state.skill_reads == {}
+    assert invalidated.state.activations == {}
+
+
+def test_invalidating_disclosure_clears_fingerprint_after_compaction(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.record_activations(
+        SESSION_ID,
+        [_activation("id:skill:alpha", "f1", name="alpha")],
+        expected_generation=0,
+    )
+    read = store.record_skill_read(SESSION_ID, "skill:alpha", "alpha")
+    store.advance_context_generation(SESSION_ID, reason="compact")
+    invalidated = store.invalidate_skill_disclosure(SESSION_ID, "skill:alpha")
+    assert invalidated.succeeded
+    assert invalidated.state.skill_reads["skill:alpha"] == replace(
+        read.state.skill_reads["skill:alpha"], catalog_fingerprint=None
+    )
+    assert invalidated.state.activations == {}
+
+
+def test_obsolete_state_is_discarded_without_migration_on_next_write(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.state_dir.mkdir()
+    payload = _valid_payload()
+    payload.pop("skill_reads")
+    payload["schema_version"] = "memflow.claude_session_state.v1"
+    store.state_path(SESSION_ID).write_text(json.dumps(payload))
+    before = store.state_path(SESSION_ID).read_bytes()
+    loaded = store.load(SESSION_ID)
+    assert loaded.status == "obsolete_schema"
+    assert loaded.state.context_generation == 0
+    assert loaded.state.activations == loaded.state.skill_reads == {}
+    assert store.state_path(SESSION_ID).read_bytes() == before
+    recorded = store.record_skill_read(SESSION_ID, "skill:new", "new")
+    assert recorded.succeeded
+    after = json.loads(store.state_path(SESSION_ID).read_text())
+    assert after["schema_version"] == SESSION_STATE_SCHEMA_VERSION
+    assert after["activations"] == {}
+    assert set(after["skill_reads"]) == {"skill:new"}
+
+
+def test_obsolete_state_still_rejects_a_foreign_session_hash(tmp_path):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.state_dir.mkdir()
+    payload = _valid_payload("foreign-session")
+    payload["schema_version"] = "memflow.claude_session_state.v1"
+    store.state_path(SESSION_ID).write_text(json.dumps(payload))
+    before = store.state_path(SESSION_ID).read_bytes()
+    assert store.load(SESSION_ID).status == "session_mismatch"
+    assert (
+        store.record_skill_read(SESSION_ID, "skill:alpha", "alpha").status
+        == "session_mismatch"
+    )
+    assert store.state_path(SESSION_ID).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "raw_reads",
+    [
+        None,
+        [],
+        {"": {}},
+        {"skill:alpha": "invalid"},
+        {"skill:alpha": {"name": 1, "read_at": "time", "catalog_fingerprint": None}},
+        {"skill:alpha": {"name": "alpha", "read_at": "", "catalog_fingerprint": None}},
+        {"skill:alpha": {"name": "alpha", "read_at": "time"}},
+        {
+            "skill:alpha": {
+                "name": "alpha",
+                "read_at": "time",
+                "catalog_fingerprint": "",
+            }
+        },
+        {
+            "skill:alpha": {
+                "name": "alpha",
+                "read_at": "time",
+                "catalog_fingerprint": 42,
+            }
+        },
+    ],
+)
+def test_corrupt_current_read_metadata_is_rejected_without_overwrite(
+    tmp_path, raw_reads
+):
+    store = ClaudeSessionStateStore(tmp_path / "state")
+    store.state_dir.mkdir()
+    payload = _valid_payload()
+    payload["skill_reads"] = raw_reads
+    store.state_path(SESSION_ID).write_text(json.dumps(payload))
+    before = store.state_path(SESSION_ID).read_bytes()
+    assert store.load(SESSION_ID).status == "invalid_state"
+    assert (
+        store.record_skill_read(SESSION_ID, "skill:new", "new").status
+        == "invalid_state"
+    )
+    assert (
+        store.invalidate_skill_disclosure(SESSION_ID, "skill:alpha").status
+        == "invalid_state"
+    )
+    assert store.state_path(SESSION_ID).read_bytes() == before
 
 
 @pytest.mark.parametrize("failure_point", ("temporary", "flush", "replace"))

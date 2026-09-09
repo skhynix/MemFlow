@@ -9,6 +9,7 @@ import io
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -94,6 +95,7 @@ def _hook_input(
 def _config_path(tmp_path, **overrides):
     config = {
         "memflow": {"user_id": "default"},
+        "claude": {"reread_after_compaction": False},
         "retrieval": {
             "top_k": 3,
             "max_top_k": 5,
@@ -137,6 +139,24 @@ def _audit_rows(path):
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def _captured_tool_input(event="PostToolUse", **overrides):
+    # Claude Code 2.1.220 captures, with session and filesystem paths anonymized.
+    fixture = Path(__file__).parent / "fixtures" / "claude_hooks" / f"{event}.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    payload.update(overrides)
+    return json.dumps(payload)
+
+
+def _read_tracking_config(tmp_path, *, rollout="off", enabled=True):
+    return _catalog_config_path(
+        tmp_path,
+        claude={
+            "reread_after_compaction": enabled,
+            "session_dedupe": {"rollout": rollout, "state_dir": "state"},
+        },
+    )
 
 
 _DEFAULT_METADATA_SOURCE = object()
@@ -2247,8 +2267,14 @@ def test_lifecycle_resets_allow_catalog_disclosure_again(
     manager = _StaticSkillManager([_renderer_candidate()])
     config_path = _config_path(
         tmp_path,
-        claude={"session_dedupe": {"rollout": rollout, "state_dir": "state"}},
+        claude={
+            "reread_after_compaction": True,
+            "session_dedupe": {"rollout": rollout, "state_dir": "state"},
+        },
     )
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    store.record_skill_read("session-123", "skill:probe", "probe")
+    previous_reads = store.load("session-123").state.skill_reads
     first = run_hook(
         _hook_input("skill"), config_path=config_path, manager_factory=lambda _: manager
     )
@@ -2258,7 +2284,6 @@ def test_lifecycle_resets_allow_catalog_disclosure_again(
         config_path=config_path,
         manager_factory=lambda _: retrieval_calls.append(True),
     )
-    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
     reset = store.load("session-123").state
 
     assert output == ""
@@ -2267,6 +2292,7 @@ def test_lifecycle_resets_allow_catalog_disclosure_again(
     assert reset.context_generation == 1
     assert reset.last_reset_reason == reason
     assert reset.activations == {}
+    assert reset.skill_reads == (previous_reads if reason == "compact" else {})
     row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
     assert row["status"] == "state_reset"
     assert row["lifecycle"]["state_reset_status"] == "advanced"
@@ -2463,7 +2489,453 @@ def test_lifecycle_reset_missing_session_and_state_failures_fail_open(
     assert rows[1]["warnings"] == ["claude_session_state_reset_failed"]
 
 
-def test_default_off_emits_baseline_and_never_constructs_state_store(
+@pytest.mark.parametrize("rollout", ["off", "shadow", "enforce"])
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+def test_legacy_tool_events_do_not_access_read_state(
+    tmp_path, monkeypatch, rollout, event
+):
+    config_path = _config_path(
+        tmp_path,
+        claude={
+            "reread_after_compaction": True,
+            "session_dedupe": {"rollout": rollout, "state_dir": "state"},
+        },
+    )
+
+    def unexpected_store(*_args, **_kwargs):
+        pytest.fail("legacy tool events must not access read state")
+
+    monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", unexpected_store)
+    assert run_hook(_captured_tool_input(event), config_path=config_path) == ""
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "skill_read_ignored"
+    assert row["warnings"] == []
+
+
+@pytest.mark.parametrize("representation", ["json_string", "object"])
+@pytest.mark.parametrize("trust_mode", ["instruction", "data"])
+def test_successful_tool_read_records_metadata_without_body_or_catalog_claim(
+    tmp_path, representation, trust_mode
+):
+    config_path = _read_tracking_config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["logging"].update(record_raw_prompt=True, record_skill_body=True)
+    config_path.write_text(json.dumps(config))
+    response = json.loads(json.loads(_captured_tool_input())["tool_response"])
+    response["trust_mode"] = trust_mode
+    response["content"] = "PRIVATE_BODY_NOT_FOR_STATE_OR_AUDIT"
+    retrieval_calls = []
+
+    assert (
+        run_hook(
+            _captured_tool_input(
+                tool_response=json.dumps(response)
+                if representation == "json_string"
+                else response
+            ),
+            config_path=config_path,
+            manager_factory=lambda _: retrieval_calls.append(True),
+        )
+        == ""
+    )
+
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    state = store.load("session-123").state
+    assert retrieval_calls == []
+    assert state.activations == {}
+    assert set(state.skill_reads) == {"skill:probe"}
+    read = state.skill_reads["skill:probe"]
+    assert read.name == "probe"
+    assert read.read_at
+    assert read.catalog_fingerprint is None
+    state_text = store.state_path("session-123").read_text()
+    audit_text = (tmp_path / "hook-audit.jsonl").read_text()
+    assert "PRIVATE_BODY_NOT_FOR_STATE_OR_AUDIT" not in state_text + audit_text
+    assert "tool_response" not in state_text + audit_text
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "skill_read_recorded"
+    assert row["warnings"] == []
+
+
+def test_successful_tool_read_tracking_is_default_on_with_dedupe_off(tmp_path):
+    config_path = _read_tracking_config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["claude"].pop("reread_after_compaction")
+    config_path.write_text(json.dumps(config))
+    assert run_hook(_captured_tool_input(), config_path=config_path) == ""
+    state = (
+        claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+        .load("session-123")
+        .state
+    )
+    assert set(state.skill_reads) == {"skill:probe"}
+    assert load_hook_config(config_path)["_memflow_session_dedupe"]["rollout"] == "off"
+
+
+@pytest.mark.parametrize("rollout", ["off", "enforce"])
+def test_read_cache_follows_later_actual_catalog_disclosures(
+    tmp_path, monkeypatch, rollout
+):
+    config_path = _read_tracking_config(tmp_path, rollout=rollout)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    candidates = [
+        _catalog_candidate(
+            name="probe", procedure_id="skill:probe", description=description
+        )
+        for description in ["first version", "second version", "unaudited version"]
+    ]
+    assert run_hook(
+        _hook_input("first"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager([candidates[0]]),
+    )
+    assert store.load("session-123").state.skill_reads == {}
+    run_hook(_captured_tool_input(), config_path=config_path)
+    first = store.load("session-123").state.skill_reads["skill:probe"]
+    assert first.catalog_fingerprint
+    assert run_hook(
+        _hook_input("second"),
+        config_path=config_path,
+        manager_factory=lambda _: _StaticSkillManager([candidates[1]]),
+    )
+    second = store.load("session-123").state.skill_reads["skill:probe"]
+    assert second.catalog_fingerprint != first.catalog_fingerprint
+    assert second.read_at == first.read_at
+    monkeypatch.setattr(
+        skill_context_module.AuditLogger, "write_or_fail", lambda *_: False
+    )
+    assert (
+        run_hook(
+            _hook_input("third"),
+            config_path=config_path,
+            manager_factory=lambda _: _StaticSkillManager([candidates[2]]),
+        )
+        == ""
+    )
+    assert store.load("session-123").state.skill_reads["skill:probe"] == second
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    ("error", "is_interrupt"),
+    [
+        ("store unavailable", False),
+        ("interrupted", True),
+        ("skill not found", False),
+        ("skill is blocked", False),
+    ],
+)
+def test_failed_read_preserves_history_and_rediscloses_catalog(
+    tmp_path, enabled, error, is_interrupt
+):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce")
+    manager = _StaticSkillManager(
+        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+    )
+    assert run_hook(
+        _hook_input("first"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    run_hook(_captured_tool_input(), config_path=config_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    previous_read = store.load("session-123").state.skill_reads["skill:probe"]
+    assert (
+        run_hook(
+            _hook_input("again"),
+            config_path=config_path,
+            manager_factory=lambda _: manager,
+        )
+        == ""
+    )
+    config_path = _read_tracking_config(tmp_path, rollout="enforce", enabled=enabled)
+    assert (
+        run_hook(
+            _captured_tool_input(
+                "PostToolUseFailure",
+                tool_input={"skill_id": "skill:probe"},
+                error=error,
+                is_interrupt=is_interrupt,
+            ),
+            config_path=config_path,
+        )
+        == ""
+    )
+    assert store.load("session-123").state.skill_reads == {
+        "skill:probe": replace(previous_read, catalog_fingerprint=None)
+    }
+    assert store.load("session-123").state.activations == {}
+    assert error not in (tmp_path / "hook-audit.jsonl").read_text()
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "skill_disclosure_invalidated"
+    assert row["warnings"] == []
+    assert run_hook(
+        _hook_input("recover"),
+        config_path=config_path,
+        manager_factory=lambda _: manager,
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        "not json",
+        "[]",
+        "null",
+        [],
+        {},
+        {
+            "id": "different",
+            "name": "probe",
+            "content": "body",
+            "trust_mode": "instruction",
+        },
+        {
+            "id": "skill:probe",
+            "name": None,
+            "content": "body",
+            "trust_mode": "instruction",
+        },
+        {
+            "id": "skill:probe",
+            "name": "probe",
+            "content": [],
+            "trust_mode": "instruction",
+        },
+        {
+            "id": "skill:probe",
+            "name": "probe",
+            "content": "body",
+            "trust_mode": "blocked",
+        },
+        {"id": "skill:probe", "name": "probe", "content": "body", "trust_mode": []},
+        {
+            "id": "skill:probe",
+            "name": "probe",
+            "content": "body",
+            "trust_mode": "data",
+            "isError": True,
+        },
+        {
+            "id": "skill:probe",
+            "name": "probe",
+            "content": "body",
+            "trust_mode": "data",
+            "error": "failed",
+        },
+        {
+            "result": {
+                "id": "skill:probe",
+                "name": "probe",
+                "content": "body",
+                "trust_mode": "data",
+            }
+        },
+        {
+            "structuredContent": {
+                "id": "skill:probe",
+                "name": "probe",
+                "content": "body",
+                "trust_mode": "data",
+            }
+        },
+    ],
+)
+def test_malformed_or_error_tool_responses_never_access_state(
+    tmp_path, monkeypatch, response
+):
+    config_path = _read_tracking_config(tmp_path)
+
+    def unexpected_store(*_args, **_kwargs):
+        pytest.fail("malformed responses must not access session state")
+
+    monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", unexpected_store)
+    assert (
+        run_hook(_captured_tool_input(tool_response=response), config_path=config_path)
+        == ""
+    )
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "fail_open"
+    assert row["warnings"] == ["skill_read_response_unrecognized"]
+    assert row["skill_read"]["state_record_status"] == "response_unrecognized"
+
+
+@pytest.mark.parametrize("representation", ["json_string", "object"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_unrecognized_read_response_warns_only_when_tracking_enabled(
+    tmp_path, monkeypatch, representation, enabled
+):
+    config_path = _read_tracking_config(tmp_path, rollout="enforce", enabled=enabled)
+    config = json.loads(config_path.read_text())
+    config["logging"].update(record_raw_prompt=True, record_skill_body=True)
+    config_path.write_text(json.dumps(config))
+    response = json.loads(json.loads(_captured_tool_input())["tool_response"])
+    response.update(content="PRIVATE_UNRECOGNIZED_RESPONSE_BODY", version="1")
+
+    def unexpected_store(*_args, **_kwargs):
+        pytest.fail("unrecognized responses must not access session state")
+
+    monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", unexpected_store)
+    assert (
+        run_hook(
+            _captured_tool_input(
+                tool_response=json.dumps(response)
+                if representation == "json_string"
+                else response
+            ),
+            config_path=config_path,
+        )
+        == ""
+    )
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == ("fail_open" if enabled else "skill_read_ignored")
+    assert row["warnings"] == (["skill_read_response_unrecognized"] if enabled else [])
+    assert row["skill_read"]["state_record_status"] == (
+        "response_unrecognized" if enabled else "not_needed"
+    )
+    audit_text = (tmp_path / "hook-audit.jsonl").read_text()
+    assert "PRIVATE_UNRECOGNIZED_RESPONSE_BODY" not in audit_text
+    assert "tool_response" not in audit_text
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"tool_name": "mcp__other__read_skill"},
+        {"tool_name": "mcp__memflow__read_skill_extra"},
+        {"tool_name": "read_skill"},
+        {"tool_name": None},
+        {"tool_input": None},
+        {"tool_input": []},
+        {"tool_input": {}},
+        {"tool_input": {"skill_id": ""}},
+        {"tool_input": {"skill_id": 42}},
+    ],
+)
+def test_unrelated_or_malformed_tool_inputs_never_access_state(
+    tmp_path, monkeypatch, event, overrides
+):
+    config_path = _read_tracking_config(tmp_path)
+
+    def unexpected_store(*_args, **_kwargs):
+        pytest.fail("unrelated tools and malformed inputs must not access state")
+
+    monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", unexpected_store)
+    assert (
+        run_hook(
+            _captured_tool_input(event, tool_response=None, **overrides),
+            config_path=config_path,
+        )
+        == ""
+    )
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "skill_read_ignored"
+    assert row["warnings"] == []
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+def test_observed_read_outcome_survives_audit_failure(tmp_path, monkeypatch, event):
+    config_path = _read_tracking_config(tmp_path)
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    if event == "PostToolUseFailure":
+        run_hook(_captured_tool_input(), config_path=config_path)
+        store.record_activations(
+            "session-123",
+            [
+                claude_session_state_module.ActivationUpdate(
+                    "id:skill:probe", "f1", "probe", 10
+                )
+            ],
+            expected_generation=0,
+        )
+    monkeypatch.setattr(
+        skill_context_module.AuditLogger, "write_or_fail", lambda *_: False
+    )
+    assert (
+        run_hook(
+            _captured_tool_input(event, tool_input={"skill_id": "skill:probe"}),
+            config_path=config_path,
+        )
+        == ""
+    )
+    state = store.load("session-123").state
+    assert set(state.skill_reads) == {"skill:probe"}
+    assert state.skill_reads["skill:probe"].catalog_fingerprint is None
+    assert state.activations == {}
+
+
+@pytest.mark.parametrize(
+    ("event", "fields", "retained"),
+    [
+        ("SessionStart", {"source": "compact"}, True),
+        ("SessionStart", {"source": "resume"}, True),
+        ("SessionStart", {"source": "startup"}, False),
+        ("SessionStart", {"source": "clear"}, False),
+        ("SessionEnd", {"reason": "clear"}, False),
+        ("SessionEnd", {"reason": "prompt_input_exit"}, True),
+    ],
+)
+def test_read_history_lifecycle_is_independent_of_dedupe_rollout(
+    tmp_path, event, fields, retained
+):
+    config_path = _read_tracking_config(tmp_path)
+    run_hook(_captured_tool_input(), config_path=config_path)
+    assert (
+        run_hook(_hook_input("", event=event, **fields), config_path=config_path) == ""
+    )
+    state = (
+        claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+        .load("session-123")
+        .state
+    )
+    assert bool(state.skill_reads) is retained
+
+
+@pytest.mark.parametrize("enabled", [False, "false", 1, None, []])
+def test_read_tracking_opt_out_and_invalid_boolean_do_no_state_work(
+    tmp_path, monkeypatch, enabled
+):
+    config_path = _read_tracking_config(tmp_path, enabled=enabled)
+
+    def unexpected_store(*_args, **_kwargs):
+        pytest.fail("disabled features must not access state")
+
+    monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", unexpected_store)
+    for event in ["PostToolUse", "PostToolUseFailure"]:
+        assert run_hook(_captured_tool_input(event), config_path=config_path) == ""
+    if enabled is not False:
+        assert (
+            "invalid_reread_after_compaction"
+            in _audit_rows(tmp_path / "hook-audit.jsonl")[-1]["warnings"]
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing_session", "write", "store"])
+def test_tool_read_state_failures_fail_open_without_retaining_body(
+    tmp_path, monkeypatch, failure
+):
+    config_path = _read_tracking_config(tmp_path)
+    overrides = {}
+    if failure == "missing_session":
+        overrides["session_id"] = ""
+    else:
+
+        def fail(*_args, **_kwargs):
+            raise OSError("unavailable")
+
+        if failure == "write":
+            monkeypatch.setattr(
+                claude_session_state_module, "_atomic_write_state", fail
+            )
+        else:
+            monkeypatch.setattr(claude_hook_module, "ClaudeSessionStateStore", fail)
+    assert run_hook(_captured_tool_input(**overrides), config_path=config_path) == ""
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "fail_open"
+    assert "DUMMY_SKILL_BODY" not in json.dumps(row)
+
+
+def test_both_features_off_emit_baseline_and_never_construct_state_store(
     tmp_path,
     monkeypatch,
 ):
@@ -2844,6 +3316,7 @@ def test_config_defaults_unknown_fields_and_top_k_clamping(tmp_path):
     assert missing["retrieval"]["top_k"] == 3
     assert missing["retrieval"]["candidate_k"] == 20
     assert missing["claude"]["native_catalog_mode"] == "hidden_or_minimized"
+    assert missing["claude"]["reread_after_compaction"] is True
     assert missing["rendering"]["format"] == "retrieved_skills_catalog_v1"
     assert missing["_memflow_rendering"] == {
         "format": "retrieved_skills_catalog_v1",
