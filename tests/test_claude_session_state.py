@@ -763,7 +763,8 @@ def test_stale_generation_rejects_updates_and_invalidations_together(tmp_path):
     assert set(loaded.state.activations) == {current_identity}
 
 
-def test_generation_advance_clears_state_and_rejects_stale_record(tmp_path):
+@pytest.mark.parametrize("reason", ["compact", "clear", "startup"])
+def test_generation_advance_clears_state_and_rejects_stale_record(tmp_path, reason):
     store = ClaudeSessionStateStore(tmp_path / "state")
     store.record_activations(
         SESSION_ID,
@@ -773,7 +774,7 @@ def test_generation_advance_clears_state_and_rejects_stale_record(tmp_path):
 
     advanced = store.advance_context_generation(
         SESSION_ID,
-        reason="future_compaction",
+        reason=reason,
     )
     after_advance = store.state_path(SESSION_ID).read_bytes()
     stale = store.record_activations(
@@ -786,7 +787,7 @@ def test_generation_advance_clears_state_and_rejects_stale_record(tmp_path):
     assert advanced.status == "advanced"
     assert advanced.state is not None
     assert advanced.state.context_generation == 1
-    assert advanced.state.last_reset_reason == "future_compaction"
+    assert advanced.state.last_reset_reason == reason
     assert advanced.state.activations == {}
     assert stale.status == "stale_generation"
     assert stale.succeeded is False

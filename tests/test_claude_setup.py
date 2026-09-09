@@ -8,7 +8,13 @@ import json
 import shlex
 import sys
 
-from memflow.claude_setup import MANAGED_HOOK_MARKER, build_hook_settings_plan
+import pytest
+
+from memflow.claude_setup import (
+    MANAGED_HOOK_EVENTS,
+    MANAGED_HOOK_MARKER,
+    build_hook_settings_plan,
+)
 from memflow.cli import main as cli_main
 
 
@@ -84,7 +90,7 @@ def test_build_hook_settings_plan_hook_off_removes_only_marker_managed_hooks():
 
     plan = build_hook_settings_plan(settings_before, action="off")
 
-    assert plan.installed_before is True
+    assert plan.installed_before is False
     assert plan.installed_after is False
     assert plan.commands_before == (marked_command,)
     assert plan.commands_after == ()
@@ -132,6 +138,126 @@ def test_build_hook_settings_plan_ignores_missing_and_non_string_hook_commands()
     assert plan.commands_before == ()
     assert plan.commands_after == ()
     assert plan.settings_after == settings_before
+
+
+def test_hook_install_manages_all_lifecycle_events_and_is_idempotent():
+    command = f"python -m memflow.claude_hook {MANAGED_HOOK_MARKER}"
+    installed = build_hook_settings_plan({}, action="on", command=command)
+    assert installed.settings_after["hooks"] == {
+        event: [
+            {"matcher": matcher, "hooks": [{"type": "command", "command": command}]}
+        ]
+        for event, matcher in MANAGED_HOOK_EVENTS.items()
+    }
+    reinstalled = build_hook_settings_plan(
+        installed.settings_after, action="on", command=command
+    )
+    assert reinstalled.settings_after == installed.settings_after
+    assert reinstalled.installed_before is True
+    assert reinstalled.installed_after is True
+    assert reinstalled.removed_count == len(MANAGED_HOOK_EVENTS)
+    removed = build_hook_settings_plan(reinstalled.settings_after, action="off")
+    assert removed.settings_after == {}
+    assert removed.installed_after is False
+    assert removed.removed_count == len(MANAGED_HOOK_EVENTS)
+
+
+def test_hook_uninstall_preserves_user_hooks_in_every_mixed_matcher_group():
+    command = f"python -m memflow.claude_hook {MANAGED_HOOK_MARKER}"
+    settings_before = {
+        "theme": "dark",
+        "hooks": {
+            event: [
+                {
+                    "matcher": "user matcher",
+                    "extra": "preserved",
+                    "hooks": [
+                        {"type": "command", "command": f"echo user {event}"},
+                        {"type": "command", "command": command},
+                    ],
+                },
+                {"matcher": "other", "hooks": [{"type": "prompt", "prompt": "user"}]},
+            ]
+            for event in MANAGED_HOOK_EVENTS
+        },
+    }
+    unrelated = [{"matcher": "Bash", "hooks": [{"type": "command", "command": "user"}]}]
+    settings_before["hooks"]["PreToolUse"] = unrelated
+
+    removed = build_hook_settings_plan(settings_before, action="off")
+
+    assert removed.removed_count == len(MANAGED_HOOK_EVENTS)
+    assert removed.settings_after["theme"] == "dark"
+    assert removed.settings_after["hooks"]["PreToolUse"] == unrelated
+    for event in MANAGED_HOOK_EVENTS:
+        assert removed.settings_after["hooks"][event] == [
+            {
+                "matcher": "user matcher",
+                "extra": "preserved",
+                "hooks": [{"type": "command", "command": f"echo user {event}"}],
+            },
+            {"matcher": "other", "hooks": [{"type": "prompt", "prompt": "user"}]},
+        ]
+        assert len(settings_before["hooks"][event][0]["hooks"]) == 2
+
+
+@pytest.mark.parametrize("problem", ["missing", "wrong_matcher", "async"])
+def test_status_reports_incomplete_lifecycle_install_and_configure_repairs_it(
+    tmp_path, problem
+):
+    (tmp_path / ".env").write_text("")
+    command = f"python -m memflow.claude_hook {MANAGED_HOOK_MARKER}"
+    installed = build_hook_settings_plan({}, action="on", command=command)
+    settings = installed.settings_after
+    if problem == "missing":
+        del settings["hooks"]["SessionStart"]
+    elif problem == "wrong_matcher":
+        settings["hooks"]["SessionStart"][0]["matcher"] = "startup"
+    else:
+        settings["hooks"]["SessionStart"][0]["hooks"][0]["async"] = True
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir()
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+    rc, status = _run_memflow_claude(["status"], tmp_path=tmp_path)
+    assert rc == 0
+    assert status["hook"]["installed"] is False
+    assert status["hook"]["missing_events"] == ["SessionStart"]
+    rc, repaired = _run_memflow_claude(
+        ["configure", "--hook", "on", "--apply"], tmp_path=tmp_path
+    )
+    assert rc == 0
+    assert repaired["hook"]["installed_before"] is False
+    assert repaired["hook"]["installed_after"] is True
+    assert repaired["hook"]["missing_events"] == []
+
+
+def test_status_reports_prompt_only_install_as_incomplete(tmp_path):
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir()
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": f"user {MANAGED_HOOK_MARKER}",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc, status = _run_memflow_claude(["status"], tmp_path=tmp_path)
+    assert rc == 0
+    assert status["hook"]["installed"] is False
+    assert status["hook"]["missing_events"] == ["SessionStart", "SessionEnd"]
 
 
 def _write_skill(root, *, name: str | None = None) -> None:

@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import memflow.claude_mcp as mcp_setup
-from memflow.claude_setup import apply_claude_setup_plan, build_claude_setup_plan
+from memflow.claude_setup import (
+    MANAGED_HOOK_EVENTS,
+    apply_claude_setup_plan,
+    build_claude_setup_plan,
+)
 from memflow.cli import main
 
 
@@ -88,12 +92,23 @@ def test_setup_connects_hook_and_mcp_with_absolute_paths(
     assert server["command"] == sys.executable
     assert server["args"] == ["-m", "memflow.mcp_server", "--config", str(config_path)]
     assert shlex.split(status["hook"]["command"])[4] == str(config_path)
+    settings = json.loads((project / ".claude" / "settings.local.json").read_text())
+    assert settings["hooks"] == {
+        event: [
+            {
+                "matcher": matcher,
+                "hooks": [{"type": "command", "command": status["hook"]["command"]}],
+            }
+        ]
+        for event, matcher in MANAGED_HOOK_EVENTS.items()
+    }
     saved = json.loads(mcp_setup.claude_config_path().read_text())
     assert "other" in saved["projects"][str(project)]["mcpServers"]
     assert len(claude_calls) == 1
     code, status, error = _invoke("status")
     assert (code, error) == (0, "")
     assert status["mcp"]["matches_config"] is True
+    assert status["hook"]["missing_events"] == []
     assert status["env_file_exists"] is True
     assert status["mismatches"] == []
 
@@ -110,15 +125,24 @@ def test_default_dry_run_does_not_write_or_run_claude(project, claude_calls):
     assert claude_calls == []
 
 
-def test_repeated_setup_reuses_mcp_registration(project, claude_calls):
+@pytest.mark.parametrize("missing_lifecycle_hook", [False, True])
+def test_repeated_setup_reuses_mcp_registration(
+    project, claude_calls, missing_lifecycle_hook
+):
     assert _invoke("configure", "--apply")[0] == 0
+    settings_path = project / ".claude" / "settings.local.json"
+    original_settings = json.loads(settings_path.read_text())
+    if missing_lifecycle_hook:
+        incomplete = json.loads(settings_path.read_text())
+        del incomplete["hooks"]["SessionStart"]
+        settings_path.write_text(json.dumps(incomplete))
     code, status, error = _invoke("configure", "--apply")
     assert (code, error) == (0, "")
-    assert status["changed"] is False
+    assert status["changed"] is missing_lifecycle_hook
+    assert status["hook"]["missing_events"] == []
 
     assert len(claude_calls) == 1
-    settings = json.loads((project / ".claude" / "settings.local.json").read_text())
-    assert len(settings["hooks"]["UserPromptSubmit"]) == 1
+    assert json.loads(settings_path.read_text()) == original_settings
 
 
 @pytest.mark.parametrize(
@@ -307,6 +331,10 @@ def test_disable_integrations_without_env_file(project, claude_calls, action):
     code, status, error = _invoke("status")
     assert (code, error) == (0, "")
     assert status["hook"]["installed"] is ("--hook" not in action)
+    settings = json.loads((project / ".claude" / "settings.local.json").read_text())
+    assert set(settings.get("hooks", {})) == (
+        set(MANAGED_HOOK_EVENTS) if "--hook" not in action else set()
+    )
     assert status["mcp"]["installed"] is ("--mcp" not in action)
     assert status["env_file_exists"] is False
 

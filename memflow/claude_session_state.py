@@ -242,11 +242,7 @@ class ClaudeSessionStateStore:
         *,
         reason: str,
     ) -> StateOperationResult:
-        """Atomically advance context generation and clear all activations.
-
-        This API is reserved for a future lifecycle-aware hook. The current
-        UserPromptSubmit integration must not call it.
-        """
+        """Atomically advance context generation and clear all activations."""
         if not isinstance(reason, str) or not reason.strip():
             return StateOperationResult(
                 "invalid_reset_reason",

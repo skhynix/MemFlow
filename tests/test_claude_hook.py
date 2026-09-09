@@ -77,6 +77,7 @@ def _hook_input(
     *,
     event: str = "UserPromptSubmit",
     session_id: str = "session-123",
+    **event_fields,
 ) -> str:
     return json.dumps(
         {
@@ -85,6 +86,7 @@ def _hook_input(
             "cwd": "/work/project",
             "hook_event_name": event,
             "prompt": prompt,
+            **event_fields,
         }
     )
 
@@ -1103,7 +1105,7 @@ def test_below_threshold_results_return_empty_stdout(tmp_path, fake_llm):
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "no_results"
     assert audit["selected_skills"] == []
-    assert audit["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
+    assert audit["session_dedupe"]["lifecycle_tracking"] == ("session_events")
 
 
 def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
@@ -1124,7 +1126,7 @@ def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
         manager_factory=lambda _config: manager,
     )
     non_prompt_output = run_hook(
-        _hook_input("split commits", event="SessionStart"),
+        _hook_input("split commits", event="Notification"),
         config_path=config_path,
         manager_factory=lambda _config: manager,
     )
@@ -1151,7 +1153,7 @@ def test_memflow_errors_fail_open(tmp_path):
     audit = _audit_rows(tmp_path / "hook-audit.jsonl")[0]
     assert audit["status"] == "fail_open"
     assert audit["warnings"] == ["RuntimeError"]
-    assert audit["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
+    assert audit["session_dedupe"]["lifecycle_tracking"] == ("session_events")
 
 
 def test_retrieval_timeout_fails_open(tmp_path):
@@ -1532,7 +1534,7 @@ def test_enforce_reuses_only_within_the_same_session(tmp_path):
         "policy": "on_hash_change",
         "state_load_status": "ok",
         "context_generation": 0,
-        "lifecycle_tracking": "user_prompt_submit_only",
+        "lifecycle_tracking": "session_events",
         "dedupe_saved_chars": len(first_context),
     }
 
@@ -2229,6 +2231,238 @@ def test_prompt_strings_do_not_advance_context_generation(
     assert row["session_dedupe"]["context_generation"] == 0
 
 
+@pytest.mark.parametrize("rollout", ["shadow", "enforce"])
+@pytest.mark.parametrize(
+    ("event", "fields", "reason"),
+    [
+        ("SessionStart", {"source": "compact"}, "compact"),
+        ("SessionStart", {"source": "clear"}, "clear"),
+        ("SessionStart", {"source": "startup"}, "startup"),
+        ("SessionEnd", {"reason": "clear"}, "clear"),
+    ],
+)
+def test_lifecycle_resets_allow_catalog_disclosure_again(
+    tmp_path, rollout, event, fields, reason
+):
+    manager = _StaticSkillManager([_renderer_candidate()])
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": rollout, "state_dir": "state"}},
+    )
+    first = run_hook(
+        _hook_input("skill"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    retrieval_calls = []
+    output = run_hook(
+        _hook_input("", event=event, **fields),
+        config_path=config_path,
+        manager_factory=lambda _: retrieval_calls.append(True),
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    reset = store.load("session-123").state
+
+    assert output == ""
+    assert retrieval_calls == []
+    assert reset is not None
+    assert reset.context_generation == 1
+    assert reset.last_reset_reason == reason
+    assert reset.activations == {}
+    row = _audit_rows(tmp_path / "hook-audit.jsonl")[-1]
+    assert row["status"] == "state_reset"
+    assert row["lifecycle"]["state_reset_status"] == "advanced"
+    assert row["lifecycle"]["context_generation"] == 1
+
+    again = run_hook(
+        _hook_input("skill"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    assert first
+    assert (
+        json.loads(again)["hookSpecificOutput"]
+        == json.loads(first)["hookSpecificOutput"]
+    )
+
+
+def test_repeated_compaction_resets_each_context_without_session_end(tmp_path):
+    manager = _StaticSkillManager([_renderer_candidate()])
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": "enforce", "state_dir": "state"}},
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    for generation in range(3):
+        assert run_hook(
+            _hook_input("skill"),
+            config_path=config_path,
+            manager_factory=lambda _: manager,
+        )
+        assert (
+            run_hook(
+                _hook_input("skill"),
+                config_path=config_path,
+                manager_factory=lambda _: manager,
+            )
+            == ""
+        )
+        assert store.load("session-123").state.context_generation == generation
+        assert (
+            run_hook(
+                _hook_input("", event="SessionStart", source="compact"),
+                config_path=config_path,
+            )
+            == ""
+        )
+    assert store.load("session-123").state.context_generation == 3
+
+
+def test_clear_resets_both_the_old_and_new_session_ids(tmp_path):
+    manager = _StaticSkillManager([_renderer_candidate()])
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": "enforce", "state_dir": "state"}},
+    )
+    store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+    for session_id in ("old", "new"):
+        assert run_hook(
+            _hook_input("skill", session_id=session_id),
+            config_path=config_path,
+            manager_factory=lambda _: manager,
+        )
+    run_hook(
+        _hook_input("", event="SessionEnd", session_id="old", reason="clear"),
+        config_path=config_path,
+    )
+    assert store.load("old").state.activations == {}
+    assert store.load("new").state.activations
+    run_hook(
+        _hook_input("", event="SessionStart", session_id="new", source="clear"),
+        config_path=config_path,
+    )
+    assert store.load("new").state.activations == {}
+
+
+@pytest.mark.parametrize(
+    ("event", "fields"),
+    [
+        ("SessionStart", {"source": "resume"}),
+        ("SessionStart", {}),
+        ("SessionStart", {"source": "unknown"}),
+        ("SessionEnd", {"reason": "prompt_input_exit"}),
+        ("SessionEnd", {"reason": "logout"}),
+        ("SessionEnd", {}),
+    ],
+)
+def test_ordinary_lifecycle_events_preserve_state_without_store_access(
+    tmp_path, monkeypatch, event, fields
+):
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": "enforce", "state_dir": "state"}},
+    )
+
+    def unexpected_state_store(*_args, **_kwargs):
+        pytest.fail("ordinary lifecycle events must not access state")
+
+    monkeypatch.setattr(
+        claude_hook_module, "ClaudeSessionStateStore", unexpected_state_store
+    )
+    assert (
+        run_hook(_hook_input("", event=event, **fields), config_path=config_path) == ""
+    )
+    assert not (tmp_path / "state").exists()
+    assert (
+        _audit_rows(tmp_path / "hook-audit.jsonl")[-1]["status"] == "lifecycle_ignored"
+    )
+
+
+@pytest.mark.parametrize("rollout", ["off", "invalid"])
+def test_lifecycle_reset_disabled_rollout_never_constructs_state_store(
+    tmp_path, monkeypatch, rollout
+):
+    config_path = _config_path(
+        tmp_path, claude={"session_dedupe": {"rollout": rollout}}
+    )
+
+    def unexpected_state_store(*_args, **_kwargs):
+        pytest.fail("disabled dedupe must not access state")
+
+    monkeypatch.setattr(
+        claude_hook_module, "ClaudeSessionStateStore", unexpected_state_store
+    )
+    for event, fields in [
+        ("SessionStart", {"source": "compact"}),
+        ("SessionStart", {"source": "clear"}),
+        ("SessionStart", {"source": "startup"}),
+        ("SessionEnd", {"reason": "clear"}),
+    ]:
+        assert (
+            run_hook(_hook_input("", event=event, **fields), config_path=config_path)
+            == ""
+        )
+
+
+def test_lifecycle_reset_survives_audit_failure(tmp_path, monkeypatch):
+    manager = _StaticSkillManager([_renderer_candidate()])
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": "enforce", "state_dir": "state"}},
+    )
+    assert run_hook(
+        _hook_input("skill"), config_path=config_path, manager_factory=lambda _: manager
+    )
+    monkeypatch.setattr(
+        skill_context_module.AuditLogger, "write_or_fail", lambda *_: False
+    )
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
+    state = (
+        claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
+        .load("session-123")
+        .state
+    )
+    assert state.context_generation == 1
+    assert state.activations == {}
+
+
+def test_lifecycle_reset_missing_session_and_state_failures_fail_open(
+    tmp_path, monkeypatch
+):
+    config_path = _config_path(
+        tmp_path,
+        claude={"session_dedupe": {"rollout": "enforce", "state_dir": "state"}},
+    )
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact", session_id=""),
+            config_path=config_path,
+        )
+        == ""
+    )
+    assert not (tmp_path / "state").exists()
+
+    def failed_state_store(*_args, **_kwargs):
+        raise OSError("unavailable")
+
+    monkeypatch.setattr(
+        claude_hook_module, "ClaudeSessionStateStore", failed_state_store
+    )
+    assert (
+        run_hook(
+            _hook_input("", event="SessionStart", source="compact"),
+            config_path=config_path,
+        )
+        == ""
+    )
+    rows = _audit_rows(tmp_path / "hook-audit.jsonl")
+    assert [row["status"] for row in rows] == ["fail_open", "fail_open"]
+    assert rows[0]["warnings"] == ["session_dedupe_missing_session_id"]
+    assert rows[1]["warnings"] == ["claude_session_state_reset_failed"]
+
+
 def test_default_off_emits_baseline_and_never_constructs_state_store(
     tmp_path,
     monkeypatch,
@@ -2258,7 +2492,7 @@ def test_default_off_emits_baseline_and_never_constructs_state_store(
     assert row["status"] == "injected"
     assert row["session_dedupe"]["rollout"] == "off"
     assert row["session_dedupe"]["state_load_status"] == "off"
-    assert row["session_dedupe"]["lifecycle_tracking"] == ("user_prompt_submit_only")
+    assert row["session_dedupe"]["lifecycle_tracking"] == ("session_events")
 
 
 def test_enforce_missing_session_and_no_results_do_no_state_work(tmp_path):
@@ -2524,7 +2758,7 @@ def test_post_audit_state_failure_preserves_output_and_next_call_injects(
         "state_load_status": "missing",
         "state_record_status": failure_status,
         "context_generation": 0,
-        "lifecycle_tracking": "user_prompt_submit_only",
+        "lifecycle_tracking": "session_events",
     }
 
 

@@ -33,7 +33,11 @@ from memflow.claude_mcp import (
 )
 from memflow.skill_runtime import resolve_env_file
 
-CLAUDE_HOOK_EVENT = "UserPromptSubmit"
+MANAGED_HOOK_EVENTS = {
+    "UserPromptSubmit": "",
+    "SessionStart": "startup|clear|compact",
+    "SessionEnd": "clear",
+}
 MANAGED_HOOK_MARKER = "# memflow-managed:claude-hook"
 
 
@@ -117,6 +121,7 @@ class ClaudeSetupPlan:
                 "command": self.hook_command,
                 "removed": self.hook_plan.removed_count,
                 "added": self.hook_plan.added,
+                "missing_events": _missing_hook_events(self.settings_after),
             },
             "native_catalog_mode": {
                 "requested": self.catalog_mode,
@@ -257,26 +262,48 @@ def _collect_hook_commands(
     if not isinstance(hooks, dict):
         return (), ("invalid_hooks_ignored",)
 
-    entries = hooks.get(CLAUDE_HOOK_EVENT, [])
-    if entries is None:
-        return (), ()
-    if not isinstance(entries, list):
-        return (), ("invalid_user_prompt_submit_hooks_ignored",)
-
     commands: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            warnings.append("invalid_user_prompt_submit_hook_entry_ignored")
+    for event in MANAGED_HOOK_EVENTS:
+        entries = hooks.get(event, [])
+        if entries is None:
             continue
-        entry_hooks = entry.get("hooks", [])
-        if not isinstance(entry_hooks, list):
-            warnings.append("invalid_user_prompt_submit_hook_commands_ignored")
+        if not isinstance(entries, list):
+            warnings.append(f"invalid_{event}_hooks_ignored")
             continue
-        for hook in entry_hooks:
-            command = hook.get("command") if isinstance(hook, dict) else None
-            if isinstance(command, str) and _is_managed_command_hook(hook):
-                commands.append(command)
-    return tuple(commands), tuple(dict.fromkeys(warnings))
+        for entry in entries:
+            if not isinstance(entry, dict):
+                warnings.append(f"invalid_{event}_hook_entry_ignored")
+                continue
+            entry_hooks = entry.get("hooks", [])
+            if not isinstance(entry_hooks, list):
+                warnings.append(f"invalid_{event}_hook_commands_ignored")
+                continue
+            for hook in entry_hooks:
+                if _is_managed_command_hook(hook):
+                    commands.append(hook["command"])
+    return tuple(dict.fromkeys(commands)), tuple(dict.fromkeys(warnings))
+
+
+def _missing_hook_events(settings: dict[str, Any]) -> list[str]:
+    """Report events lacking a synchronous managed hook with its expected matcher."""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return list(MANAGED_HOOK_EVENTS)
+    missing = []
+    for event, matcher in MANAGED_HOOK_EVENTS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list) or not any(
+            isinstance(entry, dict)
+            and entry.get("matcher", "") == matcher
+            and isinstance(entry.get("hooks"), list)
+            and any(
+                _is_managed_command_hook(hook) and not hook.get("async", False)
+                for hook in entry["hooks"]
+            )
+            for entry in entries
+        ):
+            missing.append(event)
+    return missing
 
 
 def _remove_managed_hook_entries(
@@ -300,45 +327,47 @@ def _remove_managed_hook_entries(
         settings_after["hooks"] = hooks
         warnings.append("invalid_hooks_replaced")
 
-    entries = hooks.get(CLAUDE_HOOK_EVENT, [])
-    if entries is None:
-        entries = []
-    if not isinstance(entries, list):
-        if not create:
-            return settings_after, 0, ("invalid_user_prompt_submit_hooks_ignored",)
-        entries = []
-        warnings.append("invalid_user_prompt_submit_hooks_replaced")
-
     removed = 0
-    kept_entries: list[Any] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            kept_entries.append(entry)
-            continue
-
-        entry_hooks = entry.get("hooks", [])
-        if not isinstance(entry_hooks, list):
-            kept_entries.append(entry)
-            continue
-
-        kept_hooks = []
-        for hook in entry_hooks:
-            if _is_managed_command_hook(hook):
-                removed += 1
+    for event in MANAGED_HOOK_EVENTS:
+        entries = hooks.get(event, [])
+        if entries is None:
+            entries = []
+        if not isinstance(entries, list):
+            if not create:
+                warnings.append(f"invalid_{event}_hooks_ignored")
                 continue
-            kept_hooks.append(hook)
+            entries = []
+            warnings.append(f"invalid_{event}_hooks_replaced")
 
-        if len(kept_hooks) == len(entry_hooks):
-            kept_entries.append(entry)
-        elif kept_hooks:
-            updated_entry = dict(entry)
-            updated_entry["hooks"] = kept_hooks
-            kept_entries.append(updated_entry)
+        kept_entries: list[Any] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                kept_entries.append(entry)
+                continue
 
-    if kept_entries:
-        hooks[CLAUDE_HOOK_EVENT] = kept_entries
-    elif CLAUDE_HOOK_EVENT in hooks:
-        del hooks[CLAUDE_HOOK_EVENT]
+            entry_hooks = entry.get("hooks", [])
+            if not isinstance(entry_hooks, list):
+                kept_entries.append(entry)
+                continue
+
+            kept_hooks = []
+            for hook in entry_hooks:
+                if _is_managed_command_hook(hook):
+                    removed += 1
+                    continue
+                kept_hooks.append(hook)
+
+            if len(kept_hooks) == len(entry_hooks):
+                kept_entries.append(entry)
+            elif kept_hooks:
+                updated_entry = dict(entry)
+                updated_entry["hooks"] = kept_hooks
+                kept_entries.append(updated_entry)
+
+        if kept_entries:
+            hooks[event] = kept_entries
+        elif event in hooks:
+            del hooks[event]
 
     if not hooks:
         del settings_after["hooks"]
@@ -349,18 +378,14 @@ def _remove_managed_hook_entries(
 def _install_hook_entry(settings: dict[str, Any], command: str) -> dict[str, Any]:
     settings_after = copy.deepcopy(settings)
     hooks = settings_after.setdefault("hooks", {})
-    entries = hooks.setdefault(CLAUDE_HOOK_EVENT, [])
-    entries.append(
-        {
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                }
-            ],
-        }
-    )
+    for event, matcher in MANAGED_HOOK_EVENTS.items():
+        entries = hooks.setdefault(event, [])
+        entries.append(
+            {
+                "matcher": matcher,
+                "hooks": [{"type": "command", "command": command}],
+            }
+        )
     return settings_after
 
 
@@ -399,8 +424,8 @@ def build_hook_settings_plan(
     warnings.extend(after_warnings)
     return HookSettingsPlan(
         settings_after=settings_after,
-        installed_before=bool(commands_before),
-        installed_after=bool(commands_after),
+        installed_before=not _missing_hook_events(settings_before),
+        installed_after=not _missing_hook_events(settings_after),
         commands_before=commands_before,
         commands_after=commands_after,
         removed_count=removed,
@@ -664,8 +689,9 @@ def build_status(
             else None,
         },
         "hook": {
-            "installed": bool(commands),
+            "installed": not _missing_hook_events(settings),
             "commands": list(commands),
+            "missing_events": _missing_hook_events(settings),
         },
         "native_catalog_mode": {
             "raw": mode.raw_mode,

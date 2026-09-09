@@ -1,7 +1,7 @@
 # Copyright 2026 SK hynix Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Claude Code UserPromptSubmit hook integration for MemFlow skills."""
+"""Claude Code prompt and session hook integration for MemFlow skills."""
 
 from __future__ import annotations
 
@@ -97,6 +97,8 @@ class HookInput:
     cwd: str
     hook_event_name: str
     prompt: str
+    source: str = ""
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -318,6 +320,8 @@ def parse_hook_input(stdin_text: str) -> HookInput:
         cwd=str(payload.get("cwd") or ""),
         hook_event_name=str(payload.get("hook_event_name") or ""),
         prompt=str(payload.get("prompt") or ""),
+        source=str(payload.get("source") or ""),
+        reason=str(payload.get("reason") or ""),
     )
 
 
@@ -352,6 +356,41 @@ def _session_dedupe_settings(config: dict[str, Any]) -> dict[str, Any]:
         "state_dir": DEFAULT_SESSION_DEDUPE_STATE_DIR,
         "warnings": ["invalid_session_dedupe_config"],
     }
+
+
+def _reset_session_for_lifecycle(
+    hook_input: HookInput,
+    config: dict[str, Any],
+) -> StateOperationResult | None:
+    """Invalidate prior-context disclosures before attempting any output audit."""
+    settings = _session_dedupe_settings(config)
+    if settings.get("rollout") == "off":
+        return None
+
+    if hook_input.hook_event_name == "SessionStart":
+        if hook_input.source not in {"compact", "clear", "startup"}:
+            return None
+        # NOTE: Subagent events may carry the parent session_id, so compact
+        # can reset shared state: https://github.com/anthropics/claude-code/issues/91910
+        reason = hook_input.source
+    elif hook_input.hook_event_name == "SessionEnd" and hook_input.reason == "clear":
+        reason = hook_input.reason
+    else:
+        return None
+
+    if not hook_input.session_id:
+        return StateOperationResult(
+            "missing_session_id",
+            warnings=("session_dedupe_missing_session_id",),
+        )
+    try:
+        store = ClaudeSessionStateStore(str(settings["state_dir"]))
+        return store.advance_context_generation(hook_input.session_id, reason=reason)
+    except Exception:
+        return StateOperationResult(
+            "reset_failed",
+            warnings=("claude_session_state_reset_failed",),
+        )
 
 
 def _baseline_dedupe_plan(
@@ -542,7 +581,7 @@ def _add_session_dedupe_audit(
                 "policy": plan.policy,
                 "state_load_status": plan.state_load_status,
                 "context_generation": plan.context_generation,
-                "lifecycle_tracking": "user_prompt_submit_only",
+                "lifecycle_tracking": "session_events",
                 "dedupe_saved_chars": dedupe_saved_chars,
             },
         }
@@ -680,6 +719,41 @@ def run_hook(
         hook_input = parse_hook_input(stdin_text)
         context_request = build_skill_context_request(hook_input, config)
         prompt = context_request.prompt
+        if hook_input.hook_event_name in {"SessionStart", "SessionEnd"}:
+            reset_result = _reset_session_for_lifecycle(hook_input, config)
+            record = audit_logger.base_record(
+                trace_id=trace_id,
+                request=context_request,
+                hook_event=hook_input.hook_event_name,
+                prompt="",
+                status=(
+                    "lifecycle_ignored"
+                    if reset_result is None
+                    else "state_reset"
+                    if reset_result.succeeded
+                    else "fail_open"
+                ),
+                latency_ms=latency_ms(),
+                warnings=[
+                    *configuration_warnings,
+                    *session_dedupe_config_warnings,
+                    *(reset_result.warnings if reset_result is not None else ()),
+                ],
+            )
+            record["lifecycle"] = {
+                "source": hook_input.source,
+                "reason": hook_input.reason,
+                "state_reset_status": (
+                    reset_result.status if reset_result is not None else "not_needed"
+                ),
+                "context_generation": (
+                    reset_result.state.context_generation
+                    if reset_result is not None and reset_result.state is not None
+                    else None
+                ),
+            }
+            audit_logger.write_or_fail(record)
+            return ""
         if hook_input.hook_event_name != "UserPromptSubmit":
             record = audit_logger.base_record(
                 trace_id=trace_id,
@@ -824,7 +898,7 @@ def run_hook(
                 "state_load_status": dedupe_plan.state_load_status,
                 "state_record_status": state_record_result.status,
                 "context_generation": dedupe_plan.context_generation,
-                "lifecycle_tracking": "user_prompt_submit_only",
+                "lifecycle_tracking": "session_events",
             }
             audit_logger.write_or_fail(state_record_failure)
         return planned_stdout
