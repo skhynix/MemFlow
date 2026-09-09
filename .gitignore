@@ -46,6 +46,12 @@ Thumbs.db
 # Project specific
 tags
 
+# Local environment files
+.env
+.env.*
+!.env.example
+/.memflow/*.env
+
 # Coding agents
 .claude/
 
