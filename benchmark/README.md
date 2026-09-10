@@ -27,6 +27,17 @@ query bank vendored with MemFlow.
 For detailed instructions, see
 [wikihow_procedure_silver/README.md](wikihow_procedure_silver/README.md).
 
+### `skill_ret_bench` - SkillRet Benchmark
+
+The `skill_ret_bench` subdirectory evaluates **MemFlow retrieval** against the
+SkillRet query bank for skill retrieval evaluation.
+
+- **Location**: `benchmark/skill_ret_bench/`
+- **Source**: HuggingFace dataset [`ThakiCloud/SKILLRET`](https://huggingface.co/datasets/ThakiCloud/SKILLRET)
+- **Data shape**: JSONL skills (test split) as corpus, JSONL queries (test split) with merged `skill_ids` as query bank
+
+For detailed instructions, see [skill_ret_bench/README.md](skill_ret_bench/README.md).
+
 ## Installation
 
 Use the install script for easy setup:
@@ -39,7 +50,7 @@ uv sync --extra benchmark
 uv run benchmark/install_benchmark.py proced_mem_bench
 
 # Install with specific commit
-uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash f7097bcaf6ca
+uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash-procmem f7097bcaf6ca
 
 # Print WikiHow Procedure Silver paths and source instructions
 uv run benchmark/install_benchmark.py wikihow_procedure_silver
@@ -48,8 +59,15 @@ uv run benchmark/install_benchmark.py wikihow_procedure_silver
 uv run benchmark/install_benchmark.py wikihow_procedure_silver \
   --raw-dir /path/to/kaggle/raw/wikiHow-json-files
 
+# Install SkillRet benchmark data from HuggingFace (requires git-lfs)
+uv run benchmark/install_benchmark.py skill_ret_bench
+uv run benchmark/install_benchmark.py skill_ret_bench --commit-hash-skillret <hash>
+
 # Install all benchmark dependencies, building WikiHow if --raw-dir is set
-uv run benchmark/install_benchmark.py all
+uv run benchmark/install_benchmark.py all \
+  --commit-hash-procmem <procmem_hash> \
+  --commit-hash-skillret <skillret_hash> \
+  --raw-dir /path/to/kaggle/raw
 ```
 
 ## Directory Structure
@@ -73,6 +91,15 @@ benchmark/
 │   ├── evaluation.py
 │   ├── benchmark_data/          # Vendored query bank and metadata
 │   └── run_wikihow_procedure_silver.py
+├── skill_ret_bench/            # SkillRet Benchmark
+│   ├── README.md
+│   ├── __init__.py
+│   ├── adapter.py
+│   ├── evaluation.py
+│   ├── run_skill_ret_bench.py
+│   ├── run_seeding.py
+│   ├── run_retrieval.py
+│   └── data/                   # Cloned from HuggingFace (gitignored)
 └── results/                     # Benchmark outputs (gitignored)
 ```
 

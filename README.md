@@ -24,3 +24,12 @@ uv run kaggle datasets download \
 uv run benchmark/install_benchmark.py wikihow_procedure_silver \
   --raw-dir benchmark/wikihow_procedure_silver/raw
 ```
+
+The SkillRet benchmark is installed directly from HuggingFace (requires
+git-lfs):
+
+```bash
+git lfs install
+uv run benchmark/install_benchmark.py skill_ret_bench
+uv run benchmark/install_benchmark.py skill_ret_bench --commit-hash-skillret <hash>
+```

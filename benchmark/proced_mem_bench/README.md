@@ -26,7 +26,7 @@ intentionally excludes state text from the benchmark payload.
 Clone the external `Procedural_memory_benchmark` repository into the current directory.  You may use `install_benchmark.py` for easy setup:
 
 ```bash
-uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash f7097bcaf6ca
+uv run benchmark/install_benchmark.py proced_mem_bench --commit-hash-procmem f7097bcaf6ca
 ```
 
 ### 2. Install dependencies
