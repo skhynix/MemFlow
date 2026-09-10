@@ -15,27 +15,38 @@ The SkillRet benchmark flow:
 ## Dataset
 
 This benchmark uses the **SkillRet** dataset from HuggingFace:
-- **Repository**: https://huggingface.co/datasets/anonymous-ed-benchmark/SKILLRET
+- **Repository**: https://huggingface.co/datasets/ThakiCloud/SKILLRET
 - **License**: Apache-2.0 (benchmark), MIT/Apache-2.0 (source skills)
-- **Size**: 17,810 skills, 63,259 train queries, 4,997 eval queries
+- **Size**: 6,006 held-out candidate skills and 4,392 evaluation queries
+  (17,810 skills and 63,259 train queries are included in the complete release)
 
-### Download the dataset
+Seeding only the 6,006-skill test split (instead of the full 17,810-skill library)
+and the evaluation split's query count (4,392 vs 4,997 in prior runs) both affect
+retrieval scores, so comparisons across corpus/query configurations are not
+like-for-like.
 
-```bash
-# Using git (requires git-lfs)
-git lfs install
-git clone https://huggingface.co/datasets/anonymous-ed-benchmark/SKILLRET
+The dataset ships JSONL files for all three subsets, each split into `train` and `test`:
 
-# Or using Python
-from datasets import load_dataset
-skills = load_dataset("anonymous-ed-benchmark/SKILLRET", "skills", split="test")
-queries = load_dataset("anonymous-ed-benchmark/SKILLRET", "queries", split="test")
-qrels = load_dataset("anonymous-ed-benchmark/SKILLRET", "qrels", split="test")
 ```
+data/
+├── skills.jsonl           # Full skill library (17,810 skills, not used)
+├── skills/
+│   ├── train.jsonl        # 10,123 skills
+│   └── test.jsonl         # 6,006 skills (corpus)
+├── queries/
+│   ├── train.jsonl        # 63,259 queries
+│   └── test.jsonl         # 4,392 queries (query bank)
+├── qrels/
+│   ├── train.jsonl
+│   └── test.jsonl         # Binary relevance labels (already merged into queries)
+└── taxonomy.json
+```
+
+The `test` splits are used for evaluation. Train and test skill sets are disjoint (zero overlap), so seeding only test skills is sufficient — every `skill_ids` reference in `queries/test.jsonl` points to a skill present in `skills/test.jsonl`.
 
 ### Schema
 
-**Skills (`skills.jsonl`):**
+**Skills (`skills/test.jsonl`):**
 - `id`: Skill ID
 - `name`: Skill name
 - `namespace`: Skill namespace (author/repo)
@@ -44,54 +55,37 @@ qrels = load_dataset("anonymous-ed-benchmark/SKILLRET", "qrels", split="test")
 - `major`, `sub`: Taxonomy categories (6 major, 18 sub)
 - `author`, `stars`, `installs`, `license`, `repo`: Metadata
 
-**Queries (`queries.jsonl`):**
+**Queries (`queries/test.jsonl`):**
 - `id`: Query ID
 - `query`: Natural language request
-- `skill_ids`: List of relevant skill IDs (ground truth)
+- `skill_ids`: List of relevant skill IDs (ground truth, merged from qrels)
 - `k`: Number of relevant skills
 
-**Qrels (`qrels.jsonl`):**
+**Qrels (`qrels/test.jsonl`):**
 - `query_id`: Query ID
 - `skill_id`: Relevant skill ID
 - `relevance`: Binary relevance (1)
 
-## Usage
+The `skill_ids` field in `queries/test.jsonl` is pre-merged from `qrels/test.jsonl`, so qrels are not loaded separately during evaluation.
 
-### Convert HuggingFace dataset to JSONL
+## Installation
 
-```python
-from datasets import load_dataset
-import json
-
-# Load and export skills
-skills = load_dataset("anonymous-ed-benchmark/SKILLRET", "skills", split="test")
-with open("skills.jsonl", "w") as f:
-    for skill in skills:
-        f.write(json.dumps(skill) + "\n")
-
-# Load and export queries with qrels combined
-queries = load_dataset("anonymous-ed-benchmark/SKILLRET", "queries", split="test")
-qrels = load_dataset("anonymous-ed-benchmark/SKILLRET", "qrels", split="test")
-
-# Build qrels map: query_id -> [skill_ids]
-from collections import defaultdict
-qrels_map = defaultdict(list)
-for r in qrels:
-    if r["relevance"] == 1:
-        qrels_map[r["query_id"]].append(r["skill_id"])
-
-# Export queries with skill_ids
-with open("queries.jsonl", "w") as f:
-    for q in queries:
-        q["skill_ids"] = qrels_map.get(q["id"], [])
-        f.write(json.dumps(q) + "\n")
+```bash
+# Requires git-lfs
+git lfs install
+uv run benchmark/install_benchmark.py skill_ret_bench
+uv run benchmark/install_benchmark.py skill_ret_bench --commit-hash-skillret <hash>
 ```
+
+This clones the HuggingFace repository to `benchmark/skill_ret_bench/data/SKILLRET/`. No conversion is needed — all data files are already JSONL.
+
+## Usage
 
 ### Seed corpus only
 
 ```bash
 uv run benchmark/skill_ret_bench/run_skill_ret_bench.py \
-  --corpus-path benchmark/skill_ret_bench/data/SKILLRET/data/skills.jsonl \
+  --corpus-path benchmark/skill_ret_bench/data/SKILLRET/data/skills/test.jsonl \
   --seed-only
 ```
 
@@ -99,7 +93,7 @@ uv run benchmark/skill_ret_bench/run_skill_ret_bench.py \
 
 ```bash
 uv run benchmark/skill_ret_bench/run_skill_ret_bench.py \
-  --corpus-path benchmark/skill_ret_bench/data/SKILLRET/data/skills.jsonl \
+  --corpus-path benchmark/skill_ret_bench/data/SKILLRET/data/skills/test.jsonl \
   --query-bank-path benchmark/skill_ret_bench/data/SKILLRET/data/queries/test.jsonl \
   --user-id benchmark \
   --k-values 1 3 5 10
@@ -143,5 +137,5 @@ The benchmark computes:
 
 ## Data Source
 
-- **HuggingFace**: https://huggingface.co/datasets/anonymous-ed-benchmark/SKILLRET
+- **HuggingFace**: https://huggingface.co/datasets/ThakiCloud/SKILLRET
 - **Paper**: SkillRet: A Large-Scale Benchmark for Skill Retrieval in LLM Agents (arxiv 2605.05726)

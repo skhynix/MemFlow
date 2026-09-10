@@ -6,7 +6,7 @@
 
 Usage:
     uv run benchmark/skill_ret_bench/run_seeding.py \
-        --corpus-path data/SKILLRET/data/skills.jsonl \
+        --corpus-path data/SKILLRET/data/skills/test.jsonl \
         --user-id benchmark \
         --clear-existing
 """
@@ -38,7 +38,9 @@ from memflow import MemFlow  # noqa: E402
 
 # Default paths relative to this script location
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CORPUS_PATH = SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills.jsonl"
+DEFAULT_CORPUS_PATH = (
+    SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills" / "test.jsonl"
+)
 DEFAULT_RESULTS_DIR = SCRIPT_DIR.parent.parent / "results"
 
 # Concurrency / batching defaults
@@ -60,7 +62,7 @@ def _parse_args() -> argparse.Namespace:
         "--corpus-path",
         type=Path,
         default=DEFAULT_CORPUS_PATH,
-        help=f"Path to skills.jsonl (default: {DEFAULT_CORPUS_PATH})",
+        help=f"Path to skills test.jsonl (default: {DEFAULT_CORPUS_PATH})",
     )
     parser.add_argument(
         "--user-id",

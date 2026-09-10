@@ -135,9 +135,9 @@ def _string_list(value: Any) -> list[str]:
 
 
 def normalize_skill_ret_record(raw: dict[str, Any]) -> SkillRetRecord:
-    """Normalize a raw SkillRet record from anonymous-ed-benchmark/SKILLRET.
+    """Normalize a raw SkillRet record from ThakiCloud/SKILLRET.
 
-    Expected schema (HuggingFace: anonymous-ed-benchmark/SKILLRET):
+    Expected schema (HuggingFace: ThakiCloud/SKILLRET):
     - id: skill ID
     - name: skill name
     - namespace: skill namespace (e.g., author/repo)
@@ -154,6 +154,8 @@ def normalize_skill_ret_record(raw: dict[str, Any]) -> SkillRetRecord:
 
     # Collect metadata
     metadata = {
+        "name": raw.get("name"),
+        "description": raw.get("description"),
         "namespace": raw.get("namespace"),
         "author": raw.get("author"),
         "stars": raw.get("stars"),
@@ -168,10 +170,15 @@ def normalize_skill_ret_record(raw: dict[str, Any]) -> SkillRetRecord:
     # Filter out None values
     metadata = {k: v for k, v in metadata.items() if v is not None}
 
+    # ``skill_md`` is canonical in SkillRet and ``body`` is its compatibility
+    # alias. Fall back on truthy content so an empty canonical field does not
+    # hide an available body or description.
+    skill_body = raw.get("skill_md") or raw.get("body") or raw.get("description", "")
+
     return SkillRetRecord(
         id=str(raw.get("id", "")).strip(),
         title=str(raw.get("name", "")).strip(),
-        content=str(raw.get("skill_md", raw.get("description", ""))).strip(),
+        content=str(skill_body).strip(),
         category=category,
         tags=[major, sub] if major or sub else [],
         metadata=metadata,

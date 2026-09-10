@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -46,7 +47,9 @@ from benchmark.skill_ret_bench.evaluation import (  # noqa: E402
 
 # Default paths relative to this script location
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CORPUS_PATH = SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills.jsonl"
+DEFAULT_CORPUS_PATH = (
+    SCRIPT_DIR / "data" / "SKILLRET" / "data" / "skills" / "test.jsonl"
+)
 DEFAULT_QUERY_BANK_PATH = (
     SCRIPT_DIR / "data" / "SKILLRET" / "data" / "queries" / "test.jsonl"
 )
@@ -177,11 +180,13 @@ def main() -> None:
 
     start = time.perf_counter()
 
-    seed_stats = seed_skill_ret_corpus(
-        memflow=memflow,
-        user_id=args.user_id,
-        corpus_path=args.corpus_path,
-        clear_existing=args.clear_existing,
+    seed_stats = asyncio.run(
+        seed_skill_ret_corpus(
+            memflow=memflow,
+            user_id=args.user_id,
+            corpus_path=args.corpus_path,
+            clear_existing=args.clear_existing,
+        )
     )
     corpus_size = seed_stats.active_corpus_size
 
