@@ -11,7 +11,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from memflow.manager import MemFlow, _load_env_file
-from memflow.models import Procedure, RunResult, Step, StepResult, StepType, TaskPlan
+from memflow.models import (
+    Procedure,
+    RunResult,
+    SearchResult,
+    Step,
+    StepResult,
+    StepType,
+    TaskPlan,
+)
 from memflow.store import (
     EmulatedStore,
     FileStore,
@@ -347,6 +355,182 @@ class TestMemFlowSearch:
             skill.id,
             procedure.id,
         }
+
+
+class TestMemFlowSearchReranker:
+    """Tests for reranker integration in MemFlow.search()."""
+
+    def test_search_no_reranker_by_default(self, fake_llm, clean_env):
+        """With MEMFLOW_RERANKER_PIPELINE unset, search delegates directly to store."""
+        store = EmulatedStore()
+        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        results = manager.search("deploy")
+
+        assert len(results) == 1
+        assert results[0].procedure.title == "Deploy guide"
+        assert manager._rerank_pipeline_obj is None  # never built
+
+    def test_search_reranks_when_pipeline_enabled(self, fake_llm, clean_env):
+        """MEMFLOW_RERANKER_PIPELINE=ce routes candidates through the rerank pipeline."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "10"
+        store = EmulatedStore()
+        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.rerank.return_value = [
+            SearchResult(procedure=Procedure(title="reranked", content="x"), score=1.0)
+        ]
+        with patch.object(
+            manager, "_get_rerank_pipeline", return_value=mock_pipeline
+        ) as mock_get:
+            results = manager.search("deploy", top_k=1)
+
+        mock_pipeline.rerank.assert_called_once()
+        mock_get.assert_called_once()
+        assert len(results) == 1
+        assert results[0].procedure.title == "reranked"
+
+    def test_search_over_fetches_when_rerank_enabled(self, fake_llm, clean_env):
+        """store.search receives top_k=max(top_k, candidate_k) when reranking."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
+        mock_store = MagicMock()
+        mock_store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=mock_store)
+
+        manager.search("deploy", top_k=5)
+
+        # First positional arg is query, keyword top_k must be over-fetched.
+        call_kwargs = mock_store.search.call_args.kwargs
+        assert call_kwargs["top_k"] == 20
+
+    def test_search_no_over_fetch_when_rerank_disabled(self, fake_llm, clean_env):
+        """Without reranking, store.search receives the caller's top_k."""
+        mock_store = MagicMock()
+        mock_store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=mock_store)
+
+        manager.search("deploy", top_k=5)
+
+        assert mock_store.search.call_args.kwargs["top_k"] == 5
+
+    def test_search_hybrid_respects_fetch_cap_server_side(self, fake_llm, clean_env):
+        """Hybrid+rerank: FETCH_TOP_K < RRF_TOP_K must shrink the server-side
+        rrf_top_k, not just truncate client-side."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        os.environ["MEMFLOW_HYBRID_RRF_TOP_K"] = "100"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        with patch.object(manager, "_get_rerank_pipeline") as mock_get:
+            mock_get.return_value.rerank.return_value = []
+            manager.search("deploy", top_k=5)
+
+        kwargs = store.search_hybrid.call_args.kwargs
+        # min(RRF=100, FETCH=20) = 20 reaches the server — previously the
+        # helper re-inflated this back to RRF_TOP_K=100.
+        assert kwargs["rrf_top_k"] == 20
+
+    def test_search_batch_bypasses_reranker(self, fake_llm, clean_env):
+        """Batch queries (list input) skip the reranker entirely."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        mock_store = MagicMock()
+        mock_store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=mock_store)
+
+        manager.search(["deploy", "build"], top_k=3)
+
+        mock_store.search.assert_called_once()
+        assert mock_store.search.call_args.kwargs["top_k"] == 3
+        assert manager._rerank_pipeline_obj is None
+
+    def test_misconfigured_pipeline_warns_and_keeps_order(
+        self, fake_llm, clean_env, caplog
+    ):
+        """PIPELINE=ce without RERANKER_CE_API_BASE must not crash search():
+        warn once, degrade to retrieval order, and cache the fallback so the
+        failed build is not retried on every query."""
+        import logging
+
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ.pop("RERANKER_CE_API_BASE", None)
+        store = EmulatedStore()
+        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        with caplog.at_level(logging.WARNING, logger="memflow.manager"):
+            first = manager.search("deploy", top_k=1)
+            second = manager.search("deploy", top_k=1)
+
+        assert first[0].procedure.title == "Deploy guide"
+        assert second[0].procedure.title == "Deploy guide"
+        assert "failed to build" in caplog.text
+        # The NoopReranker fallback is cached — both outcomes are memoized.
+        from memflow.reranker import NoopReranker
+
+        assert isinstance(manager._rerank_pipeline_obj, NoopReranker)
+
+    def test_pipeline_built_once_under_concurrency(self, fake_llm, clean_env):
+        """The double-checked lock must construct the pipeline at most once
+        even when many threads hit a cold cache simultaneously."""
+        import threading
+
+        from memflow.reranker import RerankPipeline
+
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        manager = MemFlow(llm=fake_llm, store=EmulatedStore())
+
+        build_calls = []
+        real_init = RerankPipeline.__init__
+
+        def counting_init(self, *args, **kwargs):
+            build_calls.append(threading.current_thread().name)
+            real_init(self, *args, **kwargs)
+            # Slow down construction to widen the race window.
+            threading.Event().wait(0.05)
+
+        with patch.object(RerankPipeline, "__init__", counting_init):
+            threads = [
+                threading.Thread(target=manager._get_rerank_pipeline) for _ in range(8)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert len(build_calls) == 1
+
+    def test_search_rerank_false_skips_overfetch_and_reranker(
+        self, fake_llm, clean_env
+    ):
+        """rerank=False bypasses the pipeline even when globally enabled:
+        no candidate over-fetch, no pipeline construction."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
+        hit = SearchResult(procedure=Procedure(title="Deploy", content="x"), score=1.0)
+        mock_store = MagicMock()
+        mock_store.search.return_value = [hit]
+        manager = MemFlow(llm=fake_llm, store=mock_store)
+
+        manager.search("deploy", top_k=3, rerank=False)
+
+        assert mock_store.search.call_args.kwargs["top_k"] == 3
+        assert manager._rerank_pipeline_obj is None
+
+        # Default stays True — same manager still over-fetches.
+        with patch.object(manager, "_get_rerank_pipeline") as mock_get:
+            mock_get.return_value.rerank.return_value = []
+            manager.search("deploy", top_k=3)
+        assert mock_store.search.call_args.kwargs["top_k"] == 20
+        mock_get.assert_called_once()
 
 
 class TestMemFlowDelete:
