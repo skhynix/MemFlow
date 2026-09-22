@@ -75,6 +75,14 @@ def clean_env():
         "QDRANT_INDEX_M",
         "QDRANT_INDEX_EF_CONSTRUCT",
         "QDRANT_DISTANCE",
+        "QDRANT_SPARSE_MODEL",
+        # Hybrid search pipeline
+        "MEMFLOW_HYBRID_SEARCH_ENABLED",
+        "MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K",
+        "MEMFLOW_HYBRID_DENSE_SEARCH_TOP_K",
+        "MEMFLOW_HYBRID_RRF_TOP_K",
+        "MEMFLOW_HYBRID_RRF_WEIGHTS",
+        "MEMFLOW_HYBRID_RRF_K",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, replace
@@ -50,7 +51,38 @@ from memflow.store import (
     MemMachineBypass,
     MemMachineStore,
     QdrantStore,
+    env_flag,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
+    """Read an int env var, warning and falling back to ``default`` on bad input.
+
+    Mirrors ``_parse_rrf_weights``'s leniency: a malformed value should degrade
+    to the built-in default rather than crash ``MemFlow()`` construction.
+    ``minimum`` rejects nonsensical values (e.g. a non-positive Top-K that
+    would only fail later as a server-side 400).
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r, falling back to %d", name, raw, default)
+        return default
+    if minimum is not None and value < minimum:
+        logger.warning(
+            "Invalid %s=%r (must be >= %d), falling back to %d",
+            name,
+            raw,
+            minimum,
+            default,
+        )
+        return default
+    return value
 
 
 def _skill_api_payload(procedure: Procedure, event: str, **extra: object) -> dict:
@@ -390,6 +422,27 @@ class MemFlow:
         self._planner: LLMPlanner | None = None
         self._executor: ToolRegistry | None = None
         self._learner: Learner | None = None
+        # Hybrid search config (read from env).
+        # Top-K parameters govern the pipeline depth:
+        #   HYBRID_SPARSE_SEARCH_TOP_K / HYBRID_DENSE_SEARCH_TOP_K — Qdrant prefetch limits
+        #   HYBRID_RRF_TOP_K — RRF fusion output. 100 is plenty online: the
+        #   fusion ranking is limit-independent, so this only bounds how many
+        #   results (payloads) come back before truncation to top_k.
+        self._hybrid_search_enabled = env_flag("MEMFLOW_HYBRID_SEARCH_ENABLED")
+        self._hybrid_sparse_search_top_k = _env_int(
+            "MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K", 200, minimum=1
+        )
+        self._hybrid_dense_search_top_k = _env_int(
+            "MEMFLOW_HYBRID_DENSE_SEARCH_TOP_K", 200, minimum=1
+        )
+        self._hybrid_rrf_top_k = _env_int("MEMFLOW_HYBRID_RRF_TOP_K", 100, minimum=1)
+        self._hybrid_rrf_weights = os.getenv("MEMFLOW_HYBRID_RRF_WEIGHTS", "0.6,0.4")
+        self._hybrid_rrf_k = _env_int("MEMFLOW_HYBRID_RRF_K", 60, minimum=1)
+        # Parsed once; falls back with a warning on malformed input.
+        self._hybrid_rrf_weights_parsed = self._parse_rrf_weights()
+        # Warn once per instance when hybrid degrades to dense (the store's
+        # capability is fixed at init — per-query warnings would just spam).
+        self._hybrid_fallback_warned = False
 
     # ------------------------------------------------------------------
     # add
@@ -979,6 +1032,67 @@ class MemFlow:
         return [self._procedure_candidate(proc) for proc in candidates]
 
     # ------------------------------------------------------------------
+    # Hybrid search helpers
+    # ------------------------------------------------------------------
+
+    def _parse_rrf_weights(self) -> tuple[float, float]:
+        """Parse the MEMFLOW_HYBRID_RRF_WEIGHTS env value into a (dense, sparse) tuple."""
+        raw = self._hybrid_rrf_weights
+        try:
+            parts = [float(x.strip()) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            logger.warning(
+                "Invalid MEMFLOW_HYBRID_RRF_WEIGHTS=%r, falling back to (0.6, 0.4)",
+                raw,
+            )
+            return (0.6, 0.4)
+        if len(parts) != 2:
+            logger.warning(
+                "MEMFLOW_HYBRID_RRF_WEIGHTS=%r needs 2 values (dense, sparse), "
+                "got %d; falling back to (0.6, 0.4)",
+                raw,
+                len(parts),
+            )
+            return (0.6, 0.4)
+        if any(w < 0 for w in parts):
+            logger.warning(
+                "MEMFLOW_HYBRID_RRF_WEIGHTS=%r must be non-negative, "
+                "falling back to (0.6, 0.4)",
+                raw,
+            )
+            return (0.6, 0.4)
+        return (parts[0], parts[1])
+
+    def _search_hybrid(
+        self,
+        query: str,
+        user_id: str | None,
+        kind: str | None,
+        top_k: int,
+    ) -> list[SearchResult]:
+        """Hybrid retrieval (sparse+dense RRF) for a single query.
+
+        The store must be hybrid-capable (``store.supports_hybrid``); routing
+        is decided by ``search`` before calling, so errors from
+        ``search_hybrid`` here are real failures and propagate.
+        """
+        # HYBRID_RRF_TOP_K: candidate depth from fusion. Never smaller than the
+        # requested final top_k so the result pool isn't under-sized.
+        rrf_top_k = max(self._hybrid_rrf_top_k, top_k)
+        candidates = self.store.search_hybrid(
+            query=query,
+            rrf_top_k=rrf_top_k,
+            user_id=user_id,
+            kind=kind,
+            mode="hybrid",
+            rrf_weights=self._hybrid_rrf_weights_parsed,
+            sparse_top_k=self._hybrid_sparse_search_top_k,
+            dense_top_k=self._hybrid_dense_search_top_k,
+            rrf_k=self._hybrid_rrf_k,
+        )
+        return candidates[:top_k]
+
+    # ------------------------------------------------------------------
     # search
     # ------------------------------------------------------------------
 
@@ -991,10 +1105,21 @@ class MemFlow:
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity.
 
+        When hybrid search is enabled (``MEMFLOW_HYBRID_SEARCH_ENABLED=on``)
+        and the store's ``supports_hybrid`` probe passes, single-string
+        queries go through sparse+dense RRF fusion; batch (list) queries
+        always use the plain dense path. An enabled-but-unsupported store
+        (e.g. a dense-only collection) degrades to dense with a one-time
+        warning. The Top-K env vars
+        (``MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K`` /
+        ``MEMFLOW_HYBRID_DENSE_SEARCH_TOP_K`` /
+        ``MEMFLOW_HYBRID_RRF_TOP_K``) control the depth at each stage;
+        ``top_k`` here truncates the final output.
+
         Args:
             query: Single query string or list of queries
             user_id: User ID for filtering
-            top_k: Number of results per query
+            top_k: Number of results per query (final truncation)
             kind: Record kind filter. Use None to search all records.
 
         Returns:
@@ -1002,8 +1127,25 @@ class MemFlow:
         """
         if isinstance(query, list):
             return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
-        else:
-            return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
+        if self._hybrid_search_enabled:
+            if getattr(self.store, "supports_hybrid", False):
+                return self._search_hybrid(query, user_id, kind, top_k)
+            # Enabled but the store/collection can't serve hybrid (e.g. a
+            # dense-only collection). Degrade to dense — warn once, since the
+            # capability is fixed at store init and per-query warnings spam.
+            if not self._hybrid_fallback_warned:
+                self._hybrid_fallback_warned = True
+                logger.warning(
+                    "Hybrid search enabled but %s is attached to a collection "
+                    "without sparse vectors (created before hybrid support); "
+                    "using dense search. Existing collections keep their "
+                    "schema regardless of the switch — to enable hybrid, "
+                    "drop and re-seed the collection while "
+                    "MEMFLOW_HYBRID_SEARCH_ENABLED=on (e.g. run_seeding.py "
+                    "--clear-existing).",
+                    type(self.store).__name__,
+                )
+        return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
 
     # ------------------------------------------------------------------
     # search_async - Async search for single or multiple queries

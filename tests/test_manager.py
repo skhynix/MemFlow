@@ -995,3 +995,125 @@ class TestLoadEnvFile:
 
         # No exception means test passed
         assert True
+
+
+class TestMemFlowHybridSearch:
+    """Tests for MemFlow hybrid search routing and env config."""
+
+    def test_single_query_routes_to_hybrid_when_enabled(self, fake_llm, clean_env):
+        """Enabled + hybrid-capable store → single query uses search_hybrid."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        manager.search("deploy", top_k=3)
+
+        store.search_hybrid.assert_called_once()
+        store.search.assert_not_called()
+        kwargs = store.search_hybrid.call_args.kwargs
+        assert kwargs["mode"] == "hybrid"
+        assert kwargs["rrf_top_k"] >= 3  # never under-sized vs top_k
+
+    def test_batch_query_uses_dense_even_when_enabled(self, fake_llm, clean_env):
+        """Batch (list) queries always go through the dense store.search path."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock()
+        store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        manager.search(["a", "b"], top_k=3)
+
+        store.search.assert_called_once()
+        store.search_hybrid.assert_not_called()
+
+    def test_single_query_uses_dense_when_disabled(self, fake_llm, clean_env):
+        """Disabled → single query uses plain store.search."""
+        store = MagicMock()
+        store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        manager.search("deploy", top_k=3)
+
+        store.search.assert_called_once()
+        store.search_hybrid.assert_not_called()
+
+    def test_store_without_search_hybrid_falls_back(self, fake_llm, clean_env):
+        """A store lacking search_hybrid (e.g. EmulatedStore) uses dense path."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock(spec=["search"])  # no supports_hybrid attribute
+        store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        manager.search("deploy", top_k=3)
+
+        store.search.assert_called_once()
+
+    def test_store_without_sparse_falls_back_to_dense(self, fake_llm, clean_env):
+        """Enabled but store.supports_hybrid is False (collection without
+        sparse vector) → dense search, search_hybrid never called."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock()
+        store.supports_hybrid = False
+        store.search.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        results = manager.search("deploy", top_k=3)
+
+        store.search_hybrid.assert_not_called()
+        store.search.assert_called_once_with(
+            "deploy", top_k=3, user_id=None, kind="skill"
+        )
+        assert results == []
+
+    def test_search_hybrid_runtime_error_propagates(self, fake_llm, clean_env):
+        """Capability is probed up front, so a RuntimeError from a capable
+        store (e.g. connection failure) is a real failure and must propagate,
+        not be silently downgraded to dense."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.side_effect = RuntimeError("connection refused")
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        with pytest.raises(RuntimeError, match="connection refused"):
+            manager.search("deploy", top_k=3)
+        store.search.assert_not_called()
+
+    def test_search_hybrid_truncates_to_top_k(self, fake_llm, clean_env):
+        """_search_hybrid returns only top_k results from the deeper RRF pool."""
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.return_value = [MagicMock() for _ in range(10)]
+        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+
+        results = manager.search("deploy", top_k=3)
+
+        assert len(results) == 3
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("0.6,0.4", (0.6, 0.4)),
+            (" 0.5 , 0.5 ", (0.5, 0.5)),
+            ("1,2,3", (0.6, 0.4)),  # wrong count → fallback
+            ("abc", (0.6, 0.4)),  # unparseable → fallback
+            ("0.7", (0.6, 0.4)),  # single value → fallback
+            ("0.5,-0.5", (0.6, 0.4)),  # negative → fallback
+            ("-1,2", (0.6, 0.4)),  # negative → fallback
+        ],
+    )
+    def test_parse_rrf_weights(self, fake_llm, clean_env, raw, expected):
+        os.environ["MEMFLOW_HYBRID_RRF_WEIGHTS"] = raw
+        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=True)
+        assert manager._parse_rrf_weights() == expected
+
+    def test_bad_int_env_falls_back(self, fake_llm, clean_env):
+        """Malformed int env vars degrade to defaults instead of crashing."""
+        os.environ["MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K"] = "not-a-number"
+        os.environ["MEMFLOW_HYBRID_RRF_K"] = ""
+        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=True)
+        assert manager._hybrid_sparse_search_top_k == 200
+        assert manager._hybrid_rrf_k == 60
