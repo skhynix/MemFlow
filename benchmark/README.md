@@ -99,6 +99,7 @@ benchmark/
 │   ├── run_skill_ret_bench.py
 │   ├── run_seeding.py
 │   ├── run_retrieval.py
+│   ├── run_profiling.py
 │   └── data/                   # Cloned from HuggingFace (gitignored)
 └── results/                     # Benchmark outputs (gitignored)
 ```
