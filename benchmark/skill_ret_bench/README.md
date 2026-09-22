@@ -29,7 +29,6 @@ The dataset ships JSONL files for all three subsets, each split into `train` and
 
 ```
 data/
-├── skills.jsonl           # Full skill library (17,810 skills, not used)
 ├── skills/
 │   ├── train.jsonl        # 10,123 skills
 │   └── test.jsonl         # 6,006 skills (corpus)
