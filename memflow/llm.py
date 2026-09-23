@@ -51,10 +51,12 @@ class OllamaLLM(BaseLLM):
         self,
         model: str = "llama3.2",
         api_base: str = "http://localhost:11434",
+        timeout: float | None = None,
     ) -> None:
         from ollama import Client
 
-        self._client = Client(host=api_base)
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        self._client = Client(host=api_base, **kwargs)
         self._model = model
 
     def generate(self, messages: list[dict]) -> str:
@@ -81,10 +83,15 @@ class OpenAICompatibleLLM(BaseLLM):
         model: str,
         api_base: str = "http://localhost:8000/v1",
         api_key: str = "EMPTY",
+        timeout: float | None = None,
     ) -> None:
         from openai import OpenAI
 
-        self._client = OpenAI(base_url=api_base, api_key=api_key)
+        # timeout omitted keeps the openai client default (600s + retries);
+        # callers that need a bounded request (e.g. the reranker under
+        # concurrent load) pass one.
+        kwargs = {} if timeout is None else {"timeout": timeout}
+        self._client = OpenAI(base_url=api_base, api_key=api_key, **kwargs)
         self._model = model
 
     def generate(self, messages: list[dict]) -> str:
@@ -102,11 +109,13 @@ class LLMFactory:
         model: str | None = None,
         api_base: str | None = None,
         api_key: str | None = None,
+        timeout: float | None = None,
     ) -> BaseLLM:
         if provider == "ollama":
             return OllamaLLM(
                 model=model or "llama3.2",
                 api_base=api_base or "http://localhost:11434",
+                timeout=timeout,
             )
         if provider == "openai-compatible":
             if not model:
@@ -115,6 +124,7 @@ class LLMFactory:
                 model=model,
                 api_base=api_base or "http://localhost:8000/v1",
                 api_key=api_key or "EMPTY",
+                timeout=timeout,
             )
         raise ValueError(
             f"Unknown LLM provider: {provider!r}. Choose: ollama, openai-compatible"
