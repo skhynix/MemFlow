@@ -115,8 +115,7 @@ benchmark/
 │   ├── evaluation.py
 │   ├── run_skill_ret_bench.py
 │   ├── run_seeding.py
-│   ├── run_retrieval.py
-│   ├── run_profiling.py
+│   ├── run_retrieval.py        # Retrieval eval (env path or --mode dense/sparse/hybrid)
 │   └── data/                   # Cloned from HuggingFace (gitignored)
 ├── skill_reason_bench/          # SkillReason-Bench (implicit requests)
 │   ├── README.md
