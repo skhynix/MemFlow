@@ -823,6 +823,76 @@ class TestQdrantStore:
                 with pytest.raises(RuntimeError, match="boom"):
                     asyncio.run(store._compute_emb_async(self.LONG_TEXT, max_tokens=4))
 
+    # --- batch seeding path (add(list) -> _compute_embs_batch[_async]) ---
+    #
+    # Real seeding goes through the batch API, which has an intermediate
+    # step the single path lacks: a failed batch logs a warning and falls
+    # back to per-text embedding, and strict fires inside that fallback.
+    # So the exception the caller sees is the *individual* failure, with
+    # the batch failure pushed to __context__ ("During handling of the
+    # above exception..."). These tests pin that shape, per code review.
+
+    def test_compute_embs_batch_raises_in_strict_mode(self, caplog):
+        """Test strict mode raises on the sync batch seeding path: the
+        batch API fails, the per-text fallback re-raises, and the surface
+        exception is the individual failure with the batch failure kept as
+        __context__."""
+        store = self._strict_store()
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            if isinstance(json["input"], list):
+                raise RuntimeError("batch boom")
+            raise RuntimeError("individual boom")
+
+        with caplog.at_level(logging.WARNING, logger="memflow.store"):
+            with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+                with patch("memflow.store.httpx.post", side_effect=fake_post):
+                    with pytest.raises(RuntimeError, match="individual boom") as exc:
+                        store._compute_embs_batch(["alpha", "beta"])
+
+        # The real cause (batch API) survives as exception context.
+        assert isinstance(exc.value.__context__, RuntimeError)
+        assert "batch boom" in str(exc.value.__context__)
+        # The intermediate fallback step is still logged.
+        assert "Batch embedding API failed" in caplog.text
+
+    def test_compute_embs_batch_async_raises_in_strict_mode(self, caplog):
+        """Test strict mode raises on the async batch seeding path with the
+        same exception shape as the sync path: individual failure on the
+        surface, batch failure in __context__."""
+        import asyncio
+
+        store = self._strict_store()
+
+        async def batch_post(*args, **kwargs):
+            raise RuntimeError("batch boom")
+
+        client = MagicMock()
+        client.post = batch_post
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=client)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with caplog.at_level(logging.WARNING, logger="memflow.store"):
+            with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+                with patch("memflow.store.httpx.AsyncClient", return_value=ctx):
+                    with patch(
+                        "memflow.store.VectorStore._embed_chunk_async",
+                        new=AsyncMock(side_effect=RuntimeError("individual boom")),
+                    ):
+                        with pytest.raises(
+                            RuntimeError, match="individual boom"
+                        ) as exc:
+                            asyncio.run(
+                                store._compute_embs_batch_async(["alpha", "beta"])
+                            )
+
+        # Same chain as sync: the batch failure is the context, not the face.
+        assert isinstance(exc.value.__context__, RuntimeError)
+        assert "batch boom" in str(exc.value.__context__)
+        # The intermediate fallback step is still logged.
+        assert "Async batch embedding API failed" in caplog.text
+
     def test_to_text_uses_skill_search_text(self):
         """Test Qdrant embedding input uses skill-aware search text."""
         store = object.__new__(QdrantStore)
