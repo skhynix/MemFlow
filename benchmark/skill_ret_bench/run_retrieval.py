@@ -177,8 +177,9 @@ def main() -> None:
 
     memflow = MemFlow(sync_mode=args.sync)
 
-    # Get corpus size from existing procedures
-    corpus_size = len(memflow.store.list(user_id=args.user_id))
+    # Get corpus size from existing procedures (server-side count; listing
+    # full payloads just to count them transfers every skill body over the wire)
+    corpus_size = memflow.store.count(user_id=args.user_id)
 
     if corpus_size == 0:
         print("\n[WARNING] No procedures found in corpus. Run run_seeding.py first.")

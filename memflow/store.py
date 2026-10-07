@@ -31,6 +31,13 @@ import httpx
 DEFAULT_MAX_BATCHES = 32
 DEFAULT_MAX_WORKERS = 48
 
+# Page size for full-payload Qdrant scrolls, and point-id chunk size for
+# batched bulk deletes (one delete request per chunk).
+SCROLL_PAGE_LIMIT = 256
+BULK_DELETE_CHUNK = 256
+# Id-only scroll pages can be larger — the payload is just one short string.
+ID_SCROLL_PAGE_LIMIT = 1024
+
 # Default token limit for the embedding model.
 # Qwen3-Embedding-4B (.env.example default) supports 8192 tokens. Use char-based
 # estimation only — see _count_tokens. Chunk boundaries are approximate; quality
@@ -177,11 +184,42 @@ class BaseStore(ABC):
     @abstractmethod
     def get(self, id: str) -> Procedure | None: ...
 
+    # Bulk callers should prefer ``delete_many``; the list form of ``delete``
+    # is legacy and backends may implement it as per-id deletions.
     @abstractmethod
     def delete(self, id: str | list[str]) -> int: ...
 
     @abstractmethod
     def list(self, user_id: str | None = None) -> list[Procedure]: ...
+
+    # Lightweight bulk helpers. Defaults inherit the cost of ``list``/
+    # ``delete`` (including their error handling), so correctness holds on
+    # every backend but "lightweight" is only guaranteed by backends that
+    # override these with native primitives (QdrantStore).
+
+    def count(self, user_id: str | None = None) -> int:
+        """Count stored procedures, optionally filtered by user_id."""
+        return len(self.list(user_id=user_id))
+
+    def list_ids(self, user_id: str | None = None) -> list[str]:
+        """List stored procedure IDs.
+
+        Backends that cannot fetch ids natively build this from ``list()``,
+        which transfers full payloads; see ``QdrantStore.list_ids`` for the
+        payload-light implementation.
+        """
+        return [p.id for p in self.list(user_id=user_id) if p.id]
+
+    def delete_many(self, ids: list[str]) -> int:
+        """Delete many procedures by ID.
+
+        Returns the number of deletions reported by the backend. Backends
+        delegating to ``delete`` report the number of IDs actually removed;
+        ``QdrantStore`` reports the number of IDs *submitted* (an upper
+        bound — IDs absent from the store are silently ignored). Treat the
+        value as "deleted or requested", not a verified deletion count.
+        """
+        return self.delete(list(ids)) if ids else 0
 
     # Async methods - only QdrantStore implements these
     async def add_async(
@@ -2274,26 +2312,16 @@ class QdrantStore(VectorStore):
 
     def list(self, user_id: str | None = None) -> list[Procedure]:
         """List all procedures, optionally filtered by user_id."""
-        from qdrant_client import models
-
-        must = []
-        if user_id:
-            must.append(
-                models.FieldCondition(
-                    key="user_id", match=models.MatchValue(value=user_id)
-                )
-            )
-        query_filter = models.Filter(must=must) if must else None
+        query_filter = self._build_query_filter(user_id, None)
 
         all_points = []
         offset = None
-        limit = 256
 
         while True:
             results, next_offset = self._client.scroll(
                 collection_name=self._collection_name,
                 scroll_filter=query_filter,
-                limit=limit,
+                limit=SCROLL_PAGE_LIMIT,
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
@@ -2304,3 +2332,93 @@ class QdrantStore(VectorStore):
             offset = next_offset
 
         return [self._point_to_procedure(p) for p in all_points]
+
+    def count(self, user_id: str | None = None) -> int:
+        """Count procedures server-side without transferring payloads.
+
+        Propagates client errors (unlike ``get``/``delete``, which swallow
+        them): an unexpected count failure should surface at the caller
+        rather than be reported as a zero-sized corpus.
+        """
+        result = self._client.count(
+            collection_name=self._collection_name,
+            count_filter=self._build_query_filter(user_id, None),
+            exact=True,
+        )
+        return int(result.count)
+
+    def list_ids(self, user_id: str | None = None) -> list[str]:
+        """List procedure IDs via scroll, fetching only the ``id`` payload key.
+
+        Returns ``Procedure.id`` values (not Qdrant point UUIDs) so the result
+        stays in the same id domain as ``get``/``delete``/``delete_many``,
+        while the wire traffic stays small (no content/title/etc.). Points
+        whose payload lacks an ``id`` key cannot be named in that domain and
+        are skipped with a warning rather than silently dropped.
+        """
+        ids: list[str] = []
+        skipped = 0
+        offset = None
+        query_filter = self._build_query_filter(user_id, None)
+
+        while True:
+            results, next_offset = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=query_filter,
+                limit=ID_SCROLL_PAGE_LIMIT,
+                offset=offset,
+                with_payload=["id"],
+                with_vectors=False,
+            )
+            for p in results:
+                payload = p.payload or {}
+                if "id" in payload:
+                    ids.append(str(payload["id"]))
+                else:
+                    skipped += 1
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        if skipped:
+            logger.warning(
+                "list_ids skipped %d point(s) without an 'id' payload "
+                "(user_id=%r); these are not reported as existing ids",
+                skipped,
+                user_id,
+            )
+        return ids
+
+    def delete_many(self, ids: list[str]) -> int:
+        """Delete many procedures in batched single-request deletes.
+
+        Unlike calling ``delete`` per id, this skips the existence check and
+        sends up to ``BULK_DELETE_CHUNK`` point ids per request. Qdrant
+        accepts ids that do not exist, so the request count is
+        ``ceil(len(ids) / BULK_DELETE_CHUNK)``.
+
+        Unlike ``delete``/``delete_async`` (which swallow errors and return
+        0), this propagates client errors so a failed bulk clear aborts
+        loudly instead of reporting success on a half-cleared store. If an
+        error occurs mid-loop the earlier batches are already applied
+        (``wait=True``); the caller can rerun the idempotent clear. Returns
+        the number of ids submitted (an upper bound; absent ids are ignored
+        by Qdrant).
+        """
+        if not ids:
+            return 0
+
+        from qdrant_client import models
+
+        num_deleted = 0
+        for start in range(0, len(ids), BULK_DELETE_CHUNK):
+            batch = ids[start : start + BULK_DELETE_CHUNK]
+            self._client.delete(
+                collection_name=self._collection_name,
+                points_selector=models.PointIdsList(
+                    points=[_id_to_uuid(i) for i in batch]
+                ),
+                wait=True,
+            )
+            num_deleted += len(batch)
+        return num_deleted

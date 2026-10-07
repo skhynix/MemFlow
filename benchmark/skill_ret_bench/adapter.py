@@ -222,9 +222,13 @@ def _collect_corpus_ids(corpus_path: str | Path) -> set[str]:
 
 
 def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
-    """Collect all existing procedure IDs from MemFlow store."""
+    """Collect all existing procedure IDs from MemFlow store.
+
+    Uses ``list_ids`` instead of ``list`` so id comparison avoids full
+    documents where the backend supports id-only listing (Qdrant).
+    """
     try:
-        return {proc.id for proc in memflow.store.list(user_id=user_id) if proc.id}
+        return {pid for pid in memflow.store.list_ids(user_id=user_id) if pid}
     except Exception as exc:
         raise RuntimeError(
             "Failed to list existing procedures before SkillRet corpus reuse for "
@@ -282,10 +286,13 @@ async def seed_skill_ret_corpus(
     if clear_existing:
         print("Clearing existing SkillRet procedures...")
         corpus_ids = _collect_corpus_ids(corpus_path)
-        for proc in memflow.store.list(user_id=user_id):
-            if proc.id in corpus_ids:
-                memflow.store.delete(proc.id)
-                stats.num_deleted += 1
+        existing = _collect_existing_procedure_ids(memflow, user_id=user_id)
+        to_delete = sorted(corpus_ids & existing)
+        print(f"  Clearing {len(to_delete)} existing procedures...")
+        # delete_many propagates errors: a failed clear aborts here instead
+        # of seeding onto a half-cleared store. The delete is idempotent, so
+        # rerunning --clear-existing recovers from a mid-clear failure.
+        stats.num_deleted = memflow.store.delete_many(to_delete)
         print(f"  Deleted {stats.num_deleted} existing procedures")
     else:
         existing_ids = _collect_existing_procedure_ids(memflow, user_id=user_id)
