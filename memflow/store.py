@@ -46,6 +46,18 @@ EMBEDDING_REQUEST_TIMEOUT = float(os.getenv("EMBEDDING_REQUEST_TIMEOUT", "60"))
 # 5xx). A failed text falls back to a hash/zero vector rather than stalling.
 EMBEDDING_MAX_RETRIES = int(os.getenv("EMBEDDING_MAX_RETRIES", "2"))
 
+# Opt-in strict mode (MEMFLOW_EMBEDDING_STRICT=on): when set, an embedding
+# API failure raises instead of silently substituting a hash/zero vector.
+# The fallback is useful for a live app that should keep serving on a flaky
+# endpoint, but it is a correctness hazard for batch pipelines (e.g.
+# benchmark seeding) where a dead endpoint would otherwise store thousands
+# of meaningless vectors and still report success. Note the flag is
+# process-wide: _compute_emb also embeds queries at search time, so leaving
+# it on in a shared .env makes searches raise during an embedding outage
+# too (the claude hook reports that as fail-open with zero skills). Strict
+# raises after the async retry ladder; the sync path has no retries, so
+# strict sync seeding fails on the first transient error.
+
 # ---------------------------------------------------------------------------
 # Hybrid search constants
 # ---------------------------------------------------------------------------
@@ -870,6 +882,8 @@ class VectorStore(BaseStore):
             try:
                 return self._embed_chunk(chunks[0], config)
             except Exception as exc:
+                if env_flag("MEMFLOW_EMBEDDING_STRICT"):
+                    raise
                 logger.warning(
                     "Embedding API failed (%s: %s); falling back to "
                     "hash-based pseudo-embedding — search results will not "
@@ -886,6 +900,8 @@ class VectorStore(BaseStore):
                 emb = self._embed_chunk(chunk, config)
                 chunk_embeddings.append(emb)
             except Exception as exc:
+                if env_flag("MEMFLOW_EMBEDDING_STRICT"):
+                    raise
                 logger.warning(
                     "Chunk embedding failed (%s: %s); using zero vector for chunk.",
                     type(exc).__name__,
@@ -1149,6 +1165,8 @@ class VectorStore(BaseStore):
             try:
                 return await self._embed_chunk_async(chunks[0], config)
             except Exception as exc:
+                if env_flag("MEMFLOW_EMBEDDING_STRICT"):
+                    raise
                 logger.warning(
                     "Async embedding API failed (%s: %s); falling back to "
                     "hash-based pseudo-embedding — search results will not "
@@ -1165,6 +1183,8 @@ class VectorStore(BaseStore):
                 emb = await self._embed_chunk_async(chunk, config)
                 chunk_embeddings.append(emb)
             except Exception as exc:
+                if env_flag("MEMFLOW_EMBEDDING_STRICT"):
+                    raise
                 logger.warning(
                     "Async chunk embedding failed (%s: %s); using zero vector for chunk.",
                     type(exc).__name__,

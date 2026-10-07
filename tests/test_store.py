@@ -11,7 +11,7 @@ import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -737,13 +737,91 @@ class TestQdrantStore:
         store._emb_api_key = "EMPTY"
         store._emb_dim = 8
 
-        with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
-            with caplog.at_level(logging.WARNING, logger="memflow.store"):
-                emb = store._compute_emb("deploy service")
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "off"}):
+            with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
+                with caplog.at_level(logging.WARNING, logger="memflow.store"):
+                    emb = store._compute_emb("deploy service")
 
         assert len(emb) == 8
         assert "RuntimeError: boom" in caplog.text
         assert "falling back to hash-based pseudo-embedding" in caplog.text
+
+    def _strict_store(self) -> QdrantStore:
+        """Bare QdrantStore configured for embedding tests (no network)."""
+        store = object.__new__(QdrantStore)
+        store._emb_model = "test-model"
+        store._emb_api_base = "http://test-api"
+        store._emb_api_key = "EMPTY"
+        store._emb_dim = 8
+        return store
+
+    # Multi-chunk text (sentence-per-word filler forces _split_text_by_tokens
+    # to emit several chunks at max_tokens=4).
+    LONG_TEXT = "alpha word. " * 12
+
+    def test_compute_emb_raises_in_strict_mode(self):
+        """Test MEMFLOW_EMBEDDING_STRICT=on turns the single-chunk hash
+        fallback into a raise."""
+        store = self._strict_store()
+
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+            with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
+                with pytest.raises(RuntimeError, match="boom"):
+                    store._compute_emb("deploy service")
+
+    def test_compute_emb_multi_chunk_raises_in_strict_mode(self):
+        """Test strict mode covers the multi-chunk zero-vector fallback path."""
+        store = self._strict_store()
+
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+            with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
+                with pytest.raises(RuntimeError, match="boom"):
+                    store._compute_emb(self.LONG_TEXT, max_tokens=4)
+
+    def test_compute_emb_multi_chunk_zero_vector_fallback_default_off(self):
+        """Test default behavior is unchanged on the multi-chunk path: a
+        failed chunk becomes a zero vector and the mean still returns."""
+        store = self._strict_store()
+
+        # Sanity: the fixture text really takes the multi-chunk path.
+        assert len(store._split_text_by_tokens(self.LONG_TEXT, 4)) > 1
+
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "off"}):
+            with patch("memflow.store.httpx.post", side_effect=RuntimeError("boom")):
+                emb = store._compute_emb(self.LONG_TEXT, max_tokens=4)
+
+        # Every chunk failed, so each became a zero vector; the mean is
+        # zeros of the right width, and nothing raised.
+        assert emb == [0.0] * 8
+
+    def test_compute_emb_async_raises_in_strict_mode(self):
+        """Test the async single-chunk path raises too — seeding writes
+        through add_async."""
+        import asyncio
+
+        store = self._strict_store()
+
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+            with patch(
+                "memflow.store.VectorStore._embed_chunk_async",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ):
+                with pytest.raises(RuntimeError, match="boom"):
+                    asyncio.run(store._compute_emb_async("deploy service"))
+
+    def test_compute_emb_async_multi_chunk_raises_in_strict_mode(self):
+        """Test the async multi-chunk zero-vector path also raises strict."""
+        import asyncio
+
+        store = self._strict_store()
+
+        with patch.dict(os.environ, {"MEMFLOW_EMBEDDING_STRICT": "on"}):
+            with patch(
+                "memflow.store.VectorStore._embed_chunk_async",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ):
+                with pytest.raises(RuntimeError, match="boom"):
+                    asyncio.run(store._compute_emb_async(self.LONG_TEXT, max_tokens=4))
 
     def test_to_text_uses_skill_search_text(self):
         """Test Qdrant embedding input uses skill-aware search text."""
