@@ -1495,3 +1495,130 @@ class TestQdrantStoreHybrid:
         kwargs = client.create_collection.call_args.kwargs
         assert set(kwargs["vectors_config"].keys()) == {"dense"}
         assert set(kwargs["sparse_vectors_config"].keys()) == {"sparse"}
+
+
+class TestQdrantStoreBulkOps:
+    """Tests for lightweight bulk primitives (count/list_ids/delete_many)."""
+
+    def test_count_uses_server_side_count(self):
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        store._client.count.return_value = SimpleNamespace(count=12345)
+
+        assert store.count(user_id="benchmark") == 12345
+
+        store._client.count.assert_called_once()
+        kwargs = store._client.count.call_args.kwargs
+        assert kwargs["collection_name"] == "test_collection"
+        assert kwargs["exact"] is True
+        assert kwargs["count_filter"] is not None
+        store._client.scroll.assert_not_called()
+
+    def test_count_without_user_id_sends_no_filter(self):
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        store._client.count.return_value = SimpleNamespace(count=5)
+
+        assert store.count() == 5
+        assert store._client.count.call_args.kwargs["count_filter"] is None
+
+    def test_list_ids_pages_with_id_only_payload(self):
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        page1 = (
+            [
+                SimpleNamespace(payload={"id": "a"}),
+                SimpleNamespace(payload={"id": "b"}),
+            ],
+            "offset-1",
+        )
+        page2 = ([SimpleNamespace(payload={"id": "c"})], None)
+        store._client.scroll.side_effect = [page1, page2]
+
+        assert store.list_ids(user_id="benchmark") == ["a", "b", "c"]
+
+        assert store._client.scroll.call_count == 2
+        for call in store._client.scroll.call_args_list:
+            kwargs = call.kwargs
+            assert kwargs["with_payload"] == ["id"]
+            assert kwargs["with_vectors"] is False
+            assert isinstance(kwargs["scroll_filter"], models.Filter)
+
+    def test_list_ids_skips_points_without_id_payload_with_warning(self, caplog):
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        store._client.scroll.return_value = (
+            [
+                SimpleNamespace(payload={"id": "a"}),
+                SimpleNamespace(payload={}),
+                SimpleNamespace(payload=None),
+            ],
+            None,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="memflow.store"):
+            assert store.list_ids() == ["a"]
+
+        assert "skipped 2 point" in caplog.text
+
+    def test_delete_many_batches_single_request_per_chunk(self):
+        from qdrant_client import models
+
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        ids = [f"id-{i}" for i in range(300)]
+
+        num_deleted = store.delete_many(ids)
+
+        assert num_deleted == 300
+        assert store._client.delete.call_count == 2  # 256 + 44
+        first = store._client.delete.call_args_list[0].kwargs
+        assert len(first["points_selector"].points) == 256
+        assert first["wait"] is True
+        assert isinstance(first["points_selector"], models.PointIdsList)
+
+    def test_delete_many_empty_is_noop(self):
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+
+        assert store.delete_many([]) == 0
+        store._client.delete.assert_not_called()
+
+    def test_delete_many_maps_ids_to_deterministic_uuids(self):
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+
+        store.delete_many(["skill-x"])
+
+        points = store._client.delete.call_args.kwargs["points_selector"].points
+        assert points == [_id_to_uuid("skill-x")]
+
+    def test_count_propagates_client_errors(self):
+        """count must surface failures instead of masking them as zero."""
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        store._client.count.side_effect = RuntimeError("qdrant down")
+
+        with pytest.raises(RuntimeError, match="qdrant down"):
+            store.count(user_id="benchmark")
+
+    def test_delete_many_propagates_batch_errors_after_partial_apply(self):
+        """Mid-loop failure aborts loudly; earlier batches are already applied."""
+        store = _make_bare_qdrant_store(sparse_enabled=False)
+        store._client.delete.side_effect = [None, RuntimeError("qdrant down")]
+
+        ids = [f"id-{i}" for i in range(300)]
+        with pytest.raises(RuntimeError, match="qdrant down"):
+            store.delete_many(ids)
+
+        # First batch (256 ids) went through before the failure.
+        assert store._client.delete.call_count == 2
+        first = store._client.delete.call_args_list[0].kwargs
+        assert len(first["points_selector"].points) == 256
+
+
+class TestBaseStoreBulkDefaults:
+    """Contract tests for the default bulk helpers on non-Qdrant backends."""
+
+    def test_emulated_delete_many_counts_actual_deletions(self):
+        """Defaults report removed ids, unlike Qdrant's submitted-id count."""
+        store = EmulatedStore()
+        store.add(Procedure(id="a", title="A", content="x", user_id="u"))
+
+        assert store.count(user_id="u") == 1
+        assert store.list_ids(user_id="u") == ["a"]
+        assert store.delete_many(["a", "missing"]) == 1
