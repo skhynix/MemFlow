@@ -73,6 +73,9 @@ benchmark/wikihow_procedure_silver/raw/
 # Cloned external repositories
 benchmark/proced_mem_bench/Proced_mem_bench/
 
+# Local SkillReason-Bench corpus artifacts (downloaded from HuggingFace)
+benchmark/skill_reason_bench/data/
+
 # Execution artifacts produced by examples that exercise the bash tool.
 # TASK prompts in examples 09/10/13 instruct the LLM to create files
 # like file.txt, dst.txt, demo/, dst/ in the repo root.

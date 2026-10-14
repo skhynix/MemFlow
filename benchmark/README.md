@@ -38,6 +38,23 @@ SkillRet query bank for skill retrieval evaluation.
 
 For detailed instructions, see [skill_ret_bench/README.md](skill_ret_bench/README.md).
 
+### `skill_reason_bench` - SkillReason-Bench (implicit requests)
+
+The `skill_reason_bench` subdirectory evaluates **MemFlow retrieval** against
+SkillReason-Bench, whose 3,729 queries are concise, **implicit** user requests
+over a cross-domain corpus of 61,228 skills — each query has exactly one gold
+skill, so the harness reports single-gold metrics and reproduces the dataset's
+official protocol (query instruction, 2,048-token document cap,
+Recall@{1,5,10,20}/NDCG@10/MRR@20).
+
+- **Location**: `benchmark/skill_reason_bench/`
+- **Source**: HuggingFace dataset `donghongjiang/skillreason-bench`
+- **Data shape**: single `skills.jsonl` corpus plus `queries.jsonl` with gold
+  `positive_ids` and checksums in `stats.json`
+
+For detailed instructions, see
+[skill_reason_bench/README.md](skill_reason_bench/README.md).
+
 ## Installation
 
 Use the install script for easy setup:
@@ -101,6 +118,15 @@ benchmark/
 │   ├── run_retrieval.py
 │   ├── run_profiling.py
 │   └── data/                   # Cloned from HuggingFace (gitignored)
+├── skill_reason_bench/          # SkillReason-Bench (implicit requests)
+│   ├── README.md
+│   ├── __init__.py
+│   ├── adapter.py
+│   ├── evaluation.py
+│   ├── download_data.py
+│   ├── run_seeding.py
+│   ├── run_retrieval.py
+│   └── run_skill_reason.py
 └── results/                     # Benchmark outputs (gitignored)
 ```
 
