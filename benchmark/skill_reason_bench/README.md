@@ -149,6 +149,31 @@ The results JSON numbers and the upstream script must agree — the
 `official_metrics` block is unit-tested against a transcription of the upstream
 scoring loop (see `tests/test_skill_reason_bench.py`).
 
+## Recall@k curves
+
+To see how recall grows with the cutoff, evaluate with a deep `--k-values` cap
+so each query's ranked list is long enough, then replot from the saved result
+file (no re-retrieval):
+
+```bash
+uv run benchmark/skill_reason_bench/run_retrieval.py \
+    --user-id benchmark --k-values 1 5 10 20 50 100 \
+    --results-filename skillreason_topk100
+
+uv run --extra benchmark benchmark/skill_reason_bench/plot_recall_curves.py \
+    --results results/skillreason_topk100.json \
+    --output benchmark/skill_reason_bench/plots/recall_at_k.png
+
+# One curve per domain — an aggregate curve can hide that some domains route
+# cleanly while others never clear Recall@10:
+uv run --extra benchmark benchmark/skill_reason_bench/plot_recall_curves.py \
+    --results results/skillreason_topk100.json --by-domain \
+    --output benchmark/skill_reason_bench/plots/recall_at_k_by_domain.png
+```
+
+Generated charts land under `plots/`, which is gitignored: they are run
+outputs regenerable from any saved results JSON, not sources.
+
 ## Baseline result
 
 MemFlow dense retrieval on the full corpus (61,228 skills; 42.5% of documents
@@ -162,9 +187,8 @@ metrics re-scored bit-identical by the dataset's own `evaluate.py`:
 
 Recall keeps growing well past the official cutoffs (0.81 at k=50, 0.86 at
 k=100), so a large share of gold skills is ranked just outside the top-k —
-substantial headroom for rerankers. The per-domain metrics
-(`domain_stratified_metrics` in the results JSON) show the difficulty is
-strongly domain-dependent:
+substantial headroom for rerankers. Per-domain curves (regenerate with
+`--by-domain` as above) show the difficulty is strongly domain-dependent:
 `data_science`/`software` route cleanly while `writing_docs` plateaus around
 0.56 even at k≈100 and `media_design` starts at R@1≈0.27.
 

@@ -76,6 +76,10 @@ benchmark/proced_mem_bench/Proced_mem_bench/
 # Local SkillReason-Bench corpus artifacts (downloaded from HuggingFace)
 benchmark/skill_reason_bench/data/
 
+# Generated SkillReason-Bench charts (regenerable from results JSON via
+# plot_recall_curves.py); kept on disk for docs/papers, not versioned
+benchmark/skill_reason_bench/plots/
+
 # Execution artifacts produced by examples that exercise the bash tool.
 # TASK prompts in examples 09/10/13 instruct the LLM to create files
 # like file.txt, dst.txt, demo/, dst/ in the repo root.

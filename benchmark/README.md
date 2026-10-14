@@ -124,6 +124,7 @@ benchmark/
 │   ├── adapter.py
 │   ├── evaluation.py
 │   ├── download_data.py
+│   ├── plot_recall_curves.py
 │   ├── run_seeding.py
 │   ├── run_retrieval.py
 │   └── run_skill_reason.py

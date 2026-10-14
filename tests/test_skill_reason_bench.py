@@ -273,6 +273,18 @@ def test_runners_reject_nonpositive_k_values_as_systemexit(
         run_skill_reason.main()
 
 
+def test_plot_k_grid_anchors_on_official_cutoffs() -> None:
+    """Step grid must land on the official cutoffs, not 1, 6, 11, ..."""
+    from benchmark.skill_reason_bench.plot_recall_curves import _k_grid
+
+    grid = _k_grid(1, 100, 5)
+    assert {1, 5, 10, 20, 100} <= set(grid)
+    assert 6 not in grid
+    assert grid == sorted(grid)
+    # k_min always present even when it misses the step multiples.
+    assert _k_grid(2, 10, 5) == [2, 5, 10]
+
+
 class _RecordingStore:
     """Store double that records which bulk primitives the seeder uses.
 
