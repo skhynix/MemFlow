@@ -9,7 +9,7 @@ from .adapter import (
     SkillRetRecord,
     iter_skill_ret_records,
     seed_skill_ret_corpus,
-    skill_record_to_procedure,
+    skill_ret_record_to_skill,
 )
 from .evaluation import (
     SkillRetBenchmarkQuery,
@@ -26,7 +26,7 @@ __all__ = [
     "RetrievedSkill",
     "MemFlowSkillRetAdapter",
     "iter_skill_ret_records",
-    "skill_record_to_procedure",
+    "skill_ret_record_to_skill",
     "seed_skill_ret_corpus",
     "SkillRetBenchmarkQuery",
     "SkillRetEvaluationResult",

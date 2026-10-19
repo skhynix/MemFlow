@@ -67,12 +67,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--user-id",
         default="benchmark",
-        help="User ID for seeded procedures (default: benchmark)",
+        help="User ID for seeded skills (default: benchmark)",
     )
     parser.add_argument(
         "--clear-existing",
         action="store_true",
-        help="Delete existing procedures before seeding (default: False)",
+        help="Delete existing skills before seeding (default: False)",
     )
     parser.add_argument(
         "--sync",
@@ -83,7 +83,7 @@ def _parse_args() -> argparse.Namespace:
         "--max-batches",
         type=int,
         default=DEFAULT_MAX_BATCHES,
-        help=f"Max number of procedures per batch for seeding (default: {DEFAULT_MAX_BATCHES})",
+        help=f"Max number of skills per batch for seeding (default: {DEFAULT_MAX_BATCHES})",
     )
     parser.add_argument(
         "--max-workers",

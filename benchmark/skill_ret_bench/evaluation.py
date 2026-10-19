@@ -136,10 +136,10 @@ def _binary_relevance_flags(
     """Convert retrieved IDs to binary relevance flags."""
     seen_relevant: set[str] = set()
     flags: list[int] = []
-    for proc_id in retrieved_ids:
-        if proc_id in relevant_ids and proc_id not in seen_relevant:
+    for skill_id in retrieved_ids:
+        if skill_id in relevant_ids and skill_id not in seen_relevant:
             flags.append(1)
-            seen_relevant.add(proc_id)
+            seen_relevant.add(skill_id)
         else:
             flags.append(0)
     return flags
@@ -153,15 +153,15 @@ def compute_binary_ir_metrics(
     """Compute binary IR metrics over the explicit relevant ID set.
 
     Args:
-        retrieved_ids: List of retrieved procedure IDs in rank order
-        relevant_ids: Set or list of relevant procedure IDs (ground truth)
+        retrieved_ids: List of retrieved skill IDs in rank order
+        relevant_ids: Set or list of relevant skill IDs (ground truth)
         k_values: List of k values to compute metrics at
 
     Returns:
         Dictionary with metrics: hit_at_k, precision_at_k, recall_at_k,
         f1_at_k, ndcg_at_k, reciprocal_rank, average_precision
     """
-    relevant_set = {str(proc_id) for proc_id in relevant_ids if str(proc_id)}
+    relevant_set = {str(skill_id) for skill_id in relevant_ids if str(skill_id)}
     relevance_flags = _binary_relevance_flags(retrieved_ids, relevant_set)
     num_relevant = len(relevant_set)
 
@@ -329,7 +329,7 @@ async def evaluate_skill_ret_queries_async(
     total = len(queries)
     print(f"Starting SkillRet evaluation of {total} queries (async)...")
 
-    # Prepare batch queries: (query_string, exclude_procedure_ids)
+    # Prepare batch queries: (query_string, exclude_skill_ids)
     batch_queries = [(query.query, _source_holdout_ids(query)) for query in queries]
 
     # Execute batch retrieval asynchronously
@@ -341,7 +341,7 @@ async def evaluate_skill_ret_queries_async(
 
     # Process results
     for index, (query, retrieved) in enumerate(zip(queries, all_retrieved), start=1):
-        retrieved_ids = [str(item.procedure_id) for item in retrieved]
+        retrieved_ids = [str(item.skill_id) for item in retrieved]
 
         metrics = compute_binary_ir_metrics(
             retrieved_ids=retrieved_ids,
@@ -354,7 +354,7 @@ async def evaluate_skill_ret_queries_async(
         retrieved_payload = [
             {
                 "rank": rank,
-                "procedure_id": item.procedure_id,
+                "procedure_id": item.skill_id,
                 "title": item.title,
                 "category": item.category,
                 "tags": item.tags,
@@ -421,7 +421,7 @@ def evaluate_skill_ret_queries(
     total = len(queries)
     print(f"Starting SkillRet evaluation of {total} queries (sync batch)...")
 
-    # Prepare batch queries: (query_string, exclude_procedure_ids)
+    # Prepare batch queries: (query_string, exclude_skill_ids)
     batch_queries = [(query.query, _source_holdout_ids(query)) for query in queries]
 
     # Execute batch retrieval
@@ -432,7 +432,7 @@ def evaluate_skill_ret_queries(
 
     # Process results
     for index, (query, retrieved) in enumerate(zip(queries, all_retrieved), start=1):
-        retrieved_ids = [str(item.procedure_id) for item in retrieved]
+        retrieved_ids = [str(item.skill_id) for item in retrieved]
 
         metrics = compute_binary_ir_metrics(
             retrieved_ids=retrieved_ids,
@@ -445,7 +445,7 @@ def evaluate_skill_ret_queries(
         retrieved_payload = [
             {
                 "rank": rank,
-                "procedure_id": item.procedure_id,
+                "procedure_id": item.skill_id,
                 "title": item.title,
                 "category": item.category,
                 "tags": item.tags,

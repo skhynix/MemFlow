@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from memflow.skills import indexed_skill_render_parts
 
 _ACTIVATION_FORMAT = "selected_skills_xml_v1.activation_v1"
@@ -65,7 +65,7 @@ class SkillContextResponse:
 
 @dataclass(frozen=True)
 class SkillCandidate:
-    procedure: Procedure
+    skill: SkillRecord
     score: float
     reason: str
     provenance: str
@@ -151,13 +151,13 @@ class SkillPolicy:
         if result.score < self.min_score():
             return None
 
-        procedure = result.procedure
-        if not _has_complete_skill_snapshot(procedure):
-            hydrated = manager.get_skill(procedure.id, include_content=True)
+        record = result.skill
+        if not _has_complete_skill_snapshot(record):
+            hydrated = manager.get_skill(record.id, include_content=True)
             if hydrated is not None:
-                procedure = hydrated
+                record = hydrated
 
-        governance = procedure.metadata.get("governance", {})
+        governance = record.metadata.get("governance", {})
         if not isinstance(governance, dict):
             governance = {}
         trust_state = str(governance.get("trust_state") or "unknown")
@@ -175,7 +175,7 @@ class SkillPolicy:
 
         source = str(governance.get("source") or "local")
         return SkillCandidate(
-            procedure=procedure,
+            skill=record,
             score=float(result.score),
             reason="matched_prompt_via_memflow_skill_search",
             provenance=source,
@@ -184,8 +184,8 @@ class SkillPolicy:
             warnings=warnings,
         )
 
-    def dedupe_key(self, procedure: Procedure) -> str:
-        return _dedupe_key(procedure)
+    def dedupe_key(self, record: SkillRecord) -> str:
+        return _dedupe_key(record)
 
 
 class SkillContextSelector:
@@ -217,7 +217,7 @@ class SkillContextSelector:
             candidate = self.policy.candidate_from_result(manager, result)
             if candidate is None:
                 continue
-            key = self.policy.dedupe_key(candidate.procedure)
+            key = self.policy.dedupe_key(candidate.skill)
             existing = deduped.get(key)
             if existing is None or candidate.score > existing.score:
                 deduped[key] = candidate
@@ -273,9 +273,7 @@ class ContextRenderer:
                 candidate, len(selected) + 1, available
             )
             if render_result is None:
-                warnings.append(
-                    f"skill_render_budget_exhausted:{candidate.procedure.id}"
-                )
+                warnings.append(f"skill_render_budget_exhausted:{candidate.skill.id}")
                 continue
             rendered, render_warnings = render_result
             warnings.extend(render_warnings)
@@ -462,8 +460,8 @@ class AuditLogger:
 
 def selected_skill_metadata(rendered: RenderedSkill) -> dict[str, Any]:
     candidate = rendered.candidate
-    procedure = candidate.procedure
-    skill = procedure.metadata.get("skill", {})
+    record = candidate.skill
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     if rendered.rendering_format == _CATALOG_FORMAT:
@@ -472,8 +470,8 @@ def selected_skill_metadata(rendered: RenderedSkill) -> dict[str, Any]:
             frontmatter = {}
         return {
             "rank": rendered.rank,
-            "id": procedure.id,
-            "name": skill.get("name") or frontmatter.get("name") or procedure.title,
+            "id": record.id,
+            "name": skill.get("name") or frontmatter.get("name") or record.title,
             "score": candidate.score,
             "rendered_chars": rendered.rendered_chars,
             "reason": candidate.reason,
@@ -481,12 +479,12 @@ def selected_skill_metadata(rendered: RenderedSkill) -> dict[str, Any]:
             "identity": rendered.identity,
             "activation_fingerprint": rendered.activation_fingerprint,
         }
-    _stored_source_path, emitted_source_path = _resolved_source_path(procedure, skill)
+    _stored_source_path, emitted_source_path = _resolved_source_path(record, skill)
     return {
         "rank": rendered.rank,
-        "id": procedure.id,
-        "name": skill.get("name") or procedure.title,
-        "title": procedure.title,
+        "id": record.id,
+        "name": skill.get("name") or record.title,
+        "title": record.title,
         "source_path": emitted_source_path,
         "sha256": skill.get("sha256"),
         "score": candidate.score,
@@ -499,28 +497,26 @@ def selected_skill_metadata(rendered: RenderedSkill) -> dict[str, Any]:
     }
 
 
-def _has_complete_skill_snapshot(procedure: Procedure) -> bool:
-    if not procedure.content:
+def _has_complete_skill_snapshot(record: SkillRecord) -> bool:
+    if not record.content:
         return False
-    skill = procedure.metadata.get("skill", {})
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict) or not skill:
         return False
-    return bool(
-        procedure.source_path or skill.get("source_path") or skill.get("sha256")
-    )
+    return bool(record.source_path or skill.get("source_path") or skill.get("sha256"))
 
 
-def _dedupe_key(procedure: Procedure) -> str:
-    skill = procedure.metadata.get("skill", {})
+def _dedupe_key(record: SkillRecord) -> str:
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
-    source_path = procedure.source_path or skill.get("source_path")
+    source_path = record.source_path or skill.get("source_path")
     if source_path:
         return f"path:{source_path}"
     sha256 = skill.get("sha256")
     if sha256:
         return f"sha256:{sha256}"
-    return f"id:{procedure.id}"
+    return f"id:{record.id}"
 
 
 def _render_skill_with_budget(
@@ -528,7 +524,7 @@ def _render_skill_with_budget(
     rank: int,
     budget: int,
 ) -> tuple[RenderedSkill, tuple[str, ...]] | None:
-    frontmatter, body, render_warnings = indexed_skill_render_parts(candidate.procedure)
+    frontmatter, body, render_warnings = indexed_skill_render_parts(candidate.skill)
     body = _strip_surrounding_blank_lines(body)
 
     content_limit = min(len(body), max(0, budget))
@@ -596,20 +592,20 @@ def _resolve_rendered_skill_semantics(
     content: str,
     truncated: bool,
 ) -> _RenderedSkillSemantics:
-    procedure = candidate.procedure
-    skill = procedure.metadata.get("skill", {})
+    record = candidate.skill
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
-    name = str(skill.get("name") or frontmatter.get("name") or procedure.title)
-    stored_source_path, source_path = _resolved_source_path(procedure, skill)
+    name = str(skill.get("name") or frontmatter.get("name") or record.title)
+    stored_source_path, source_path = _resolved_source_path(record, skill)
     description = str(skill.get("description") or frontmatter.get("description") or "")
     when_to_use = _when_to_use_text(frontmatter, skill, description)
-    headings = tuple(_heading_texts(procedure, content)[:8])
+    headings = tuple(_heading_texts(record, content)[:8])
     if not headings:
         headings = ("No headings indexed.",)
 
     return _RenderedSkillSemantics(
-        identity=_activation_identity(stored_source_path, procedure.id),
+        identity=_activation_identity(stored_source_path, record.id),
         name=name,
         source_path=source_path,
         trust_mode=candidate.trust_mode,
@@ -621,15 +617,15 @@ def _resolve_rendered_skill_semantics(
 
 
 def _resolved_source_path(
-    procedure: Procedure,
+    record: SkillRecord,
     skill: dict[str, Any],
 ) -> tuple[str | None, str]:
-    candidates = (procedure.source_path, skill.get("source_path"))
+    candidates = (record.source_path, skill.get("source_path"))
     for value in candidates:
         if isinstance(value, str) and value.strip():
             return value, value
 
-    raw_value = procedure.source_path or skill.get("source_path")
+    raw_value = record.source_path or skill.get("source_path")
     return None, str(raw_value or "")
 
 
@@ -656,17 +652,17 @@ def _render_skill_xml(semantics: _RenderedSkillSemantics, rank: int) -> str:
 def _resolve_catalog_skill_semantics(
     candidate: SkillCandidate,
 ) -> _CatalogSkillSemantics:
-    procedure = candidate.procedure
-    skill = procedure.metadata.get("skill", {})
+    record = candidate.skill
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     frontmatter = skill.get("frontmatter", {})
     if not isinstance(frontmatter, dict):
         frontmatter = {}
     return _CatalogSkillSemantics(
-        identity=_activation_identity(None, procedure.id),
-        skill_id=str(procedure.id),
-        name=str(skill.get("name") or frontmatter.get("name") or procedure.title),
+        identity=_activation_identity(None, record.id),
+        skill_id=str(record.id),
+        name=str(skill.get("name") or frontmatter.get("name") or record.title),
         description=str(
             skill.get("description") or frontmatter.get("description") or ""
         ),
@@ -686,11 +682,11 @@ def _render_catalog_skill_xml(semantics: _CatalogSkillSemantics) -> str:
     )
 
 
-def _activation_identity(source_path: object, procedure_id: object) -> str | None:
+def _activation_identity(source_path: object, skill_id: object) -> str | None:
     if isinstance(source_path, str) and source_path.strip():
         return f"path:{source_path}"
-    if isinstance(procedure_id, str) and procedure_id.strip():
-        return f"id:{procedure_id}"
+    if isinstance(skill_id, str) and skill_id.strip():
+        return f"id:{skill_id}"
     return None
 
 
@@ -779,8 +775,8 @@ def _when_to_use_text(
     return " | ".join(parts) if parts else "Use when relevant to the prompt."
 
 
-def _heading_texts(procedure: Procedure, content: str) -> list[str]:
-    index = procedure.metadata.get("index", {})
+def _heading_texts(record: SkillRecord, content: str) -> list[str]:
+    index = record.metadata.get("index", {})
     headings = index.get("headings") if isinstance(index, dict) else None
     if isinstance(headings, list):
         texts = [

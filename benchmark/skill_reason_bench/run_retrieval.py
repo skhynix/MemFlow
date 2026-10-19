@@ -90,7 +90,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--user-id",
         default="benchmark",
-        help="User ID for seeded procedures (default: benchmark)",
+        help="User ID for seeded skills (default: benchmark)",
     )
     parser.add_argument(
         "--k-values",
@@ -261,7 +261,7 @@ def run_evaluation(
     # every skill body over the wire.
     corpus_size = memflow.store.count(user_id=args.user_id)
     if corpus_size == 0:
-        print("\n[WARNING] No procedures found in corpus. Run run_seeding.py first.")
+        print("\n[WARNING] No skills found in corpus. Run run_seeding.py first.")
         sys.exit(1)
     print(f"Corpus size: {corpus_size}")
 

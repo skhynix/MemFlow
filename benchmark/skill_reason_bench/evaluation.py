@@ -133,10 +133,10 @@ def _binary_relevance_flags(
     """Convert retrieved IDs to binary relevance flags."""
     seen_relevant: set[str] = set()
     flags: list[int] = []
-    for proc_id in retrieved_ids:
-        if proc_id in relevant_ids and proc_id not in seen_relevant:
+    for skill_id in retrieved_ids:
+        if skill_id in relevant_ids and skill_id not in seen_relevant:
             flags.append(1)
-            seen_relevant.add(proc_id)
+            seen_relevant.add(skill_id)
         else:
             flags.append(0)
     return flags
@@ -150,15 +150,15 @@ def compute_binary_ir_metrics(
     """Compute binary IR metrics over the explicit relevant ID set.
 
     Args:
-        retrieved_ids: List of retrieved procedure IDs in rank order
-        relevant_ids: Set or list of relevant procedure IDs (ground truth)
+        retrieved_ids: List of retrieved skill IDs in rank order
+        relevant_ids: Set or list of relevant skill IDs (ground truth)
         k_values: List of k values to compute metrics at
 
     Returns:
         Dictionary with metrics: hit_at_k, precision_at_k, recall_at_k,
         f1_at_k, ndcg_at_k (binary), reciprocal_rank, average_precision
     """
-    relevant_set = {str(proc_id) for proc_id in relevant_ids if str(proc_id)}
+    relevant_set = {str(skill_id) for skill_id in relevant_ids if str(skill_id)}
     relevance_flags = _binary_relevance_flags(retrieved_ids, relevant_set)
     num_relevant = len(relevant_set)
 
@@ -375,7 +375,7 @@ def _assemble_results(
     gold_by_query: dict[str, set[str]] = {}
 
     for query, retrieved in zip(queries, all_retrieved):
-        retrieved_ids = [str(item.procedure_id) for item in retrieved]
+        retrieved_ids = [str(item.skill_id) for item in retrieved]
         ranked_ids_by_query[query.query_id] = retrieved_ids
         gold_by_query[query.query_id] = set(query.relevant_skill_ids)
 
@@ -390,12 +390,12 @@ def _assemble_results(
         retrieved_payload = [
             {
                 "rank": rank,
-                "procedure_id": item.procedure_id,
+                "procedure_id": item.skill_id,
                 "title": item.title,
                 "category": item.category,
                 "tags": item.tags,
                 "score": _safe_float(item.score),
-                "relevant": item.procedure_id in set(query.relevant_skill_ids),
+                "relevant": item.skill_id in set(query.relevant_skill_ids),
             }
             for rank, item in enumerate(retrieved, start=1)
         ]

@@ -11,23 +11,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from memflow.manager import MemFlow, _load_env_file
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from tests.fakes import FakeSkillStore
 
 
 class TestMemFlowAdd:
     """Tests for MemFlow.add()."""
 
-    def test_add_procedure_direct(self):
-        """Test adding a procedure directly."""
+    def test_add_skill_direct(self):
+        """Test adding a skill directly."""
         manager = MemFlow(store=FakeSkillStore(), use_env=False)
-        proc = Procedure(title="Test", content="1. Step")
+        record = SkillRecord(title="Test", content="1. Step")
 
-        result = manager.add(procedure=proc)
+        result = manager.add(skill=record)
 
         assert result["event"] == "ADD"
-        assert result["id"] == proc.id
-        assert proc in [p for p in manager.store.list()]
+        assert result["id"] == record.id
+        assert record in [p for p in manager.store.list()]
 
 
 class TestMemFlowSearch:
@@ -36,33 +36,37 @@ class TestMemFlowSearch:
     def test_search_delegates_to_store(self):
         """Test that search delegates to store."""
         store = FakeSkillStore()
-        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
+        store.add(SkillRecord(title="Deploy guide", content="1. Deploy"))
         manager = MemFlow(store=store, use_env=False)
 
         store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         results = manager.search("deploy")
 
         assert len(results) == 1
-        assert results[0].procedure.title == "Deploy guide"
+        assert results[0].skill.title == "Deploy guide"
 
     def test_search_with_user_id(self):
         """Test search filters by user_id."""
         store = FakeSkillStore()
-        store.add(Procedure(title="User1 deploy", content="1. Deploy", user_id="user1"))
-        store.add(Procedure(title="User2 deploy", content="1. Deploy", user_id="user2"))
+        store.add(
+            SkillRecord(title="User1 deploy", content="1. Deploy", user_id="user1")
+        )
+        store.add(
+            SkillRecord(title="User2 deploy", content="1. Deploy", user_id="user2")
+        )
         manager = MemFlow(store=store, use_env=False)
 
         store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         results = manager.search("deploy", user_id="user1")
 
         assert len(results) == 1
-        assert results[0].procedure.user_id == "user1"
+        assert results[0].skill.user_id == "user1"
 
     def test_search_with_top_k(self):
         """Test search limits results to top_k."""
         store = FakeSkillStore()
         for i in range(10):
-            store.add(Procedure(title=f"Deploy {i}", content=f"1. Deploy {i}"))
+            store.add(SkillRecord(title=f"Deploy {i}", content=f"1. Deploy {i}"))
         manager = MemFlow(store=store, use_env=False)
 
         store.search_results = [SearchResult(p, 0.8) for p in store.list()]
@@ -73,17 +77,17 @@ class TestMemFlowSearch:
     def test_search_kind_filter(self):
         """Test MemFlow.search passes kind filters to the store."""
         store = FakeSkillStore()
-        skill = Procedure(title="Deploy skill", content="deploy")
-        procedure = Procedure(
+        skill = SkillRecord(title="Deploy skill", content="deploy")
+        record = SkillRecord(
             title="Deploy procedure",
             content="deploy",
             kind="procedure",
         )
-        store.records.update({skill.id: skill, procedure.id: procedure})
+        store.records.update({skill.id: skill, record.id: record})
         store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         manager = MemFlow(store=store, use_env=False)
 
-        assert [r.procedure.id for r in manager.search("deploy")] == [skill.id]
+        assert [r.skill.id for r in manager.search("deploy")] == [skill.id]
         for kind in ("procedure", None):
             with pytest.raises(ValueError):
                 manager.search("deploy", kind=kind)
@@ -97,14 +101,14 @@ class TestMemFlowSearchReranker:
         """With MEMFLOW_RERANKER_PIPELINE unset, search delegates directly to store."""
         store = FakeSkillStore()
         store.search_results = [
-            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+            SearchResult(SkillRecord(title="Deploy guide", content="1. Deploy"), 0.8)
         ]
         manager = MemFlow(store=store)
 
         results = manager.search("deploy")
 
         assert len(results) == 1
-        assert results[0].procedure.title == "Deploy guide"
+        assert results[0].skill.title == "Deploy guide"
         assert manager._rerank_pipeline_obj is None  # never built
 
     def test_search_reranks_when_pipeline_enabled(self, clean_env):
@@ -113,13 +117,13 @@ class TestMemFlowSearchReranker:
         os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "10"
         store = FakeSkillStore()
         store.search_results = [
-            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+            SearchResult(SkillRecord(title="Deploy guide", content="1. Deploy"), 0.8)
         ]
         manager = MemFlow(store=store)
 
         mock_pipeline = MagicMock()
         mock_pipeline.rerank.return_value = [
-            SearchResult(procedure=Procedure(title="reranked", content="x"), score=1.0)
+            SearchResult(skill=SkillRecord(title="reranked", content="x"), score=1.0)
         ]
         with patch.object(
             manager, "_get_rerank_pipeline", return_value=mock_pipeline
@@ -129,7 +133,7 @@ class TestMemFlowSearchReranker:
         mock_pipeline.rerank.assert_called_once()
         mock_get.assert_called_once()
         assert len(results) == 1
-        assert results[0].procedure.title == "reranked"
+        assert results[0].skill.title == "reranked"
 
     def test_search_over_fetches_when_rerank_enabled(self, clean_env):
         """store.search receives top_k=max(top_k, candidate_k) when reranking."""
@@ -242,7 +246,7 @@ class TestMemFlowSearchReranker:
         os.environ.pop("RERANKER_CE_API_BASE", None)
         store = FakeSkillStore()
         store.search_results = [
-            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+            SearchResult(SkillRecord(title="Deploy guide", content="1. Deploy"), 0.8)
         ]
         manager = MemFlow(store=store)
 
@@ -250,8 +254,8 @@ class TestMemFlowSearchReranker:
             first = manager.search("deploy", top_k=1)
             second = manager.search("deploy", top_k=1)
 
-        assert first[0].procedure.title == "Deploy guide"
-        assert second[0].procedure.title == "Deploy guide"
+        assert first[0].skill.title == "Deploy guide"
+        assert second[0].skill.title == "Deploy guide"
         assert "failed to build" in caplog.text
         # The NoopReranker fallback is cached — both outcomes are memoized.
         from memflow.reranker import NoopReranker
@@ -293,7 +297,7 @@ class TestMemFlowSearchReranker:
         no candidate over-fetch, no pipeline construction."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
         os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
-        hit = SearchResult(procedure=Procedure(title="Deploy", content="x"), score=1.0)
+        hit = SearchResult(skill=SkillRecord(title="Deploy", content="x"), score=1.0)
         mock_store = MagicMock()
         mock_store.search.return_value = [hit]
         manager = MemFlow(store=mock_store)
@@ -314,22 +318,22 @@ class TestMemFlowSearchReranker:
 class TestMemFlowDelete:
     """Tests for MemFlow.delete()."""
 
-    def test_delete_removes_procedure(self):
-        """Test deleting a procedure by ID."""
+    def test_delete_removes_record(self):
+        """Test deleting a record by ID."""
         store = FakeSkillStore()
-        proc = Procedure(title="Deploy guide", content="1. Deploy")
-        store.add(proc)
+        record = SkillRecord(title="Deploy guide", content="1. Deploy")
+        store.add(record)
         manager = MemFlow(store=store, use_env=False)
 
-        result = manager.delete(proc.id)
+        result = manager.delete(record.id)
 
         assert result == {
-            "id": proc.id,
-            "title": proc.title,
+            "id": record.id,
+            "title": record.title,
             "event": "DELETE",
             "deleted": True,
         }
-        assert store.get(proc.id) is None
+        assert store.get(record.id) is None
 
     def test_delete_missing_id_returns_not_found(self):
         """Test deleting a missing ID returns not_found."""
@@ -344,13 +348,13 @@ class TestMemFlowDelete:
             "error": "not_found",
         }
 
-    def test_delete_batch_removes_multiple_procedures(self):
-        """Test deleting multiple procedures by ID."""
+    def test_delete_batch_removes_multiple_records(self):
+        """Test deleting multiple records by ID."""
         store = FakeSkillStore()
-        kept = Procedure(title="Keep", content="1. Keep")
+        kept = SkillRecord(title="Keep", content="1. Keep")
         deleted = [
-            Procedure(title="Deploy guide", content="1. Deploy"),
-            Procedure(title="Rollback guide", content="1. Roll back"),
+            SkillRecord(title="Deploy guide", content="1. Deploy"),
+            SkillRecord(title="Rollback guide", content="1. Roll back"),
         ]
         store.add([kept, *deleted])
         manager = MemFlow(store=store, use_env=False)
@@ -367,26 +371,26 @@ class TestMemFlowDelete:
         assert store.get(kept.id) is kept
 
     def test_delete_respects_user_scope(self):
-        """Test scoped delete does not remove another user's procedure."""
+        """Test scoped delete does not remove another user's record."""
         store = FakeSkillStore()
-        proc = Procedure(
+        record = SkillRecord(
             id="shared-looking-id",
             title="Private deploy guide",
             content="1. Deploy",
             user_id="user-a",
         )
-        store.add(proc)
+        store.add(record)
         manager = MemFlow(store=store, use_env=False)
 
-        result = manager.delete(proc.id, user_id="user-b")
+        result = manager.delete(record.id, user_id="user-b")
 
         assert result == {
-            "id": proc.id,
+            "id": record.id,
             "event": "DELETE",
             "deleted": False,
             "error": "not_found",
         }
-        assert store.get(proc.id) is proc
+        assert store.get(record.id) is record
 
 
 class TestLoadEnvFile:
@@ -604,3 +608,91 @@ class TestMemFlowHybridSearch:
         manager = MemFlow(store=FakeSkillStore(), use_env=True)
         assert manager._hybrid_sparse_search_top_k == 200
         assert manager._hybrid_rrf_k == 60
+
+
+@pytest.mark.parametrize("stage", ["ce", "llm"])
+@pytest.mark.parametrize("hybrid", [False, True])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_skill_search_runs_reranker_pipeline(
+    clean_env, monkeypatch, stage, hybrid, asynchronous
+):
+    """The manager, renderer, and reranker exchange the public skill model."""
+    import asyncio
+
+    from memflow.llm import LLMFactory
+    from memflow.reranker import RerankPipeline
+
+    monkeypatch.setenv("MEMFLOW_RERANKER_PIPELINE", stage)
+    monkeypatch.setenv("RERANKER_CE_API_BASE", "http://reranker.invalid/v1")
+    monkeypatch.setenv("MEMFLOW_HYBRID_SEARCH_ENABLED", "on" if hybrid else "off")
+    store = FakeSkillStore()
+    hits = [
+        SearchResult(SkillRecord(id=name, title=name, content=f"{name} body"), 0.8)
+        for name in ("first", "second")
+    ]
+    store.search_results = hits
+    if hybrid:
+        store.supports_hybrid = True
+        store.search_hybrid = MagicMock(return_value=hits)
+
+    response = MagicMock()
+    response.json.return_value = {
+        "data": [{"index": 0, "score": 0.1}, {"index": 1, "score": 0.9}]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr("httpx.post", post)
+    llm = MagicMock()
+    llm.generate.return_value = "[2, 1]"
+    factory = MagicMock(return_value=llm)
+    monkeypatch.setattr(LLMFactory, "create", factory)
+    manager = MemFlow(store=store, use_env=False)
+    assert manager._rerank_pipeline_obj is None
+    factory.assert_not_called()
+    post.assert_not_called()
+
+    if asynchronous:
+        results = asyncio.run(
+            manager.search_async("release", user_id="default", top_k=2)
+        )
+    else:
+        results = manager.search_skills("release", user_id="default", top_k=2)
+
+    assert [result.skill.id for result in results] == ["second", "first"]
+    assert isinstance(manager._rerank_pipeline_obj, RerankPipeline)
+    if hybrid:
+        assert store.search_hybrid.call_args.kwargs["kind"] == "skill"
+        assert store.search_hybrid.call_args.kwargs["user_id"] == "default"
+    else:
+        assert store.search_calls[0]["kind"] == "skill"
+        assert store.search_calls[0]["user_id"] == "default"
+    if stage == "ce":
+        post.assert_called_once()
+        assert "first body" in post.call_args.kwargs["json"]["text_2"][0]
+        factory.assert_not_called()
+    else:
+        factory.assert_called_once()
+        assert factory.call_args.kwargs["temperature"] == 0.0
+        assert factory.call_args.kwargs["timeout"] == 60.0
+        llm.generate.assert_called_once()
+        post.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", [None, "procedure"])
+@pytest.mark.parametrize("query", ["release", ["release"]])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_reranked_search_rejects_invalid_kind_before_external_work(
+    clean_env, monkeypatch, kind, query, asynchronous
+):
+    import asyncio
+
+    monkeypatch.setenv("MEMFLOW_RERANKER_PIPELINE", "llm")
+    store = FakeSkillStore()
+    manager = MemFlow(store=store, use_env=False)
+    with patch.object(manager, "_get_rerank_pipeline") as build:
+        with pytest.raises(ValueError, match="skill"):
+            if asynchronous:
+                asyncio.run(manager.search_async(query, kind=kind))
+            else:
+                manager.search(query, kind=kind)
+    assert store.search_calls == []
+    build.assert_not_called()

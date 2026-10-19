@@ -36,7 +36,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 
 logger = logging.getLogger(__name__)
 
@@ -167,27 +167,27 @@ def get_reranker_timeout() -> float:
     return _env_num("MEMFLOW_RERANKER_TIMEOUT", 60.0, minimum=0.1)
 
 
-def _skill_description(procedure: Procedure) -> str:
-    skill = procedure.metadata.get("skill", {})
-    if isinstance(skill, dict):
-        return str(skill.get("description", "") or "")
+def _skill_description(skill: SkillRecord) -> str:
+    metadata = skill.metadata.get("skill", {})
+    if isinstance(metadata, dict):
+        return str(metadata.get("description", "") or "")
     return ""
 
 
-def _skill_name(procedure: Procedure) -> str:
-    skill = procedure.metadata.get("skill", {})
-    if isinstance(skill, dict):
-        return str(skill.get("name", "") or "")
+def _skill_name(skill: SkillRecord) -> str:
+    metadata = skill.metadata.get("skill", {})
+    if isinstance(metadata, dict):
+        return str(metadata.get("name", "") or "")
     return ""
 
 
-def render_doc_text(procedure: Procedure, scope: str | None = None) -> str:
-    """Render a candidate procedure into reranker input text.
+def render_doc_text(skill: SkillRecord, scope: str | None = None) -> str:
+    """Render a candidate skill into reranker input text.
 
     ``scope``:
       - ``"meta"`` (default): ``"<title>\n<description>"`` — concise, the
         listwise LLM reranker's default (body text adds noise, not signal).
-      - ``"full"``: ``procedure_search_text`` (title + name + description +
+      - ``"full"``: ``skill_search_text`` (title + name + description +
         category + tags + body) — same text the dense embedding uses; CE's
         default, since the body lexical signal is CE's only ranking material
         (meta→full is worth ~+47p R@10 on SkillRet).
@@ -201,19 +201,19 @@ def render_doc_text(procedure: Procedure, scope: str | None = None) -> str:
     """
     scope = scope or get_reranker_scope() or "meta"
     if scope == "full":
-        from memflow.models import procedure_search_text
+        from memflow.models import skill_search_text
 
-        text = procedure_search_text(procedure)
+        text = skill_search_text(skill)
     elif scope == "body":
         from memflow.models import _markdown_body_without_frontmatter
 
-        text = _markdown_body_without_frontmatter(procedure.content)
+        text = _markdown_body_without_frontmatter(skill.content)
         if not text.strip():
-            text = f"{procedure.title}\n{procedure.content}"
+            text = f"{skill.title}\n{skill.content}"
     else:  # meta
-        name = _skill_name(procedure)
-        desc = _skill_description(procedure)
-        title = procedure.title or name
+        name = _skill_name(skill)
+        desc = _skill_description(skill)
+        title = skill.title or name
         parts = [title]
         if desc and desc != title:
             parts.append(desc)
@@ -353,7 +353,7 @@ class CEReranker(BaseReranker):
         instruction = get_ce_query_instruction()
         if instruction:
             query = f"Instruct: {instruction}\nQuery: {query}"
-        docs = [render_doc_text(c.procedure, self._reranker_scope) for c in candidates]
+        docs = [render_doc_text(c.skill, self._reranker_scope) for c in candidates]
         scores = self._score_batch(query, docs)
         if scores is None:
             # Fallback: score one-by-one (still useful if batch endpoint rejects).
@@ -433,7 +433,7 @@ class LLMReranker(BaseReranker):
         """Return the chat messages for the LLM call."""
         lines = []
         for i, c in enumerate(candidates, start=1):
-            doc = render_doc_text(c.procedure, self._reranker_scope)
+            doc = render_doc_text(c.skill, self._reranker_scope)
             # Flatten newlines for a one-line-per-candidate prompt. Length is
             # already bounded by render_doc_text's DOC_CAP — no second slice.
             # <skill> delimiters: candidate text is untrusted content that may

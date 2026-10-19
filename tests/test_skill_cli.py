@@ -15,7 +15,7 @@ import pytest
 import memflow.manager as manager_module
 import memflow.skill_cli as skill_cli
 from memflow.cli import build_parser, main
-from memflow.models import Procedure
+from memflow.models import SkillRecord
 
 
 class FakeSkillManager:
@@ -27,7 +27,7 @@ class FakeSkillManager:
             "id": "skill:sync",
             "status": "noop",
         }
-        self.list_result: list[Procedure] = []
+        self.list_result: list[SkillRecord] = []
 
     def add_skill(self, *args, **kwargs):
         self.calls.append(("add_skill", args, kwargs))
@@ -61,8 +61,8 @@ def _skill(
     user_id: str = "alice",
     trust_state: str = "trusted",
     stale: bool = False,
-) -> Procedure:
-    return Procedure(
+) -> SkillRecord:
+    return SkillRecord(
         id=skill_id,
         title=name,
         content=content,

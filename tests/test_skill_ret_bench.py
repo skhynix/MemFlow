@@ -15,7 +15,7 @@ import pytest
 from benchmark.skill_ret_bench.adapter import (
     normalize_skill_ret_record,
     seed_skill_ret_corpus,
-    skill_record_to_procedure,
+    skill_ret_record_to_skill,
 )
 from memflow.models import skill_search_text
 
@@ -30,13 +30,14 @@ def test_skillret_search_text_keeps_description_and_full_body() -> None:
         "sub": "Development",
     }
 
-    record = normalize_skill_ret_record(raw)
-    procedure = skill_record_to_procedure(record, user_id="benchmark")
-    text = skill_search_text(procedure)
+    normalized = normalize_skill_ret_record(raw)
+    skill = skill_ret_record_to_skill(normalized, user_id="benchmark")
+    text = skill_search_text(skill)
 
-    assert record.content == raw["skill_md"]
-    assert procedure.metadata["skill"]["name"] == raw["name"]
-    assert procedure.metadata["skill"]["description"] == raw["description"]
+    assert normalized.content == raw["skill_md"]
+    assert skill.content == normalized.content
+    assert skill.metadata["skill"]["name"] == raw["name"]
+    assert skill.metadata["skill"]["description"] == raw["description"]
     assert raw["description"] in text
     assert "Use git add." in text
 
@@ -123,7 +124,7 @@ class _RecordingStore:
 
     def list(self, user_id: str | None = None):
         self.list_called = True
-        raise AssertionError("seed must not fetch full procedure payloads via list()")
+        raise AssertionError("seed must not fetch full skill payloads via list()")
 
     def list_ids(self, user_id: str | None = None) -> list[str]:
         self.list_ids_calls += 1
@@ -144,10 +145,10 @@ class _RecordingMemFlow:
         self.store = store
         self.added: list = []
 
-    async def add_async(self, procedure, max_workers: int = 4) -> dict:
-        procs = procedure if isinstance(procedure, list) else [procedure]
-        self.added.extend(procs)
-        return {"num_seeded": len(procs), "num_skipped": 0}
+    async def add_async(self, skill, max_workers: int = 4) -> dict:
+        records = skill if isinstance(skill, list) else [skill]
+        self.added.extend(records)
+        return {"num_seeded": len(records), "num_skipped": 0}
 
 
 def _write_corpus(tmp_path):
@@ -242,7 +243,7 @@ def _make_adapter(**kwargs):
 def test_adapter_without_search_fn_uses_memflow_search() -> None:
     adapter, calls = _make_adapter()
 
-    adapter.retrieve("deploy app", k=3, exclude_procedure_ids={"x"})
+    adapter.retrieve("deploy app", k=3, exclude_skill_ids={"x"})
 
     assert calls == [
         ("deploy app", {"user_id": "benchmark", "top_k": 4, "kind": "skill"})
@@ -283,11 +284,11 @@ def test_adapter_batch_falls_back_to_per_query_when_search_fn_injected() -> None
 
 
 def test_adapter_batch_fallback_applies_exclusions_and_overfetch() -> None:
-    from memflow.models import Procedure, SearchResult
+    from memflow.models import SearchResult, SkillRecord
 
     def _hit(pid: str) -> SearchResult:
         return SearchResult(
-            procedure=Procedure(id=pid, title=pid, content="x"), score=1.0
+            skill=SkillRecord(id=pid, title=pid, content="x"), score=1.0
         )
 
     def search_fn(query, user_id=None, top_k=5, kind="skill"):
@@ -299,7 +300,7 @@ def test_adapter_batch_fallback_applies_exclusions_and_overfetch() -> None:
 
     # Excluded id dropped; fetch_k = k + len(excluded) = 3 kept enough
     # survivors after filtering to fill k.
-    assert [[r.procedure_id for r in results[0]]] == [["a", "b"]]
+    assert [[r.skill_id for r in results[0]]] == [["a", "b"]]
 
 
 def _mode_args(**overrides):

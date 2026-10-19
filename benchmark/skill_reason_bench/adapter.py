@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from memflow import MemFlow, Procedure
+from memflow import MemFlow, SkillRecord
 from memflow.store import env_flag
 
 SKILL_REASON_CORPUS_SOURCE = "skillreason-bench"
@@ -96,7 +96,7 @@ class CorpusSeedStats:
 class RetrievedSkill:
     """A retrieved skill from MemFlow search."""
 
-    procedure_id: str
+    skill_id: str
     title: str
     category: str
     score: float
@@ -138,7 +138,7 @@ def normalize_skill_reason_record(raw: dict[str, Any]) -> SkillReasonRecord:
 
     The official document rendering concatenates name, description, and body
     under the 2,048-token cap. Here the store's ``skill_search_text`` already
-    prepends ``title``/``name``/``description``/``category`` from the procedure
+    prepends ``title``/``name``/``description``/``category`` from the skill
     fields and metadata, so the composed ``content`` carries
     ``description + "\\n\\n" + body`` capped at
     ``SKILL_REASON_CONTENT_MAX_CHARS``. Corpus source metadata (``stars``,
@@ -206,19 +206,19 @@ def iter_skill_reason_records(path: str | Path) -> Iterator[SkillReasonRecord]:
         yield normalize_skill_reason_record(raw)
 
 
-def skill_record_to_procedure(
+def skill_reason_record_to_skill(
     record: SkillReasonRecord | dict[str, Any], user_id: str
-) -> Procedure:
-    """Convert a SkillReason corpus record into a MemFlow Procedure.
+) -> SkillRecord:
+    """Convert a SkillReason corpus record into a MemFlow SkillRecord.
 
-    All SkillReason metadata is preserved in ``Procedure.metadata['skill']`` so
+    All SkillReason metadata is preserved in ``SkillRecord.metadata['skill']`` so
     the vector-store payload keeps the source fields and the embedding text
     picks up name/description via ``skill_search_text``.
     """
     normalized = (
         normalize_skill_reason_record(record) if isinstance(record, dict) else record
     )
-    return Procedure(
+    return SkillRecord(
         id=normalized.id,
         title=normalized.title,
         content=normalized.content,
@@ -242,8 +242,8 @@ def _collect_corpus_ids(paths: list[Path]) -> set[str]:
     }
 
 
-def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
-    """Collect all existing procedure IDs from MemFlow store.
+def _collect_existing_skill_ids(memflow: MemFlow, user_id: str) -> set[str]:
+    """Collect all existing skill IDs from MemFlow store.
 
     Uses ``list_ids`` instead of ``list`` so id comparison avoids full
     documents where the backend supports id-only listing (Qdrant). Used both
@@ -254,7 +254,7 @@ def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
         return {pid for pid in memflow.store.list_ids(user_id=user_id) if pid}
     except Exception as exc:
         raise RuntimeError(
-            "Failed to list existing procedures for SkillReason-Bench seeding "
+            "Failed to list existing skills for SkillReason-Bench seeding "
             f"for user_id={user_id!r}; refusing to continue because duplicate "
             "corpus IDs could be created or the seeded corpus cannot be "
             "verified. Resolve the list error before rerunning; use "
@@ -287,36 +287,36 @@ def _resolve_corpus_paths(corpus_path: str | Path) -> list[Path]:
 
 
 def _trim_to_budget(
-    procedures: list[Procedure],
+    skills: list[SkillRecord],
     stats: CorpusSeedStats,
     max_records: int | None,
-) -> list[Procedure]:
+) -> list[SkillRecord]:
     """Trim a pending batch to the remaining max_records seeding budget.
 
     Returns the trimmed list (possibly empty) and updates ``stats.num_skipped``
     for the dropped tail. A negative/zero budget returns ``[]``.
     """
     if max_records is None:
-        return procedures
+        return skills
     remaining = max_records - stats.num_seeded
     if remaining <= 0:
         return []
-    if len(procedures) > remaining:
-        stats.num_skipped += len(procedures) - remaining
-        return procedures[:remaining]
-    return procedures
+    if len(skills) > remaining:
+        stats.num_skipped += len(skills) - remaining
+        return skills[:remaining]
+    return skills
 
 
 async def _add_batch(
     memflow: MemFlow,
-    procedures: list[Procedure],
+    skills: list[SkillRecord],
     *,
     use_sync: bool,
     embedding_batch_size: int,
     max_workers: int,
     stats: CorpusSeedStats,
 ) -> None:
-    """Embed + upsert one batch of procedures, updating ``stats.num_seeded``.
+    """Embed + upsert one batch of skills, updating ``stats.num_seeded``.
 
     Calls the store's ``add`` / ``add_async`` directly (not MemFlow's manager
     wrappers) so the embedding ``batch_size`` is honored — the manager's
@@ -326,10 +326,10 @@ async def _add_batch(
     ``num_seeded`` directly.
     """
     result = (
-        memflow.store.add(procedures, batch_size=embedding_batch_size)
+        memflow.store.add(skills, batch_size=embedding_batch_size)
         if use_sync
         else await memflow.store.add_async(
-            procedures,
+            skills,
             batch_size=embedding_batch_size,
             max_workers=max_workers,
         )
@@ -352,10 +352,10 @@ async def seed_skill_reason_corpus(
 
     Args:
         memflow: MemFlow instance
-        user_id: User ID for procedures
+        user_id: User ID for skills
         corpus_path: Path to ``skills.jsonl`` OR a directory of JSONL files
-        clear_existing: Whether to clear existing corpus procedures first
-        batch_size: Number of procedures to add in each batch
+        clear_existing: Whether to clear existing corpus skills first
+        batch_size: Number of skills to add in each batch
         max_records: Maximum number of records to seed (default: all)
         max_workers: Max concurrent embedding/upsert requests (async mode only)
         use_sync: Use synchronous ``store.add`` instead of ``store.add_async``
@@ -384,28 +384,28 @@ async def seed_skill_reason_corpus(
 
     existing_ids: set[str] = set()
     if clear_existing:
-        print("Clearing existing SkillReason procedures...")
+        print("Clearing existing SkillReason skills...")
         corpus_ids = _collect_corpus_ids(corpus_paths)
-        existing = _collect_existing_procedure_ids(memflow, user_id=user_id)
+        existing = _collect_existing_skill_ids(memflow, user_id=user_id)
         to_delete = sorted(corpus_ids & existing)
-        print(f"  Clearing {len(to_delete)} existing procedures...")
+        print(f"  Clearing {len(to_delete)} existing skills...")
         # delete_many propagates errors: a failed clear aborts here instead
         # of seeding onto a half-cleared store. The delete is idempotent, so
         # rerunning --clear-existing recovers from a mid-clear failure.
         stats.num_deleted = memflow.store.delete_many(to_delete)
-        print(f"  Deleted {stats.num_deleted} existing procedures")
+        print(f"  Deleted {stats.num_deleted} existing skills")
     else:
-        existing_ids = _collect_existing_procedure_ids(memflow, user_id=user_id)
-        print(f"Reusing existing procedures by ID ({len(existing_ids)} available)")
+        existing_ids = _collect_existing_skill_ids(memflow, user_id=user_id)
+        print(f"Reusing existing skills by ID ({len(existing_ids)} available)")
 
-    print("Streaming procedures from (gzip) JSONL...")
+    print("Streaming skills from (gzip) JSONL...")
 
     # Ids actually submitted to the store (after budget trimming), so the
     # post-seeding verify below compares against what was promised, not what
     # the file contained (max_records / blank-id records are not promises).
     promised_ids: set[str] = set()
     reused_ids: set[str] = set()
-    procedures_to_seed: list[Procedure] = []
+    skills_to_seed: list[SkillRecord] = []
     for path in corpus_paths:
         for record in iter_skill_reason_records(path):
             stats.num_records += 1
@@ -421,17 +421,17 @@ async def seed_skill_reason_corpus(
             capped, was_truncated = truncate_skill_reason_content(record)
             if was_truncated:
                 stats.num_truncated += 1
-            procedure = skill_record_to_procedure(capped, user_id=user_id)
-            procedures_to_seed.append(procedure)
+            skill = skill_reason_record_to_skill(capped, user_id=user_id)
+            skills_to_seed.append(skill)
 
-            if len(procedures_to_seed) >= batch_size:
-                trimmed = _trim_to_budget(procedures_to_seed, stats, max_records)
+            if len(skills_to_seed) >= batch_size:
+                trimmed = _trim_to_budget(skills_to_seed, stats, max_records)
                 if (
                     not trimmed
                     and max_records is not None
                     and stats.num_seeded >= max_records
                 ):
-                    procedures_to_seed = []
+                    skills_to_seed = []
                     break
                 promised_ids.update(p.id for p in trimmed)
                 await _add_batch(
@@ -443,20 +443,19 @@ async def seed_skill_reason_corpus(
                     stats=stats,
                 )
                 print(
-                    f"\r  Seeded {stats.num_seeded} procedures "
-                    f"({stats.num_reused} reused)",
+                    f"\r  Seeded {stats.num_seeded} skills ({stats.num_reused} reused)",
                     end="",
                     flush=True,
                 )
-                procedures_to_seed = []
+                skills_to_seed = []
 
             if max_records is not None and stats.num_seeded >= max_records:
                 break
         if max_records is not None and stats.num_seeded >= max_records:
             break
 
-    if procedures_to_seed:
-        trimmed = _trim_to_budget(procedures_to_seed, stats, max_records)
+    if skills_to_seed:
+        trimmed = _trim_to_budget(skills_to_seed, stats, max_records)
         if trimmed:
             promised_ids.update(p.id for p in trimmed)
             await _add_batch(
@@ -477,7 +476,7 @@ async def seed_skill_reason_corpus(
     # Cost: one id-only listing (payload-light on Qdrant), negligible vs
     # embedding the corpus.
     print("Verifying seeded corpus completeness against the store...")
-    present_ids = _collect_existing_procedure_ids(memflow, user_id=user_id)
+    present_ids = _collect_existing_skill_ids(memflow, user_id=user_id)
     expected_ids = promised_ids | reused_ids
     missing = sorted(expected_ids - present_ids)
     stats.num_missing = len(missing)
@@ -485,7 +484,7 @@ async def seed_skill_reason_corpus(
     if missing:
         print(
             f"\n[WARNING] {len(missing)} of {len(expected_ids)} expected corpus "
-            f"procedures are NOT in the store (sample: "
+            f"skills are NOT in the store (sample: "
             f"{', '.join(stats.missing_ids_sample)}). Retrieval metrics will "
             "be computed against an incomplete corpus. Rerun with "
             "--clear-existing (the reuse path will re-add only the missing "
@@ -493,7 +492,7 @@ async def seed_skill_reason_corpus(
             "failures directly."
         )
     else:
-        print("  completeness OK: all expected procedures present")
+        print("  completeness OK: all expected skills present")
 
     print()
     print(
@@ -534,35 +533,35 @@ class MemFlowSkillReasonAdapter:
         self,
         query: str,
         k: int = 5,
-        exclude_procedure_ids: set[str] | None = None,
+        exclude_skill_ids: set[str] | None = None,
     ) -> list[RetrievedSkill]:
         """Retrieve results for a single query.
 
         Args:
             query: Search query string (an implicit user request)
             k: Number of results to return
-            exclude_procedure_ids: Set of procedure IDs to exclude from results
+            exclude_skill_ids: Set of skill IDs to exclude from results
 
         Returns:
             List of RetrievedSkill objects
         """
-        excluded = exclude_procedure_ids or set()
+        excluded = exclude_skill_ids or set()
         fetch_k = k + len(excluded)
         search_results = self.memflow.search(
             query, user_id=self.user_id, top_k=fetch_k, kind="skill"
         )
         retrieved: list[RetrievedSkill] = []
         for result in search_results:
-            procedure = result.procedure
-            if procedure.id in excluded:
+            skill = result.skill
+            if skill.id in excluded:
                 continue
             score = float(result.score) if result.score is not None else 0.0
             retrieved.append(
                 RetrievedSkill(
-                    procedure_id=procedure.id,
-                    title=procedure.title,
-                    category=procedure.category,
-                    tags=list(procedure.tags),
+                    skill_id=skill.id,
+                    title=skill.title,
+                    category=skill.category,
+                    tags=list(skill.tags),
                     score=score,
                 )
             )
@@ -590,14 +589,14 @@ class MemFlowSkillReasonAdapter:
             excluded = exclude_map.get(i, set())
             filtered = []
             for result in results:
-                if result.procedure.id not in excluded:
+                if result.skill.id not in excluded:
                     score = float(result.score) if result.score is not None else 0.0
                     filtered.append(
                         RetrievedSkill(
-                            procedure_id=result.procedure.id,
-                            title=result.procedure.title,
-                            category=result.procedure.category,
-                            tags=list(result.procedure.tags),
+                            skill_id=result.skill.id,
+                            title=result.skill.title,
+                            category=result.skill.category,
+                            tags=list(result.skill.tags),
                             score=score,
                         )
                     )
@@ -609,13 +608,13 @@ class MemFlowSkillReasonAdapter:
         self,
         query: str,
         k: int = 5,
-        exclude_procedure_ids: set[str] | None = None,
+        exclude_skill_ids: set[str] | None = None,
     ) -> list[RetrievedSkill]:
         """Retrieve results for a single query asynchronously."""
         import asyncio
 
         return await asyncio.to_thread(
-            self.retrieve, query, k=k, exclude_procedure_ids=exclude_procedure_ids
+            self.retrieve, query, k=k, exclude_skill_ids=exclude_skill_ids
         )
 
     async def retrieve_batch_async(
@@ -631,14 +630,14 @@ class MemFlowSkillReasonAdapter:
         semaphore = Semaphore(max_concurrency)
 
         async def retrieve_single(
-            query: str, exclude_procedure_ids: set[str]
+            query: str, exclude_skill_ids: set[str]
         ) -> list[RetrievedSkill]:
             async with semaphore:
                 return await asyncio.to_thread(
                     self.retrieve,
                     query,
                     k=k,
-                    exclude_procedure_ids=exclude_procedure_ids,
+                    exclude_skill_ids=exclude_skill_ids,
                 )
 
         tasks = [retrieve_single(query, exclude_ids) for query, exclude_ids in queries]

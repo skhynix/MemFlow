@@ -45,16 +45,16 @@ def read_skill_from_store(store: BaseStore, skill_id: str) -> dict[str, str]:
     if not skill_id:
         raise ValueError("skill_id must not be empty")
 
-    procedure = store.get(skill_id)
-    if procedure is None or procedure.id != skill_id:
+    record = store.get(skill_id)
+    if record is None or record.id != skill_id:
         raise ValueError(f"skill not found: {skill_id}")
-    if procedure.kind != "skill":
+    if record.kind != "skill":
         raise ValueError(f"record is not a skill: {skill_id}")
 
-    skill = procedure.metadata.get("skill", {})
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
-    governance = procedure.metadata.get("governance", {})
+    governance = record.metadata.get("governance", {})
     if not isinstance(governance, dict):
         governance = {}
 
@@ -64,10 +64,10 @@ def read_skill_from_store(store: BaseStore, skill_id: str) -> dict[str, str]:
         raise PermissionError(f"skill is blocked: {skill_id}")
 
     return {
-        "id": procedure.id,
-        "name": str(skill.get("name") or procedure.title),
+        "id": record.id,
+        "name": str(skill.get("name") or record.title),
         "trust_mode": "instruction" if stored_mode == "instruction" else "data",
-        "content": procedure.content,
+        "content": record.content,
     }
 
 

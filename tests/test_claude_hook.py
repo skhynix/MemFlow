@@ -28,7 +28,7 @@ from memflow.claude_hook import (
     main as claude_hook_main,
 )
 from memflow.manager import MemFlow
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from memflow.skill_context import (
     CatalogRenderer,
     ContextRenderer,
@@ -184,7 +184,7 @@ def _renderer_candidate(
     *,
     name: str = "renderer-skill",
     body: str = "# Renderer Skill\n\nRender the selected skill.\n",
-    procedure_id: str = "stable-renderer-id",
+    skill_id: str = "stable-renderer-id",
     source_path: str | None = "/stored/renderer-skill/SKILL.md",
     metadata_source_path=_DEFAULT_METADATA_SOURCE,
     description: str = "Use this renderer skill.",
@@ -212,8 +212,8 @@ def _renderer_candidate(
     }
     if metadata_source_path is not None:
         skill["source_path"] = metadata_source_path
-    procedure = Procedure(
-        id=procedure_id,
+    record = SkillRecord(
+        id=skill_id,
         title=name,
         content=body,
         kind="skill",
@@ -227,7 +227,7 @@ def _renderer_candidate(
         },
     )
     return SkillCandidate(
-        procedure=procedure,
+        skill=record,
         score=score,
         reason=reason,
         provenance=provenance,
@@ -249,7 +249,7 @@ def _render_target(
     fillers = [
         _renderer_candidate(
             name=f"filler-{index}",
-            procedure_id=f"filler-{index}",
+            skill_id=f"filler-{index}",
             source_path=f"/stored/filler-{index}/SKILL.md",
             body=f"# Filler {index}\n\nFiller content.\n",
             headings=(f"Filler {index}",),
@@ -265,10 +265,10 @@ def _render_target(
 
 
 def _candidate_with_skill_metadata(candidate: SkillCandidate, **updates):
-    metadata = copy.deepcopy(candidate.procedure.metadata)
+    metadata = copy.deepcopy(candidate.skill.metadata)
     metadata["skill"].update(updates)
-    procedure = replace(candidate.procedure, metadata=metadata)
-    return replace(candidate, procedure=procedure)
+    record = replace(candidate.skill, metadata=metadata)
+    return replace(candidate, skill=record)
 
 
 def _catalog_candidate(**kwargs):
@@ -284,7 +284,7 @@ class _StaticSkillManager:
         del query, user_id
         self.search_calls += 1
         return [
-            SearchResult(procedure=candidate.procedure, score=candidate.score)
+            SearchResult(skill=candidate.skill, score=candidate.score)
             for candidate in self.candidates[:top_k]
         ]
 
@@ -297,7 +297,7 @@ class _StaticSkillManager:
     (
         "source_path",
         "metadata_source_path",
-        "procedure_id",
+        "skill_id",
         "expected_identity",
     ),
     [
@@ -322,13 +322,13 @@ class _StaticSkillManager:
 def test_renderer_uses_stable_activation_identity(
     source_path,
     metadata_source_path,
-    procedure_id,
+    skill_id,
     expected_identity,
 ):
     candidate = _renderer_candidate(
         source_path=source_path,
         metadata_source_path=metadata_source_path,
-        procedure_id=procedure_id,
+        skill_id=skill_id,
     )
 
     result, rendered = _render_target(candidate)
@@ -349,7 +349,7 @@ def test_renderer_uses_metadata_path_when_primary_path_is_malformed():
     candidate = _renderer_candidate(
         source_path=123,
         metadata_source_path="/stored/metadata/SKILL.md",
-        procedure_id="stable-id",
+        skill_id="stable-id",
     )
 
     _result, rendered = _render_target(candidate)
@@ -369,7 +369,7 @@ def test_pathless_activation_fingerprint_tracks_a_b_a_transitions():
         ("# Stable\n\nPayload A\n", "sha-a-second"),
     ):
         candidate = _renderer_candidate(
-            procedure_id="stable-pathless-id",
+            skill_id="stable-pathless-id",
             source_path=None,
             metadata_source_path=None,
             body=body,
@@ -427,12 +427,12 @@ def test_activation_fingerprint_excludes_volatile_fields(volatile_field):
     elif volatile_field == "trace_id":
         changed_trace = "trace-two"
     elif volatile_field == "timestamps":
-        procedure = replace(
-            base_candidate.procedure,
+        record = replace(
+            base_candidate.skill,
             created_at="1999-01-01T00:00:00",
             updated_at="2099-01-01T00:00:00",
         )
-        changed_candidate = replace(base_candidate, procedure=procedure)
+        changed_candidate = replace(base_candidate, skill=record)
     elif volatile_field == "prompt":
         changed_config["prompt"] = "an unrelated user prompt"
     elif volatile_field == "raw_sha":
@@ -716,7 +716,7 @@ def test_context_renderer_compose_preserves_rendered_subset_and_sparse_ranks():
     candidates = [
         _renderer_candidate(
             name=f"compose-{rank}",
-            procedure_id=f"compose-{rank}",
+            skill_id=f"compose-{rank}",
             source_path=f"/stored/compose-{rank}/SKILL.md",
             body=f"# Compose {rank}\n\nContent {rank}.\n",
             headings=(f"Compose {rank}",),
@@ -777,7 +777,7 @@ def test_run_hook_uses_skill_context_request_for_query_and_user_id(tmp_path):
         "---\n"
         "# Recorded Skill\n\nUse request boundaries for retrieval.\n",
     )
-    procedure = load_skill(root, trust_state="trusted")
+    record = load_skill(root, trust_state="trusted")
 
     class RecordingManager:
         def __init__(self):
@@ -791,7 +791,7 @@ def test_run_hook_uses_skill_context_request_for_query_and_user_id(tmp_path):
                     "top_k": top_k,
                 }
             )
-            return [SearchResult(procedure=procedure, score=0.9)]
+            return [SearchResult(skill=record, score=0.9)]
 
         def get_skill(self, id_or_name, include_content=True):
             del id_or_name, include_content
@@ -830,7 +830,7 @@ def test_skill_context_selector_filters_dedupes_and_ranks_candidates(tmp_path):
         "---\n"
         "# Selector Skill\n\nselector policy split commits\n",
     )
-    procedure = load_skill(root, trust_state="trusted")
+    record = load_skill(root, trust_state="trusted")
 
     class SearchManager:
         def __init__(self):
@@ -846,9 +846,9 @@ def test_skill_context_selector_filters_dedupes_and_ranks_candidates(tmp_path):
                 }
             )
             return [
-                SearchResult(procedure=procedure, score=0.3),
-                SearchResult(procedure=procedure, score=0.8),
-                SearchResult(procedure=procedure, score=0.1),
+                SearchResult(skill=record, score=0.3),
+                SearchResult(skill=record, score=0.8),
+                SearchResult(skill=record, score=0.1),
             ]
 
         def get_skill(self, id_or_name, include_content=True):
@@ -881,7 +881,7 @@ def test_skill_context_selector_filters_dedupes_and_ranks_candidates(tmp_path):
     candidates, warnings = SkillContextSelector(config).select(manager, request)
 
     assert [candidate.score for candidate in candidates] == [0.8]
-    assert candidates[0].procedure.id == procedure.id
+    assert candidates[0].skill.id == record.id
     assert warnings == ["filtered_or_deduped_candidates"]
     assert manager.calls == [
         {
@@ -900,7 +900,7 @@ def test_default_catalog_discloses_only_mcp_skill_reference(tmp_path):
         tmp_path,
         body=f"# Commit Craft\n\n{body_secret}\n",
     )
-    procedure = manager.list_skills()[0]
+    record = manager.list_skills()[0]
     config_path = _catalog_config_path(tmp_path)
 
     output = run_hook(
@@ -917,33 +917,32 @@ def test_default_catalog_discloses_only_mcp_skill_reference(tmp_path):
     assert context.count('For trust_mode="data"') == 1
     assert context.count("mcp__memflow__read_skill") == 1
     assert '<skill trust_mode="instruction">' in context
-    assert f"<id>{procedure.id}</id>" in context
+    assert f"<id>{record.id}</id>" in context
     assert "<name>commit-craft</name>" in context
     assert (
         "<description>Split code changes into coherent commits.</description>"
         in context
     )
     assert (
-        f'Call the MemFlow MCP read_skill tool with skill_id="{procedure.id}".'
-        in context
+        f'Call the MemFlow MCP read_skill tool with skill_id="{record.id}".' in context
     )
     assert body_secret not in context
-    assert procedure.source_path not in context
+    assert record.source_path not in context
     assert "<content" not in context
     assert "rank=" not in context
 
     audit_text = (tmp_path / "hook-audit.jsonl").read_text(encoding="utf-8")
     audit = json.loads(audit_text)
-    assert audit["selected_skills"][0]["id"] == procedure.id
+    assert audit["selected_skills"][0]["id"] == record.id
     assert "source_path" not in audit["selected_skills"][0]
     assert body_secret not in audit_text
-    assert procedure.source_path not in audit_text
+    assert record.source_path not in audit_text
 
 
 def test_catalog_escapes_descriptor_fields_and_preserves_data_trust():
     candidate = _catalog_candidate(
         name="name <&",
-        procedure_id='skill:<&"',
+        skill_id='skill:<&"',
         description='description <& "quoted"',
         trust_mode="data",
         trust_state="unknown",
@@ -968,7 +967,7 @@ def test_catalog_skips_complete_oversized_entry_without_truncation():
     )
     compact = _catalog_candidate(
         name="compact",
-        procedure_id="compact-id",
+        skill_id="compact-id",
         description="fits",
     )
     config = _renderer_config(
@@ -1006,12 +1005,12 @@ def test_explicit_legacy_renderer_keeps_inline_body(tmp_path):
 def test_catalog_enforce_dedupe_rediscloses_after_descriptor_changes(tmp_path):
     first = _catalog_candidate(
         name="changing-catalog",
-        procedure_id="stable-catalog-id",
+        skill_id="stable-catalog-id",
         description="description A",
     )
     changed = _catalog_candidate(
         name="changing-catalog",
-        procedure_id="stable-catalog-id",
+        skill_id="stable-catalog-id",
         description="description B",
     )
     config_path = _catalog_config_path(
@@ -1230,14 +1229,14 @@ def test_full_search_results_do_not_hydrate_skills(tmp_path):
         "---\n"
         "# Complete Skill\n\ncomplete result split commits\n",
     )
-    procedure = load_skill(root, trust_state="trusted")
+    record = load_skill(root, trust_state="trusted")
 
     class FullResultManager:
         get_skill_calls = 0
 
         def search_skills(self, query, user_id=None, top_k=5):
             del query, user_id, top_k
-            return [SearchResult(procedure=procedure, score=0.9)]
+            return [SearchResult(skill=record, score=0.9)]
 
         def get_skill(self, id_or_name, include_content=True):
             del id_or_name, include_content
@@ -1268,7 +1267,7 @@ def test_run_hook_does_not_parse_frontmatter_on_prompt_path(monkeypatch, tmp_pat
         "---\n"
         "# No Prompt Parse\n\nPINEAPPLE_MARKER survives render.\n",
     )
-    procedure = load_skill(root, trust_state="trusted")
+    record = load_skill(root, trust_state="trusted")
 
     def fail_if_parsed(_text):
         raise AssertionError("prompt path must not parse skill frontmatter")
@@ -1288,7 +1287,7 @@ def test_run_hook_does_not_parse_frontmatter_on_prompt_path(monkeypatch, tmp_pat
     class IndexedOnlyManager:
         def search_skills(self, query, user_id=None, top_k=5):
             del query, user_id, top_k
-            return [SearchResult(procedure=procedure, score=0.9)]
+            return [SearchResult(skill=record, score=0.9)]
 
         def get_skill(self, id_or_name, include_content=True):
             del id_or_name, include_content
@@ -1315,11 +1314,11 @@ def test_run_hook_retrieval_only_manager_avoids_indexing_and_sync(tmp_path):
         "---\n"
         "# Hydrated Skill\n\nretrieval only PINEAPPLE_MARKER\n",
     )
-    procedure = load_skill(root, trust_state="trusted")
-    partial = Procedure(
-        title=procedure.title,
+    record = load_skill(root, trust_state="trusted")
+    partial = SkillRecord(
+        title=record.title,
         content="",
-        id=procedure.id,
+        id=record.id,
         kind="skill",
         metadata={},
     )
@@ -1332,13 +1331,13 @@ def test_run_hook_retrieval_only_manager_avoids_indexing_and_sync(tmp_path):
         def search_skills(self, query, user_id=None, top_k=5):
             del query, user_id, top_k
             self.search_calls += 1
-            return [SearchResult(procedure=partial, score=0.9)]
+            return [SearchResult(skill=partial, score=0.9)]
 
         def get_skill(self, id_or_name, include_content=True):
-            assert id_or_name == procedure.id
+            assert id_or_name == record.id
             assert include_content is True
             self.get_skill_calls += 1
-            return procedure
+            return record
 
         def add_skill(self, *args, **kwargs):
             del args, kwargs
@@ -1904,8 +1903,8 @@ def test_hook_records_valid_update_and_invalidation_in_one_state_mutation(
 def test_pathless_enforce_records_each_a_b_a_transition_in_one_identity_slot(
     tmp_path,
 ):
-    procedure_id = "pathless-hook-skill"
-    identity = f"id:{procedure_id}"
+    skill_id = "pathless-hook-skill"
+    identity = f"id:{skill_id}"
     config_path = _config_path(
         tmp_path,
         claude={
@@ -1918,7 +1917,7 @@ def test_pathless_enforce_records_each_a_b_a_transition_in_one_identity_slot(
     candidates = [
         _renderer_candidate(
             name="pathless-hook-skill",
-            procedure_id=procedure_id,
+            skill_id=skill_id,
             source_path=None,
             metadata_source_path=None,
             body=f"# Pathless Hook Skill\n\nPayload {payload}.\n",
@@ -2007,13 +2006,13 @@ def test_enforce_filters_completed_baseline_without_reallocating_budget(tmp_path
         trace_id="budget-counterfactual",
     )
 
-    assert [skill.candidate.procedure.title for skill in baseline.skills] == [
+    assert [skill.candidate.skill.title for skill in baseline.skills] == [
         "budget-reused",
         "budget-retained",
     ]
     assert baseline.skills[1].rank == 2
     assert 'truncated="true"' in baseline.skills[1].xml
-    assert [skill.candidate.procedure.title for skill in counterfactual.skills] == [
+    assert [skill.candidate.skill.title for skill in counterfactual.skills] == [
         "budget-retained",
         "budget-lower",
     ]
@@ -2575,7 +2574,7 @@ def test_read_cache_follows_later_actual_catalog_disclosures(
     store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
     candidates = [
         _catalog_candidate(
-            name="probe", procedure_id="skill:probe", description=description
+            name="probe", skill_id="skill:probe", description=description
         )
         for description in ["first version", "second version", "unaudited version"]
     ]
@@ -2625,7 +2624,7 @@ def test_failed_read_preserves_history_and_rediscloses_catalog(
 ):
     config_path = _read_tracking_config(tmp_path, rollout="enforce")
     manager = _StaticSkillManager(
-        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+        [_catalog_candidate(name="probe", skill_id="skill:probe")]
     )
     assert run_hook(
         _hook_input("first"), config_path=config_path, manager_factory=lambda _: manager
@@ -2897,7 +2896,7 @@ def test_failed_reread_remains_in_compaction_guidance(
 ):
     config_path = _read_tracking_config(tmp_path, rollout=rollout)
     manager = _StaticSkillManager(
-        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+        [_catalog_candidate(name="probe", skill_id="skill:probe")]
     )
     run_hook(
         _hook_input("first"), config_path=config_path, manager_factory=lambda _: manager
@@ -2938,12 +2937,8 @@ def test_compaction_preserves_latest_catalog_fingerprint_across_repeated_reminde
 ):
     config_path = _read_tracking_config(tmp_path, rollout="enforce")
     store = claude_session_state_module.ClaudeSessionStateStore(tmp_path / "state")
-    first = _catalog_candidate(
-        name="probe", procedure_id="skill:probe", description="f1"
-    )
-    second = _catalog_candidate(
-        name="probe", procedure_id="skill:probe", description="f2"
-    )
+    first = _catalog_candidate(name="probe", skill_id="skill:probe", description="f1")
+    second = _catalog_candidate(name="probe", skill_id="skill:probe", description="f2")
     assert run_hook(
         _hook_input("first"),
         config_path=config_path,
@@ -2981,9 +2976,7 @@ def test_compaction_preserves_latest_catalog_fingerprint_across_repeated_reminde
             )
             == ""
         )
-    third = _catalog_candidate(
-        name="probe", procedure_id="skill:probe", description="f3"
-    )
+    third = _catalog_candidate(name="probe", skill_id="skill:probe", description="f3")
     assert run_hook(
         _hook_input("new version"),
         config_path=config_path,
@@ -3007,7 +3000,7 @@ def test_reminder_without_fingerprint_allows_first_catalog_then_suppresses_uncha
         is None
     )
     manager = _StaticSkillManager(
-        [_catalog_candidate(name="probe", procedure_id="skill:probe")]
+        [_catalog_candidate(name="probe", skill_id="skill:probe")]
     )
     assert run_hook(
         _hook_input("first catalog"),
@@ -3058,7 +3051,7 @@ def test_compaction_discloses_only_included_ids_and_later_offers_omitted_catalog
         _hook_input("omitted catalog"),
         config_path=config_path,
         manager_factory=lambda _: _StaticSkillManager(
-            [_catalog_candidate(name="probe", procedure_id=omitted)]
+            [_catalog_candidate(name="probe", skill_id=omitted)]
         ),
     )
 

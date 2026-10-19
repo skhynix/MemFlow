@@ -21,7 +21,7 @@ from benchmark.skill_reason_bench.adapter import (
     SKILL_REASON_CONTENT_MAX_CHARS,
     normalize_skill_reason_record,
     seed_skill_reason_corpus,
-    skill_record_to_procedure,
+    skill_reason_record_to_skill,
     truncate_skill_reason_content,
 )
 from benchmark.skill_reason_bench.evaluation import (
@@ -45,17 +45,17 @@ def test_search_text_keeps_name_description_and_body() -> None:
     }
 
     record = normalize_skill_reason_record(raw)
-    procedure = skill_record_to_procedure(record, user_id="benchmark")
-    text = skill_search_text(procedure)
+    skill = skill_reason_record_to_skill(record, user_id="benchmark")
+    text = skill_search_text(skill)
 
-    assert procedure.kind == "skill"
+    assert skill.kind == "skill"
     assert record.content.startswith(raw["description"])
     assert "Run the bundled structured review helper." in record.content
     assert raw["description"] in text
     assert "autoreview" in text
     # Source metadata is preserved verbatim for downstream utility analysis.
-    assert procedure.metadata["skill"]["stars"] == 380125
-    assert procedure.metadata["skill"]["github_url"] == raw["github_url"]
+    assert skill.metadata["skill"]["stars"] == 380125
+    assert skill.metadata["skill"]["github_url"] == raw["github_url"]
 
 
 def test_content_cap_truncates_to_official_budget() -> None:
@@ -289,7 +289,7 @@ class _RecordingStore:
     corpus feeds the embedding server with ``batch_size`` honored, which the
     manager wrapper does not forward).
 
-    Added procedures land in ``existing_ids`` so the seeder's post-seeding
+    Added skills land in ``existing_ids`` so the seeder's post-seeding
     completeness verify (which re-lists the store) sees them as present by
     default; ``drop_on_store`` simulates a backend that silently fails to
     persist some ids, so the verify reports them as missing.
@@ -313,7 +313,7 @@ class _RecordingStore:
 
     def list(self, user_id: str | None = None):
         self.list_called = True
-        raise AssertionError("seed must not fetch full procedure payloads via list()")
+        raise AssertionError("seed must not fetch full skill payloads via list()")
 
     def list_ids(self, user_id: str | None = None) -> list[str]:
         self.list_ids_calls += 1
@@ -328,26 +328,26 @@ class _RecordingStore:
     def delete(self, id):  # pragma: no cover - per-id path must not be used
         raise AssertionError("seed must not delete one id at a time")
 
-    def _store(self, procs: list) -> int:
-        self.added.extend(procs)
-        for proc in procs:
-            if proc.id in self.drop_on_store:
+    def _store(self, skills: list) -> int:
+        self.added.extend(skills)
+        for skill in skills:
+            if skill.id in self.drop_on_store:
                 continue
-            self.existing_ids.add(proc.id)
+            self.existing_ids.add(skill.id)
         # Like QdrantStore, report submitted ids — an accepted-but-dropped
         # upsert still counts here, which is exactly what the verify catches.
-        return len(procs)
+        return len(skills)
 
-    def add(self, procedure, batch_size: int = 10) -> int:
+    def add(self, skill, batch_size: int = 10) -> int:
         self.sync_add_calls += 1
         self.embedding_batch_sizes.append(batch_size)
-        procs = procedure if isinstance(procedure, list) else [procedure]
-        return self._store(procs)
+        skills = skill if isinstance(skill, list) else [skill]
+        return self._store(skills)
 
-    async def add_async(self, procedure, batch_size: int = 10, max_workers: int = 10):
-        procs = procedure if isinstance(procedure, list) else [procedure]
+    async def add_async(self, skill, batch_size: int = 10, max_workers: int = 10):
+        skills = skill if isinstance(skill, list) else [skill]
         self.embedding_batch_sizes.append(batch_size)
-        return self._store(procs)
+        return self._store(skills)
 
 
 class _RecordingMemFlow:
@@ -714,29 +714,33 @@ def test_binary_ir_metrics_all_miss() -> None:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end scoring assembly (sync path) + adapter retrieval semantics
+# End-to-end scoring assembly (sync/async paths) + adapter retrieval semantics
 # ---------------------------------------------------------------------------
 class _StubSearchStore:
     """Minimal MemFlow double: memflow.search(query, ...) -> SearchResult(s)."""
 
     def __init__(self, ranking_by_query: dict[str, list[str]]) -> None:
         self.ranking_by_query = ranking_by_query
-        self.search_calls: list[tuple[str, int]] = []
+        self.search_calls: list[tuple[str | list[str], int]] = []
 
     def search(self, query, user_id=None, top_k=5, kind="skill"):
         self.search_calls.append((query, top_k))
-        from memflow.models import Procedure, SearchResult
+        from memflow.models import SearchResult, SkillRecord
 
-        ranked = self.ranking_by_query.get(query, [])[:top_k]
-        return [
-            SearchResult(
-                procedure=Procedure(
-                    id=sid, title=sid, content="", category="general", tags=[]
-                ),
-                score=1.0 / (rank + 1),
-            )
-            for rank, sid in enumerate(ranked)
+        queries = query if isinstance(query, list) else [query]
+        results = [
+            [
+                SearchResult(
+                    skill=SkillRecord(
+                        id=sid, title=sid, content="", category="general", tags=[]
+                    ),
+                    score=1.0 / (rank + 1),
+                )
+                for rank, sid in enumerate(self.ranking_by_query.get(text, [])[:top_k])
+            ]
+            for text in queries
         ]
+        return results if isinstance(query, list) else results[0]
 
 
 def _query(qid: str, text: str, gold: list[str], domain: str):
@@ -751,7 +755,10 @@ def _query(qid: str, text: str, gold: list[str], domain: str):
     )
 
 
-def test_adapter_retrieve_fetches_extra_and_excludes() -> None:
+@pytest.mark.parametrize(
+    "method", ["retrieve", "retrieve_async", "retrieve_batch", "retrieve_batch_async"]
+)
+def test_adapter_retrieve_fetches_extra_and_excludes(method) -> None:
     from benchmark.skill_reason_bench.adapter import MemFlowSkillReasonAdapter
 
     store = _StubSearchStore({"q": ["excluded", "a", "b", "c", "d"]})
@@ -765,16 +772,29 @@ def test_adapter_retrieve_fetches_extra_and_excludes() -> None:
         corpus_size=5,
         backend="test",
     )
-    results = adapter.retrieve("q", k=2, exclude_procedure_ids={"excluded"})
+    retrieve = getattr(adapter, method)
+    if "batch" in method:
+        results = retrieve([("q", {"excluded"})], k=2)
+    else:
+        results = retrieve("q", k=2, exclude_skill_ids={"excluded"})
+    if method.endswith("_async"):
+        results = asyncio.run(results)
+    if "batch" in method:
+        results = results[0]
 
     # The excluded id consumed a fetch slot: fetch_k = k + len(excluded) = 3.
-    assert store.search_calls == [("q", 3)]
-    assert [r.procedure_id for r in results] == ["a", "b"]
+    assert store.search_calls == [(["q"] if method == "retrieve_batch" else "q", 3)]
+    assert [r.skill_id for r in results] == ["a", "b"]
 
 
-def test_evaluate_assembles_overall_official_and_domain_metrics(tmp_path) -> None:
+@pytest.mark.parametrize("use_async", [False, True])
+def test_evaluate_assembles_overall_official_and_domain_metrics(
+    tmp_path, use_async
+) -> None:
+    from benchmark.skill_reason_bench.adapter import MemFlowSkillReasonAdapter
     from benchmark.skill_reason_bench.evaluation import (
         evaluate_skill_reason_queries,
+        evaluate_skill_reason_queries_async,
         write_official_predictions_jsonl,
     )
 
@@ -791,34 +811,35 @@ def test_evaluate_assembles_overall_official_and_domain_metrics(tmp_path) -> Non
         }
     )
 
-    class _System:
-        def retrieve_batch(self, queries, k=5):
-            # Mimic the adapter: SearchResult -> RetrievedSkill, which is what
-            # _assemble_results consumes.
-            from benchmark.skill_reason_bench.adapter import RetrievedSkill
-
-            out = []
-            for q, _ in queries:
-                out.append(
-                    [
-                        RetrievedSkill(
-                            procedure_id=r.procedure.id,
-                            title=r.procedure.title,
-                            category=r.procedure.category,
-                            tags=list(r.procedure.tags),
-                            score=r.score,
-                        )
-                        for r in store.search(q, top_k=k)
-                    ]
-                )
-            return out
-
-    result = evaluate_skill_reason_queries(
-        retrieval_system=_System(),  # type: ignore[arg-type]
+    adapter = MemFlowSkillReasonAdapter(
+        memflow=store,  # type: ignore[arg-type]
+        user_id="bench",
+        corpus_size=5,
+        backend="test",
+    )
+    evaluate = (
+        evaluate_skill_reason_queries_async
+        if use_async
+        else evaluate_skill_reason_queries
+    )
+    result = evaluate(
+        retrieval_system=adapter,
         queries=queries,
         k_values=[1, 3],
         top_k=3,
     )
+    if use_async:
+        result = asyncio.run(result)
+
+    assert set(result.query_results[0]["retrieved"][0]) == {
+        "rank",
+        "procedure_id",
+        "title",
+        "category",
+        "tags",
+        "score",
+        "relevant",
+    }
 
     overall = result.overall_metrics
     assert overall["num_queries"] == 3

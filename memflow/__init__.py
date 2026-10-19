@@ -7,9 +7,8 @@ MemFlow — skill retrieval and injection for coding agents.
 
 from memflow.manager import MemFlow
 from memflow.models import (
-    Procedure,
     SearchResult,
-    procedure_search_text,
+    SkillRecord,
     skill_search_text,
 )
 from memflow.reranker import (
@@ -38,9 +37,8 @@ __all__ = [
     # Core
     "MemFlow",
     # Models
-    "Procedure",
+    "SkillRecord",
     "SearchResult",
-    "procedure_search_text",
     "skill_search_text",
     # Skill loading
     "parse_skill_frontmatter",

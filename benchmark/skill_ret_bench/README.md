@@ -7,7 +7,7 @@ This directory provides a benchmark harness that evaluates **MemFlow retrieval**
 The SkillRet benchmark flow:
 
 1. Load skill corpus from JSONL files
-2. Ingest all skills into MemFlow using direct `Procedure` ingestion (`memflow.add(procedure=...)`)
+2. Ingest all skills into MemFlow using direct `SkillRecord` ingestion (`memflow.add(skill=...)`)
 3. Run retrieval using `MemFlow.search()`
 4. Evaluate retrieved rankings against gold relevance labels
 5. Print a console summary and save a JSON results file
@@ -107,7 +107,7 @@ uv run benchmark/skill_ret_bench/run_skill_ret_bench.py \
 - `--results-dir`: Directory for results (default: "results")
 - `--results-filename`: Custom filename for results
 - `--seed-only`: Only seed corpus, skip evaluation
-- `--clear-existing`: Clear existing procedures before seeding
+- `--clear-existing`: Clear existing skills before seeding
 - `--max-queries`: Limit number of queries for testing (smoke test)
 
 ## Results JSON

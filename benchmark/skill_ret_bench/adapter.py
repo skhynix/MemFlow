@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from memflow import MemFlow, Procedure
+from memflow import MemFlow, SkillRecord
 
 SKILL_RET_CORPUS_SOURCE = "SkillRet"
 
@@ -93,7 +93,7 @@ class CorpusSeedStats:
 class RetrievedSkill:
     """A retrieved skill from MemFlow search."""
 
-    procedure_id: str
+    skill_id: str
     title: str
     category: str
     score: float
@@ -191,18 +191,18 @@ def iter_skill_ret_records(path: str | Path) -> Iterator[SkillRetRecord]:
         yield normalize_skill_ret_record(raw)
 
 
-def skill_record_to_procedure(
+def skill_ret_record_to_skill(
     record: SkillRetRecord | dict[str, Any], user_id: str
-) -> Procedure:
-    """Convert a SkillRet corpus record into a MemFlow Procedure.
+) -> SkillRecord:
+    """Convert a SkillRet corpus record into a MemFlow SkillRecord.
 
-    All SkillRet metadata is preserved in Procedure.metadata['skill']
-    for storage in the vector store's payload/JSONB column and inclusion in embeddings.
+    All SkillRet metadata is preserved in SkillRecord.metadata['skill']
+    for storage in the Qdrant payload and inclusion in embeddings.
     """
     normalized = (
         normalize_skill_ret_record(record) if isinstance(record, dict) else record
     )
-    return Procedure(
+    return SkillRecord(
         id=normalized.id,
         title=normalized.title,
         content=normalized.content,
@@ -221,8 +221,8 @@ def _collect_corpus_ids(corpus_path: str | Path) -> set[str]:
     return {record.id for record in iter_skill_ret_records(corpus_path) if record.id}
 
 
-def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
-    """Collect all existing procedure IDs from MemFlow store.
+def _collect_existing_skill_ids(memflow: MemFlow, user_id: str) -> set[str]:
+    """Collect all existing skill IDs from MemFlow store.
 
     Uses ``list_ids`` instead of ``list`` so id comparison avoids full
     documents where the backend supports id-only listing (Qdrant).
@@ -231,7 +231,7 @@ def _collect_existing_procedure_ids(memflow: MemFlow, user_id: str) -> set[str]:
         return {pid for pid in memflow.store.list_ids(user_id=user_id) if pid}
     except Exception as exc:
         raise RuntimeError(
-            "Failed to list existing procedures before SkillRet corpus reuse for "
+            "Failed to list existing skills before SkillRet corpus reuse for "
             f"user_id={user_id!r}; refusing to seed because duplicate corpus IDs "
             "could be created. Resolve the list error before rerunning; use "
             "--clear-existing only for an intentional fresh reseed."
@@ -253,10 +253,10 @@ async def seed_skill_ret_corpus(
 
     Args:
         memflow: MemFlow instance
-        user_id: User ID for procedures
+        user_id: User ID for skills
         corpus_path: Path to JSONL corpus file
-        clear_existing: Whether to clear existing procedures first
-        batch_size: Number of procedures to add in each batch
+        clear_existing: Whether to clear existing skills first
+        batch_size: Number of skills to add in each batch
         max_records: Maximum number of records to seed (default: all)
         max_workers: Max concurrent embedding/upsert requests (async mode only)
         use_sync: Use synchronous ``memflow.add`` instead of ``memflow.add_async``
@@ -284,26 +284,26 @@ async def seed_skill_ret_corpus(
 
     existing_ids: set[str] = set()
     if clear_existing:
-        print("Clearing existing SkillRet procedures...")
+        print("Clearing existing SkillRet skills...")
         corpus_ids = _collect_corpus_ids(corpus_path)
-        existing = _collect_existing_procedure_ids(memflow, user_id=user_id)
+        existing = _collect_existing_skill_ids(memflow, user_id=user_id)
         to_delete = sorted(corpus_ids & existing)
-        print(f"  Clearing {len(to_delete)} existing procedures...")
+        print(f"  Clearing {len(to_delete)} existing skills...")
         # delete_many propagates errors: a failed clear aborts here instead
         # of seeding onto a half-cleared store. The delete is idempotent, so
         # rerunning --clear-existing recovers from a mid-clear failure.
         stats.num_deleted = memflow.store.delete_many(to_delete)
-        print(f"  Deleted {stats.num_deleted} existing procedures")
+        print(f"  Deleted {stats.num_deleted} existing skills")
     else:
-        existing_ids = _collect_existing_procedure_ids(memflow, user_id=user_id)
-        print(f"Reusing existing procedures by ID ({len(existing_ids)} available)")
+        existing_ids = _collect_existing_skill_ids(memflow, user_id=user_id)
+        print(f"Reusing existing skills by ID ({len(existing_ids)} available)")
 
     categories: Counter[str] = Counter()
     max_tokens = _resolve_max_text_tokens(max_text_tokens)
-    print("Streaming procedures from JSONL...")
+    print("Streaming skills from JSONL...")
 
-    # Collect procedures to seed
-    procedures_to_seed: list[Procedure] = []
+    # Collect skills to seed
+    skills_to_seed: list[SkillRecord] = []
     for record in iter_skill_ret_records(corpus_path):
         stats.num_records += 1
         if not record.id:
@@ -319,55 +319,53 @@ async def seed_skill_ret_corpus(
         if was_truncated:
             stats.num_truncated += 1
 
-        procedure = skill_record_to_procedure(record, user_id=user_id)
-        procedures_to_seed.append(procedure)
+        skill = skill_ret_record_to_skill(record, user_id=user_id)
+        skills_to_seed.append(skill)
 
         # Add in batches
-        if len(procedures_to_seed) >= batch_size:
+        if len(skills_to_seed) >= batch_size:
             # Trim to remaining max_records budget to avoid over-seeding.
             if max_records is not None:
                 remaining = max_records - stats.num_seeded
                 if remaining <= 0:
                     break
-                if len(procedures_to_seed) > remaining:
-                    stats.num_skipped += len(procedures_to_seed) - remaining
-                    procedures_to_seed = procedures_to_seed[:remaining]
+                if len(skills_to_seed) > remaining:
+                    stats.num_skipped += len(skills_to_seed) - remaining
+                    skills_to_seed = skills_to_seed[:remaining]
             result = (
-                memflow.add(procedure=procedures_to_seed)
+                memflow.add(skill=skills_to_seed)
                 if use_sync
                 else await memflow.add_async(
-                    procedure=procedures_to_seed, max_workers=max_workers
+                    skill=skills_to_seed, max_workers=max_workers
                 )
             )
             stats.num_seeded += result.get("num_seeded", 0)
             stats.num_skipped += result.get("num_skipped", 0)
             print(
-                f"\r  Seeded {stats.num_seeded} procedures ({stats.num_reused} reused)",
+                f"\r  Seeded {stats.num_seeded} skills ({stats.num_reused} reused)",
                 end="",
                 flush=True,
             )
-            procedures_to_seed = []
+            skills_to_seed = []
 
         # Check max_records limit against total seeded so far
         if max_records is not None and stats.num_seeded >= max_records:
             break
 
-    # Add remaining procedures
-    if procedures_to_seed:
+    # Add remaining skills
+    if skills_to_seed:
         # Trim to remaining max_records budget to avoid over-seeding.
         if max_records is not None:
             remaining = max_records - stats.num_seeded
             if remaining <= 0:
                 pass
-            elif len(procedures_to_seed) > remaining:
-                stats.num_skipped += len(procedures_to_seed) - remaining
-                procedures_to_seed = procedures_to_seed[:remaining]
+            elif len(skills_to_seed) > remaining:
+                stats.num_skipped += len(skills_to_seed) - remaining
+                skills_to_seed = skills_to_seed[:remaining]
         result = (
-            memflow.add(procedure=procedures_to_seed)
+            memflow.add(skill=skills_to_seed)
             if use_sync
-            else await memflow.add_async(
-                procedure=procedures_to_seed, max_workers=max_workers
-            )
+            else await memflow.add_async(skill=skills_to_seed, max_workers=max_workers)
         )
         stats.num_seeded += result.get("num_seeded", 0)
         stats.num_skipped += result.get("num_skipped", 0)
@@ -441,35 +439,35 @@ class MemFlowSkillRetAdapter:
         self,
         query: str,
         k: int = 5,
-        exclude_procedure_ids: set[str] | None = None,
+        exclude_skill_ids: set[str] | None = None,
     ) -> list[RetrievedSkill]:
         """Retrieve results for a single query.
 
         Args:
             query: Search query string
             k: Number of results to return
-            exclude_procedure_ids: Set of procedure IDs to exclude from results
+            exclude_skill_ids: Set of skill IDs to exclude from results
 
         Returns:
             List of RetrievedSkill objects
         """
-        excluded = exclude_procedure_ids or set()
+        excluded = exclude_skill_ids or set()
         fetch_k = k + len(excluded)
         search_results = self._search(
             query, user_id=self.user_id, top_k=fetch_k, kind="skill"
         )
         retrieved: list[RetrievedSkill] = []
         for result in search_results:
-            procedure = result.procedure
-            if procedure.id in excluded:
+            record = result.skill
+            if record.id in excluded:
                 continue
             score = float(result.score) if result.score is not None else 0.0
             retrieved.append(
                 RetrievedSkill(
-                    procedure_id=procedure.id,
-                    title=procedure.title,
-                    category=procedure.category,
-                    tags=list(procedure.tags),
+                    skill_id=record.id,
+                    title=record.title,
+                    category=record.category,
+                    tags=list(record.tags),
                     score=score,
                 )
             )
@@ -483,7 +481,7 @@ class MemFlowSkillRetAdapter:
         """Retrieve results for multiple queries using batch operations.
 
         Args:
-            queries: List of (query_string, exclude_procedure_ids) tuples
+            queries: List of (query_string, exclude_skill_ids) tuples
             k: Number of results to return per query
 
         Returns:
@@ -496,7 +494,7 @@ class MemFlowSkillRetAdapter:
         # per-query retrieve() instead of the list-batch path.
         if self.search_fn is not None:
             return [
-                self.retrieve(query, k=k, exclude_procedure_ids=excl)
+                self.retrieve(query, k=k, exclude_skill_ids=excl)
                 for query, excl in queries
             ]
 
@@ -515,14 +513,14 @@ class MemFlowSkillRetAdapter:
             excluded = exclude_map.get(i, set())
             filtered = []
             for result in results:
-                if result.procedure.id not in excluded:
+                if result.skill.id not in excluded:
                     score = float(result.score) if result.score is not None else 0.0
                     filtered.append(
                         RetrievedSkill(
-                            procedure_id=result.procedure.id,
-                            title=result.procedure.title,
-                            category=result.procedure.category,
-                            tags=list(result.procedure.tags),
+                            skill_id=result.skill.id,
+                            title=result.skill.title,
+                            category=result.skill.category,
+                            tags=list(result.skill.tags),
                             score=score,
                         )
                     )
@@ -534,13 +532,13 @@ class MemFlowSkillRetAdapter:
         self,
         query: str,
         k: int = 5,
-        exclude_procedure_ids: set[str] | None = None,
+        exclude_skill_ids: set[str] | None = None,
     ) -> list[RetrievedSkill]:
         """Retrieve results for a single query asynchronously."""
         import asyncio
 
         return await asyncio.to_thread(
-            self.retrieve, query, k=k, exclude_procedure_ids=exclude_procedure_ids
+            self.retrieve, query, k=k, exclude_skill_ids=exclude_skill_ids
         )
 
     async def retrieve_batch_async(
@@ -552,7 +550,7 @@ class MemFlowSkillRetAdapter:
         """Retrieve results for multiple queries in parallel.
 
         Args:
-            queries: List of (query_string, exclude_procedure_ids) tuples
+            queries: List of (query_string, exclude_skill_ids) tuples
             k: Number of results to return per query
             max_concurrency: Maximum concurrent requests
 
@@ -565,14 +563,14 @@ class MemFlowSkillRetAdapter:
         semaphore = Semaphore(max_concurrency)
 
         async def retrieve_single(
-            query: str, exclude_procedure_ids: set[str]
+            query: str, exclude_skill_ids: set[str]
         ) -> list[RetrievedSkill]:
             async with semaphore:
                 return await asyncio.to_thread(
                     self.retrieve,
                     query,
                     k=k,
-                    exclude_procedure_ids=exclude_procedure_ids,
+                    exclude_skill_ids=exclude_skill_ids,
                 )
 
         tasks = [retrieve_single(query, exclude_ids) for query, exclude_ids in queries]

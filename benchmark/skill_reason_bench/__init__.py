@@ -25,7 +25,7 @@ from .adapter import (
     SkillReasonRecord,
     iter_skill_reason_records,
     seed_skill_reason_corpus,
-    skill_record_to_procedure,
+    skill_reason_record_to_skill,
 )
 from .evaluation import (
     SkillReasonEvaluationResult,
@@ -57,6 +57,6 @@ __all__ = [
     "iter_skill_reason_records",
     "load_skill_reason_queries",
     "seed_skill_reason_corpus",
-    "skill_record_to_procedure",
+    "skill_reason_record_to_skill",
     "write_official_predictions_jsonl",
 ]

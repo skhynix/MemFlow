@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import memflow.manager as manager_module
-from memflow import MemFlow, Procedure, QdrantStore
+from memflow import MemFlow, QdrantStore, SkillRecord
 from tests.fakes import FakeSkillStore
 
 
@@ -41,11 +41,11 @@ def test_add_rejects_before_sanitation_or_io(
     target_name, method, invalid, batch, bare_store, monkeypatch
 ):
     bad = (
-        Procedure(title="bad", content="body", kind=invalid)
+        SkillRecord(title="bad", content="body", kind=invalid)
         if isinstance(invalid, str)
         else invalid
     )
-    good = Procedure(title="good", content="nul\0body")
+    good = SkillRecord(title="good", content="nul\0body")
     value = [good, bad] if batch else bad
     sanitize = MagicMock(side_effect=AssertionError("sanitation started"))
     monkeypatch.setattr(bare_store, "_sanitize_content", sanitize)
@@ -101,7 +101,7 @@ def test_snapshot_sanitation_preserves_original(
         if raw_metadata
         else {}
     )
-    record = Procedure(
+    record = SkillRecord(
         title="original",
         content=body,
         metadata=metadata,
@@ -155,7 +155,7 @@ def test_search_rejects_before_routing(target_name, method, kind, query, bare_st
 
 def test_sync_non_skill_rejected_before_source_access(monkeypatch):
     store = FakeSkillStore()
-    record = Procedure(
+    record = SkillRecord(
         id="old",
         title="old",
         content="unchanged",
@@ -180,7 +180,7 @@ def test_sync_non_skill_rejected_before_source_access(monkeypatch):
 @pytest.mark.parametrize("payload", [{}, {"kind": "procedure"}, {"kind": "episodic"}])
 def test_decode_keeps_existing_record_kind(payload, bare_store):
     point = SimpleNamespace(id="point-id", payload={"id": "original-id", **payload})
-    record = bare_store._point_to_procedure(point)
+    record = bare_store._point_to_skill(point)
     assert record.id == "original-id"
     assert record.kind == payload.get("kind", "skill")
 
@@ -238,6 +238,8 @@ def test_missing_store_and_retired_arguments_fail_without_connections(monkeypatc
     manager = MemFlow(store=FakeSkillStore(), use_env=False)
     with pytest.raises(TypeError):
         manager.add(messages="extract this")
+    with pytest.raises(TypeError):
+        manager.add(procedure=SkillRecord(title="old keyword", content="body"))
     with pytest.raises(TypeError):
         asyncio.run(manager.add_async([], "old-user-id"))
     qdrant.assert_not_called()

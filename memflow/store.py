@@ -76,7 +76,7 @@ def env_flag(name: str, default: str = "off") -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "on", "true", "yes")
 
 
-from memflow.models import Procedure, SearchResult, procedure_search_text  # noqa: E402
+from memflow.models import SearchResult, SkillRecord, skill_search_text  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +103,11 @@ def _validate_skill_kind(kind: str | None) -> None:
         raise ValueError("only kind='skill' is supported")
 
 
-def _validate_skill_input(procedure: Procedure | list[Procedure]) -> None:
+def _validate_skill_input(skill: SkillRecord | list[SkillRecord]) -> None:
     """Validate every record before sanitation, embedding, or persistence."""
-    records = procedure if isinstance(procedure, list) else [procedure]
+    records = skill if isinstance(skill, list) else [skill]
     for record in records:
-        if not isinstance(record, Procedure):
+        if not isinstance(record, SkillRecord):
             raise TypeError("expected a skill record or list of skill records")
         _validate_skill_kind(record.kind)
 
@@ -121,7 +121,7 @@ class BaseStore(ABC):
     supports_hybrid: bool = False
 
     @abstractmethod
-    def add(self, procedure: Procedure | list[Procedure]) -> int: ...
+    def add(self, skill: SkillRecord | list[SkillRecord]) -> int: ...
 
     @abstractmethod
     def search(
@@ -133,7 +133,7 @@ class BaseStore(ABC):
     ) -> list[SearchResult] | list[list[SearchResult]]: ...
 
     @abstractmethod
-    def get(self, id: str) -> Procedure | None: ...
+    def get(self, id: str) -> SkillRecord | None: ...
 
     # Bulk callers should prefer ``delete_many``; the list form of ``delete``
     # is legacy and backends may implement it as per-id deletions.
@@ -141,7 +141,7 @@ class BaseStore(ABC):
     def delete(self, id: str | list[str]) -> int: ...
 
     @abstractmethod
-    def list(self, user_id: str | None = None) -> list[Procedure]: ...
+    def list(self, user_id: str | None = None) -> list[SkillRecord]: ...
 
     # Lightweight bulk helpers. Defaults inherit the cost of ``list``/
     # ``delete`` (including their error handling), so correctness holds on
@@ -149,11 +149,11 @@ class BaseStore(ABC):
     # override these with native primitives (QdrantStore).
 
     def count(self, user_id: str | None = None) -> int:
-        """Count stored procedures, optionally filtered by user_id."""
+        """Count stored records, optionally filtered by user_id."""
         return len(self.list(user_id=user_id))
 
     def list_ids(self, user_id: str | None = None) -> list[str]:
-        """List stored procedure IDs.
+        """List stored record IDs.
 
         Backends that cannot fetch ids natively build this from ``list()``,
         which transfers full payloads; see ``QdrantStore.list_ids`` for the
@@ -162,7 +162,7 @@ class BaseStore(ABC):
         return [p.id for p in self.list(user_id=user_id) if p.id]
 
     def delete_many(self, ids: list[str]) -> int:
-        """Delete many procedures by ID.
+        """Delete many records by ID.
 
         Returns the number of deletions reported by the backend. Backends
         delegating to ``delete`` report the number of IDs actually removed;
@@ -175,7 +175,7 @@ class BaseStore(ABC):
     # Async methods - only QdrantStore implements these
     async def add_async(
         self,
-        procedure: Procedure | list[Procedure],
+        skill: SkillRecord | list[SkillRecord],
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
         raise NotImplementedError("Async operations are only supported by QdrantStore")
@@ -782,7 +782,7 @@ class VectorStore(BaseStore):
         return all_embeddings
 
     @staticmethod
-    def _sanitize_content(procedure: Procedure) -> Procedure:
+    def _sanitize_content(record: SkillRecord) -> SkillRecord:
         """Strip NUL bytes from content so backend payload JSON accepts it.
 
         NUL (0x00) characters break JSON serialization. Some upstream corpora
@@ -790,23 +790,23 @@ class VectorStore(BaseStore):
         removed before storage and embedding so both paths see the same
         cleaned text.
         """
-        if "\x00" in procedure.content:
-            return replace(procedure, content=procedure.content.replace("\x00", ""))
-        return procedure
+        if "\x00" in record.content:
+            return replace(record, content=record.content.replace("\x00", ""))
+        return record
 
 
 class QdrantStore(VectorStore):
     """
-    Qdrant vector database backed store for procedural memory.
+    Qdrant vector database backed store for skill retrieval.
 
-    Qdrant vector DB implementation for procedural memory. Procedures are
+    Qdrant vector DB implementation for skill retrieval. Skills are
     stored as points with embeddings for semantic search using cosine
     similarity.
 
     Embeddings are computed via OpenAI-compatible API with hash-based fallback
     (shared logic inherited from ``VectorStore``).
 
-    Collection schema (payload fields map to Procedure attributes):
+    Collection schema (payload fields map to SkillRecord attributes):
         id: point id (UUID string)
         user_id: keyword (filterable)
         title: text
@@ -823,7 +823,7 @@ class QdrantStore(VectorStore):
     Qdrant-specific environment variables:
         QDRANT_BASE_URL              — Qdrant server URL
         QDRANT_API_KEY               — Optional API key for secured clusters
-        QDRANT_COLLECTION_NAME       — Collection name (default: procedures)
+        QDRANT_COLLECTION_NAME       — Collection name (default: memflow_skills)
         QDRANT_INDEX_TYPE            — Index type: hnsw or flat (default: hnsw)
         QDRANT_DISTANCE              — Distance metric: Cosine, Dot, or Euclid (default: Cosine)
         QDRANT_INDEX_M               — HNSW max connections per layer (default: 16)
@@ -866,7 +866,7 @@ class QdrantStore(VectorStore):
             api_key = os.getenv("QDRANT_API_KEY")
         api_key = api_key or None
         if collection_name is None:
-            collection_name = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
+            collection_name = os.getenv("QDRANT_COLLECTION_NAME", "memflow_skills")
         if index_type is None:
             index_type = os.getenv("QDRANT_INDEX_TYPE", "hnsw")
         if distance is None:
@@ -1074,16 +1074,16 @@ class QdrantStore(VectorStore):
                 f"Failed to initialize Qdrant collection: {exc}"
             ) from exc
 
-    def _to_text(self, procedure: Procedure) -> str:
-        """Convert procedure to text for embedding."""
-        return procedure_search_text(procedure)
+    def _to_text(self, record: SkillRecord) -> str:
+        """Convert a skill to text for embedding."""
+        return skill_search_text(record)
 
     # ------------------------------------------------------------------
     # CRUD operations
     # ------------------------------------------------------------------
 
-    def _point_to_procedure(self, point: Any) -> Procedure:
-        """Convert a Qdrant point to a Procedure object."""
+    def _point_to_skill(self, point: Any) -> SkillRecord:
+        """Convert a Qdrant point to a SkillRecord object."""
         payload = point.payload or {}
 
         tags = payload.get("tags", [])
@@ -1101,7 +1101,7 @@ class QdrantStore(VectorStore):
         if not isinstance(metadata, dict):
             metadata = {}
 
-        return Procedure(
+        return SkillRecord(
             id=payload.get("id", str(point.id)),
             user_id=payload.get("user_id", "default"),
             title=payload.get("title", ""),
@@ -1116,9 +1116,9 @@ class QdrantStore(VectorStore):
         )
 
     def _upsert_point(
-        self, procedure: Procedure, emb: list[float], sparse_vec: Any = None
+        self, record: SkillRecord, emb: list[float], sparse_vec: Any = None
     ) -> None:
-        """Upsert a procedure as a Qdrant point with pre-computed embedding.
+        """Upsert a skill as a Qdrant point with pre-computed embedding.
 
         The vector layout follows the collection's detected schema: named
         collections always receive the named ``dense`` vector (plus ``sparse``
@@ -1128,17 +1128,17 @@ class QdrantStore(VectorStore):
         from qdrant_client import models
 
         payload = {
-            "id": procedure.id,
-            "user_id": procedure.user_id,
-            "title": procedure.title,
-            "content": procedure.content,
-            "category": procedure.category,
-            "tags": procedure.tags,
-            "kind": procedure.kind,
-            "source_path": procedure.source_path,
-            "metadata": procedure.metadata,
-            "created_at": procedure.created_at,
-            "updated_at": procedure.updated_at,
+            "id": record.id,
+            "user_id": record.user_id,
+            "title": record.title,
+            "content": record.content,
+            "category": record.category,
+            "tags": record.tags,
+            "kind": record.kind,
+            "source_path": record.source_path,
+            "metadata": record.metadata,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
         }
 
         if self._named_schema:
@@ -1149,79 +1149,79 @@ class QdrantStore(VectorStore):
             vector = emb
 
         point = models.PointStruct(
-            id=_id_to_uuid(procedure.id), vector=vector, payload=payload
+            id=_id_to_uuid(record.id), vector=vector, payload=payload
         )
 
         self._client.upsert(collection_name=self._collection_name, points=[point])
 
     def add(
         self,
-        procedure: Procedure | list[Procedure],
+        skill: SkillRecord | list[SkillRecord],
         batch_size: int = 10,
     ) -> int:
-        """Add a procedure or procedures.
+        """Add a skill or skills.
 
         Args:
-            procedure: Single Procedure or list of Procedures
+            skill: Single SkillRecord or list of SkillRecords
             batch_size: Batch size for embedding API calls (default: 10)
 
         Returns:
-            1 for single, number of inserted procedures for batch
+            1 for single, number of inserted skills for batch
         """
-        _validate_skill_input(procedure)
-        if isinstance(procedure, list):
-            if not procedure:
+        _validate_skill_input(skill)
+        if isinstance(skill, list):
+            if not skill:
                 return 0
-            procedure = [self._sanitize_content(proc) for proc in procedure]
-            texts = [self._to_text(proc) for proc in procedure]
+            skill = [self._sanitize_content(record) for record in skill]
+            texts = [self._to_text(record) for record in skill]
             embeddings = self._compute_embs_batch(texts, batch_size=batch_size)
             sparse_vecs = (
                 self._compute_sparse_batch(texts) if self._sparse_enabled else None
             )
             num_inserted = 0
-            for i, (proc, emb) in enumerate(zip(procedure, embeddings)):
+            for i, (record, emb) in enumerate(zip(skill, embeddings)):
                 try:
                     sv = sparse_vecs[i] if sparse_vecs is not None else None
-                    self._upsert_point(proc, emb, sparse_vec=sv)
+                    self._upsert_point(record, emb, sparse_vec=sv)
                     num_inserted += 1
                 except Exception:
                     pass
             return num_inserted
         else:
-            procedure = self._sanitize_content(procedure)
-            text_content = self._to_text(procedure)
+            skill = self._sanitize_content(skill)
+            text_content = self._to_text(skill)
             emb = self._compute_emb(text_content)
             sparse_vec = (
                 self._compute_sparse(text_content) if self._sparse_enabled else None
             )
-            self._upsert_point(procedure, emb, sparse_vec=sparse_vec)
+            self._upsert_point(skill, emb, sparse_vec=sparse_vec)
             return 1
 
     async def add_async(
         self,
-        procedure: Procedure | list[Procedure],
+        skill: SkillRecord | list[SkillRecord],
         batch_size: int = 10,
         max_workers: int = 10,
     ) -> int:
-        """Add a procedure or procedures asynchronously.
+        """Add a skill or skills asynchronously.
 
         Args:
-            procedure: Single Procedure or list of Procedures
+            skill: Single SkillRecord or list of SkillRecords
             batch_size: Batch size for embedding API calls (default: 10)
             max_workers: Max concurrent embedding requests (default: 10)
 
         Returns:
-            1 for single, number of inserted procedures for batch
+            1 for single, number of inserted skills for batch
         """
-        _validate_skill_input(procedure)
+        _validate_skill_input(skill)
         import asyncio
         from asyncio import Semaphore
 
-        if isinstance(procedure, list):
-            if not procedure:
+        if isinstance(skill, list):
+            if not skill:
                 return 0
-            procedure = [self._sanitize_content(proc) for proc in procedure]
-            texts = [self._to_text(proc) for proc in procedure]
+            skill = [self._sanitize_content(record) for record in skill]
+            texts = [self._to_text(record) for record in skill]
             embeddings = await self._compute_embs_batch_async(
                 texts, batch_size, max_workers
             )
@@ -1233,29 +1233,31 @@ class QdrantStore(VectorStore):
                 sparse_vecs = None
             semaphore = Semaphore(max_workers)
 
-            async def insert_single(proc: Procedure, emb: list[float], sv: Any) -> int:
+            async def insert_single(
+                record: SkillRecord, emb: list[float], sv: Any
+            ) -> int:
                 async with semaphore:
                     try:
-                        await asyncio.to_thread(self._upsert_point, proc, emb, sv)
+                        await asyncio.to_thread(self._upsert_point, record, emb, sv)
                         return 1
                     except Exception:
                         return 0
 
             tasks = [
-                insert_single(proc, emb, sparse_vecs[i] if sparse_vecs else None)
-                for i, (proc, emb) in enumerate(zip(procedure, embeddings))
+                insert_single(record, emb, sparse_vecs[i] if sparse_vecs else None)
+                for i, (record, emb) in enumerate(zip(skill, embeddings))
             ]
             results = await asyncio.gather(*tasks)
             return sum(results)
         else:
-            procedure = self._sanitize_content(procedure)
-            text_content = self._to_text(procedure)
+            skill = self._sanitize_content(skill)
+            text_content = self._to_text(skill)
             emb = await self._compute_emb_async(text_content)
             if self._sparse_enabled:
                 sparse_vec = await asyncio.to_thread(self._compute_sparse, text_content)
             else:
                 sparse_vec = None
-            self._upsert_point(procedure, emb, sparse_vec=sparse_vec)
+            self._upsert_point(skill, emb, sparse_vec=sparse_vec)
             return 1
 
     def _search_with_emb(
@@ -1284,7 +1286,7 @@ class QdrantStore(VectorStore):
         )
 
         return [
-            SearchResult(procedure=self._point_to_procedure(p), score=float(p.score))
+            SearchResult(skill=self._point_to_skill(p), score=float(p.score))
             for p in response.points
         ]
 
@@ -1456,9 +1458,7 @@ class QdrantStore(VectorStore):
                     with_vectors=False,
                 )
                 return [
-                    SearchResult(
-                        procedure=self._point_to_procedure(p), score=float(p.score)
-                    )
+                    SearchResult(skill=self._point_to_skill(p), score=float(p.score))
                     for p in response.points
                 ]
 
@@ -1528,7 +1528,7 @@ class QdrantStore(VectorStore):
                 scores = [s / top for s in scores]
 
         return [
-            SearchResult(procedure=self._point_to_procedure(p), score=score)
+            SearchResult(skill=self._point_to_skill(p), score=score)
             for p, score in zip(response.points, scores)
         ]
 
@@ -1540,7 +1540,7 @@ class QdrantStore(VectorStore):
         kind: str = "skill",
         batch_size: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Search for procedures by semantic similarity.
+        """Search for skills by semantic similarity.
 
         Args:
             query: Single query string or list of queries
@@ -1574,7 +1574,7 @@ class QdrantStore(VectorStore):
         batch_size: int = 10,
         max_workers: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Search for procedures by semantic similarity asynchronously.
+        """Search for skills by semantic similarity asynchronously.
 
         Args:
             query: Single query string or list of queries
@@ -1615,14 +1615,14 @@ class QdrantStore(VectorStore):
         id: str | list[str],
         max_workers: int = 50,
     ) -> int:
-        """Delete a procedure or procedures asynchronously.
+        """Delete stored records asynchronously.
 
         Args:
             id: Single ID or list of IDs
             max_workers: Max concurrent operations (default: 50)
 
         Returns:
-            int: Number of procedures deleted
+            int: Number of records deleted
         """
         import asyncio
         from asyncio import Semaphore
@@ -1644,8 +1644,8 @@ class QdrantStore(VectorStore):
             result = await asyncio.to_thread(self.delete, id)
             return result
 
-    def get(self, id: str) -> Procedure | None:
-        """Get a procedure by ID."""
+    def get(self, id: str) -> SkillRecord | None:
+        """Get a stored record by ID."""
         try:
             points = self._client.retrieve(
                 collection_name=self._collection_name,
@@ -1659,16 +1659,16 @@ class QdrantStore(VectorStore):
         if not points:
             return None
 
-        return self._point_to_procedure(points[0])
+        return self._point_to_skill(points[0])
 
     def delete(
         self,
         id: str | list[str],
     ) -> int:
-        """Delete a procedure or procedures by ID.
+        """Delete stored records by ID.
 
         Returns:
-            int: Number of procedures deleted
+            int: Number of records deleted
         """
         if isinstance(id, list):
             num_deleted = 0
@@ -1692,8 +1692,8 @@ class QdrantStore(VectorStore):
             except Exception:
                 return 0
 
-    def list(self, user_id: str | None = None) -> list[Procedure]:
-        """List all procedures, optionally filtered by user_id."""
+    def list(self, user_id: str | None = None) -> list[SkillRecord]:
+        """List stored records, optionally filtered by user_id."""
         query_filter = self._build_query_filter(user_id, None)
 
         all_points = []
@@ -1713,10 +1713,10 @@ class QdrantStore(VectorStore):
                 break
             offset = next_offset
 
-        return [self._point_to_procedure(p) for p in all_points]
+        return [self._point_to_skill(p) for p in all_points]
 
     def count(self, user_id: str | None = None) -> int:
-        """Count procedures server-side without transferring payloads.
+        """Count records server-side without transferring payloads.
 
         Propagates client errors (unlike ``get``/``delete``, which swallow
         them): an unexpected count failure should surface at the caller
@@ -1730,9 +1730,9 @@ class QdrantStore(VectorStore):
         return int(result.count)
 
     def list_ids(self, user_id: str | None = None) -> list[str]:
-        """List procedure IDs via scroll, fetching only the ``id`` payload key.
+        """List record IDs via scroll, fetching only the ``id`` payload key.
 
-        Returns ``Procedure.id`` values (not Qdrant point UUIDs) so the result
+        Returns ``SkillRecord.id`` values (not Qdrant point UUIDs) so the result
         stays in the same id domain as ``get``/``delete``/``delete_many``,
         while the wire traffic stays small (no content/title/etc.). Points
         whose payload lacks an ``id`` key cannot be named in that domain and
@@ -1772,7 +1772,7 @@ class QdrantStore(VectorStore):
         return ids
 
     def delete_many(self, ids: list[str]) -> int:
-        """Delete many procedures in batched single-request deletes.
+        """Delete many records in batched single-request deletes.
 
         Unlike calling ``delete`` per id, this skips the existence check and
         sends up to ``BULK_DELETE_CHUNK`` point ids per request. Qdrant

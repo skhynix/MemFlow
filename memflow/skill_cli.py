@@ -14,7 +14,7 @@ from memflow.skill_runtime import create_skill_manager
 
 if TYPE_CHECKING:
     from memflow.manager import MemFlow
-    from memflow.models import Procedure
+    from memflow.models import SkillRecord
 
 TRUST_STATES = ("trusted", "unknown", "blocked")
 
@@ -23,20 +23,20 @@ def _stable_json(data: object) -> str:
     return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
 
-def _skill_summary(procedure: Procedure) -> dict[str, object]:
-    skill = procedure.metadata.get("skill", {})
+def _skill_summary(record: SkillRecord) -> dict[str, object]:
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
-    governance = procedure.metadata.get("governance", {})
+    governance = record.metadata.get("governance", {})
     if not isinstance(governance, dict):
         governance = {}
 
     return {
-        "id": procedure.id,
-        "name": str(skill.get("name") or procedure.title),
+        "id": record.id,
+        "name": str(skill.get("name") or record.title),
         "description": str(skill.get("description") or ""),
-        "user_id": procedure.user_id,
-        "source_path": procedure.source_path,
+        "user_id": record.user_id,
+        "source_path": record.source_path,
         "sha256": skill.get("sha256"),
         "trust_state": governance.get("trust_state"),
         "mode": governance.get("mode"),
@@ -106,8 +106,8 @@ def _run_list(
 ) -> int:
     def list_skills(manager: MemFlow) -> dict[str, object]:
         summaries = [
-            _skill_summary(procedure)
-            for procedure in manager.list_skills(
+            _skill_summary(record)
+            for record in manager.list_skills(
                 user_id=args.user_id,
                 trust_state=args.trust_state,
             )

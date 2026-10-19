@@ -14,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from memflow.skills import load_skill
 from memflow.store import (
     BaseStore,
@@ -55,11 +55,11 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
-def _skill_api_payload(procedure: Procedure, event: str, **extra: object) -> dict:
-    skill = procedure.metadata.get("skill", {})
+def _skill_api_payload(record: SkillRecord, event: str, **extra: object) -> dict:
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
-    governance = procedure.metadata.get("governance", {})
+    governance = record.metadata.get("governance", {})
     if not isinstance(governance, dict):
         governance = {}
     warnings = governance.get("warnings", [])
@@ -67,16 +67,16 @@ def _skill_api_payload(procedure: Procedure, event: str, **extra: object) -> dic
         warnings = [str(warnings)] if warnings else []
 
     payload = {
-        "id": procedure.id,
-        "title": procedure.title,
-        "kind": procedure.kind,
+        "id": record.id,
+        "title": record.title,
+        "kind": record.kind,
         "sha256": skill.get("sha256"),
         "governance": {
             "trust_state": governance.get("trust_state"),
             "mode": governance.get("mode"),
             "warnings": warnings,
         },
-        "source_path": procedure.source_path,
+        "source_path": record.source_path,
         "root_path": skill.get("root_path"),
         "event": event,
     }
@@ -93,13 +93,11 @@ def _sha256_path(path: Path) -> str:
 
 
 def _mark_stale_skill(
-    procedure: Procedure,
+    record: SkillRecord,
     warning: str,
-) -> tuple[Procedure, bool]:
+) -> tuple[SkillRecord, bool]:
     metadata = (
-        copy.deepcopy(procedure.metadata)
-        if isinstance(procedure.metadata, dict)
-        else {}
+        copy.deepcopy(record.metadata) if isinstance(record.metadata, dict) else {}
     )
     governance = metadata.setdefault("governance", {})
     if not isinstance(governance, dict):
@@ -120,8 +118,8 @@ def _mark_stale_skill(
         changed = True
 
     if not changed:
-        return procedure, False
-    return replace(procedure, metadata=metadata), True
+        return record, False
+    return replace(record, metadata=metadata), True
 
 
 def _skill_source_candidate(path: Path) -> str:
@@ -216,19 +214,19 @@ class MemFlow:
         # RRF_TOP_K (config fixed at init — per-query warnings would spam).
         self._fetch_cap_warned = False
 
-    def add(self, procedure: Procedure | list[Procedure]) -> dict:
+    def add(self, skill: SkillRecord | list[SkillRecord]) -> dict:
         """Store skill records, returning event information or batch counts."""
-        _validate_skill_input(procedure)
-        if isinstance(procedure, list):
-            total = len(procedure)
-            num_seeded = self.store.add(procedure) if procedure else 0
+        _validate_skill_input(skill)
+        if isinstance(skill, list):
+            total = len(skill)
+            num_seeded = self.store.add(skill) if skill else 0
             return {
                 "num_seeded": num_seeded,
                 "num_skipped": total - num_seeded,
                 "total": total,
             }
-        self.store.add(procedure)
-        return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
+        self.store.add(skill)
+        return {"id": skill.id, "title": skill.title, "event": "ADD"}
 
     def add_skill(
         self,
@@ -238,11 +236,11 @@ class MemFlow:
         trust_state: str | None = None,
     ) -> dict:
         """Index a skill directory or direct SKILL.md path."""
-        procedure = load_skill(
+        record = load_skill(
             path, user_id=user_id, source=source, trust_state=trust_state
         )
-        self.store.add(procedure)
-        return _skill_api_payload(procedure, "ADD_SKILL")
+        self.store.add(record)
+        return _skill_api_payload(record, "ADD_SKILL")
 
     def sync_skill(self, path_or_id: str | Path) -> dict:
         """Refresh a skill record from its canonical SKILL.md source."""
@@ -252,20 +250,20 @@ class MemFlow:
         path = Path(path_or_id).expanduser()
         if existing is None:
             resolved = _skill_source_candidate(path)
-            for proc in self.store.list():
-                if proc.kind == "skill" and proc.source_path == resolved:
-                    existing = proc
+            for record in self.store.list():
+                if record.kind == "skill" and record.source_path == resolved:
+                    existing = record
                     break
         if existing is not None:
             if not existing.source_path:
                 warning = (
                     f"Skill source path is missing for stored skill {existing.id}."
                 )
-                stale_proc, metadata_updated = _mark_stale_skill(existing, warning)
+                stale_record, metadata_updated = _mark_stale_skill(existing, warning)
                 if metadata_updated:
-                    self.store.add(stale_proc)
+                    self.store.add(stale_record)
                 return _skill_api_payload(
-                    stale_proc,
+                    stale_record,
                     "STALE_SYNC_SKILL",
                     status="stale",
                     warning=warning,
@@ -274,11 +272,11 @@ class MemFlow:
             path = Path(existing.source_path)
             if not path.exists():
                 warning = f"SKILL.md source file is missing: {path}"
-                stale_proc, metadata_updated = _mark_stale_skill(existing, warning)
+                stale_record, metadata_updated = _mark_stale_skill(existing, warning)
                 if metadata_updated:
-                    self.store.add(stale_proc)
+                    self.store.add(stale_record)
                 return _skill_api_payload(
-                    stale_proc,
+                    stale_record,
                     "STALE_SYNC_SKILL",
                     status="stale",
                     warning=warning,
@@ -306,24 +304,24 @@ class MemFlow:
                 governance = {}
             source = str(governance.get("source") or "local")
             trust_state = governance.get("trust_state")
-            procedure = load_skill(
+            record = load_skill(
                 path,
                 user_id=existing.user_id,
                 source=source,
                 trust_state=trust_state,
             )
-            procedure.created_at = existing.created_at
+            record.created_at = existing.created_at
         else:
-            procedure = load_skill(path)
+            record = load_skill(path)
 
-        self.store.add(procedure)
-        return _skill_api_payload(procedure, "SYNC_SKILL")
+        self.store.add(record)
+        return _skill_api_payload(record, "SYNC_SKILL")
 
     def list_skills(
         self,
         user_id: str | None = None,
         trust_state: str | None = None,
-    ) -> list[Procedure]:
+    ) -> list[SkillRecord]:
         """List indexed skills, optionally filtered by trust state."""
         skills = [p for p in self.store.list() if p.kind == "skill"]
         if user_id:
@@ -331,9 +329,9 @@ class MemFlow:
         if trust_state is None:
             return skills
         return [
-            proc
-            for proc in skills
-            if proc.metadata.get("governance", {}).get("trust_state") == trust_state
+            record
+            for record in skills
+            if record.metadata.get("governance", {}).get("trust_state") == trust_state
         ]
 
     def search_skills(
@@ -349,14 +347,14 @@ class MemFlow:
         self,
         id_or_name: str,
         include_content: bool = True,
-    ) -> Procedure | None:
+    ) -> SkillRecord | None:
         """Return a skill by id, title, or frontmatter name."""
-        for proc in self.store.list():
-            if proc.kind != "skill":
+        for record in self.store.list():
+            if record.kind != "skill":
                 continue
-            skill = proc.metadata.get("skill", {})
-            if id_or_name in (proc.id, proc.title, skill.get("name")):
-                return proc if include_content else replace(proc, content="")
+            skill = record.metadata.get("skill", {})
+            if id_or_name in (record.id, record.title, skill.get("name")):
+                return record if include_content else replace(record, content="")
         return None
 
     def _parse_rrf_weights(self) -> tuple[float, float]:
@@ -497,7 +495,7 @@ class MemFlow:
         kind: str = "skill",
         rerank: bool = True,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Retrieve relevant procedures by similarity.
+        """Retrieve relevant skills by similarity.
 
         Pipeline (single-string queries):
         1. **Retrieval** — hybrid (sparse+dense RRF) when
@@ -594,7 +592,7 @@ class MemFlow:
         kind: str = "skill",
         max_workers: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Retrieve relevant procedures by similarity asynchronously.
+        """Retrieve relevant skills by similarity asynchronously.
 
         Args:
             query: Single query string or list of queries
@@ -625,7 +623,7 @@ class MemFlow:
         id: str | list[str],
         user_id: str | None = None,
     ) -> dict:
-        """Delete a stored procedure or procedures by exact id.
+        """Delete stored records by exact ID.
 
         Args:
             id: Single ID or list of IDs
@@ -645,14 +643,14 @@ class MemFlow:
             }
         else:
             # Single delete
-            proc = None
+            record = None
             candidates = self.store.list(user_id=user_id)
             for candidate in candidates:
                 if candidate.id == id:
-                    proc = candidate
+                    record = candidate
                     break
 
-            if proc is None:
+            if record is None:
                 return {
                     "id": id,
                     "event": "DELETE",
@@ -661,22 +659,22 @@ class MemFlow:
                 }
 
             try:
-                num_deleted = self.store.delete(proc.id)
+                num_deleted = self.store.delete(record.id)
                 deleted = num_deleted > 0
             except Exception:
                 deleted = False
 
             if deleted:
                 return {
-                    "id": proc.id,
-                    "title": proc.title,
+                    "id": record.id,
+                    "title": record.title,
                     "event": "DELETE",
                     "deleted": True,
                 }
 
             return {
-                "id": proc.id,
-                "title": proc.title,
+                "id": record.id,
+                "title": record.title,
                 "event": "DELETE",
                 "deleted": False,
                 "error": "delete_failed",
@@ -688,7 +686,7 @@ class MemFlow:
         user_id: str | None = None,
         max_workers: int = 50,
     ) -> dict:
-        """Delete a stored procedure or procedures asynchronously.
+        """Delete stored records asynchronously.
 
         Args:
             id: Single ID or list of IDs
@@ -710,15 +708,15 @@ class MemFlow:
                 "total": total,
             }
         else:
-            # Single async delete - need to lookup procedure for title
-            proc = None
+            # Single async delete - need to look up the record for its title
+            record = None
             candidates = self.store.list(user_id=user_id)
             for candidate in candidates:
                 if candidate.id == id:
-                    proc = candidate
+                    record = candidate
                     break
 
-            if proc is None:
+            if record is None:
                 return {
                     "id": id,
                     "event": "DELETE",
@@ -731,15 +729,15 @@ class MemFlow:
 
             if deleted:
                 return {
-                    "id": proc.id,
-                    "title": proc.title,
+                    "id": record.id,
+                    "title": record.title,
                     "event": "DELETE",
                     "deleted": True,
                 }
 
             return {
-                "id": proc.id,
-                "title": proc.title,
+                "id": record.id,
+                "title": record.title,
                 "event": "DELETE",
                 "deleted": False,
                 "error": "delete_failed",
@@ -747,27 +745,27 @@ class MemFlow:
 
     async def add_async(
         self,
-        procedure: Procedure | list[Procedure],
+        skill: SkillRecord | list[SkillRecord],
         *,
         max_workers: int = 50,
     ) -> dict:
-        """Add a procedure or procedures asynchronously.
+        """Add a skill or skills asynchronously.
 
         Args:
-            procedure: Single Procedure or list of Procedures
+            skill: Single SkillRecord or list of SkillRecords
             max_workers: Max concurrent operations (default: 50)
 
         Returns:
             dict with event info for single, dict with counts for batch
         """
 
-        _validate_skill_input(procedure)
-        if isinstance(procedure, list):
+        _validate_skill_input(skill)
+        if isinstance(skill, list):
             # Batch async add
-            total = len(procedure)
+            total = len(skill)
             num_seeded = (
-                await self.store.add_async(procedure, max_workers=max_workers)
-                if procedure
+                await self.store.add_async(skill, max_workers=max_workers)
+                if skill
                 else 0
             )
             return {
@@ -777,5 +775,5 @@ class MemFlow:
             }
         else:
             # Single async add
-            await self.store.add_async(procedure, max_workers=max_workers)
-            return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
+            await self.store.add_async(skill, max_workers=max_workers)
+            return {"id": skill.id, "title": skill.title, "event": "ADD"}

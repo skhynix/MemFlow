@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from memflow.models import Procedure
+from memflow.models import SkillRecord
 from memflow.store import (
     QdrantStore,
     VectorStore,
@@ -65,6 +65,28 @@ def _qdrant_client_network_mocked():
 
 class TestQdrantStore:
     """Tests for Qdrant vector store."""
+
+    @pytest.mark.parametrize(
+        "env_collection,explicit_collection,expected",
+        [
+            (None, None, "memflow_skills"),
+            ("env_skills", None, "env_skills"),
+            (None, "explicit_skills", "explicit_skills"),
+            ("env_skills", "explicit_skills", "explicit_skills"),
+        ],
+    )
+    def test_collection_selection(
+        self, env_collection, explicit_collection, expected, clean_env, monkeypatch
+    ):
+        if env_collection is not None:
+            monkeypatch.setenv("QDRANT_COLLECTION_NAME", env_collection)
+        with patch.object(QdrantStore, "_init_collection"):
+            store = QdrantStore(
+                collection_name=explicit_collection,
+                emb_api_base="http://test-api",
+                emb_dim=8,
+            )
+        assert store._collection_name == expected
 
     def test_init_creates_collection_with_hnsw(self):
         """Verify _init_collection creates collection with HNSW config."""
@@ -319,7 +341,7 @@ class TestQdrantStore:
     def test_to_text_uses_skill_search_text(self):
         """Test Qdrant embedding input uses skill-aware search text."""
         store = object.__new__(QdrantStore)
-        proc = Procedure(
+        record = SkillRecord(
             title="commit-craft",
             content="# Body",
             metadata={
@@ -330,7 +352,7 @@ class TestQdrantStore:
             },
         )
 
-        text = store._to_text(proc)
+        text = store._to_text(record)
 
         assert "Split commits" in text
         assert "patch series" in text
@@ -351,16 +373,16 @@ class TestQdrantStore:
 
     def test_sanitize_content_strips_nul_bytes(self):
         """Test _sanitize_content removes NUL bytes."""
-        proc = Procedure(
+        record = SkillRecord(
             title="test",
             content="before\x00after",
         )
-        sanitized = VectorStore._sanitize_content(proc)
+        sanitized = VectorStore._sanitize_content(record)
         assert "\x00" not in sanitized.content
         assert sanitized.content == "beforeafter"
 
-    def test_point_to_procedure_round_trips_expanded_fields(self):
-        """Test Qdrant point hydration restores expanded Procedure fields."""
+    def test_point_to_skill_round_trips_expanded_fields(self):
+        """Test Qdrant point hydration restores expanded SkillRecord fields."""
         point = SimpleNamespace(
             id="550e8400-e29b-41d4-a716-446655440000",
             payload={
@@ -379,14 +401,14 @@ class TestQdrantStore:
         )
 
         store = object.__new__(QdrantStore)
-        proc = store._point_to_procedure(point)
+        record = store._point_to_skill(point)
 
-        assert proc.id == "skill-id"
-        assert proc.tags == ["git"]
-        assert proc.kind == "skill"
-        assert proc.source_path == "/tmp/commit-craft/SKILL.md"
-        assert proc.metadata == {"skill": {"name": "commit-craft"}}
-        assert proc.updated_at == "2026-06-02T10:00:00"
+        assert record.id == "skill-id"
+        assert record.tags == ["git"]
+        assert record.kind == "skill"
+        assert record.source_path == "/tmp/commit-craft/SKILL.md"
+        assert record.metadata == {"skill": {"name": "commit-craft"}}
+        assert record.updated_at == "2026-06-02T10:00:00"
 
     def test_upsert_point_converts_skill_id_to_uuid(self):
         """_upsert_point converts skill:{sha256} id to a UUID for Qdrant point ID."""
@@ -399,9 +421,9 @@ class TestQdrantStore:
         store._sparse_enabled = False
 
         skill_id = "skill:" + "a" * 64
-        proc = Procedure(id=skill_id, title="Test", content="body")
+        record = SkillRecord(id=skill_id, title="Test", content="body")
 
-        store._upsert_point(proc, [0.1] * 8)
+        store._upsert_point(record, [0.1] * 8)
 
         call_args = store._client.upsert.call_args
         point = call_args.kwargs["points"][0]
@@ -611,8 +633,8 @@ class TestQdrantStoreHybrid:
             ),
             patch.object(
                 store,
-                "_point_to_procedure",
-                side_effect=lambda p: Procedure(title="t", content="c"),
+                "_point_to_skill",
+                side_effect=lambda p: SkillRecord(title="t", content="c"),
             ),
         ):
             results = store.search_hybrid("deploy", mode="hybrid")
@@ -633,8 +655,8 @@ class TestQdrantStoreHybrid:
             patch.object(store, "_compute_emb", return_value=[0.1] * 8),
             patch.object(
                 store,
-                "_point_to_procedure",
-                side_effect=lambda p: Procedure(title="t", content="c"),
+                "_point_to_skill",
+                side_effect=lambda p: SkillRecord(title="t", content="c"),
             ),
         ):
             results = store.search_hybrid("deploy", mode="dense")
@@ -711,8 +733,8 @@ class TestQdrantStoreHybrid:
             patch.object(store, "_compute_sparse", return_value=None),
             patch.object(
                 store,
-                "_point_to_procedure",
-                side_effect=lambda p: Procedure(title="t", content="c"),
+                "_point_to_skill",
+                side_effect=lambda p: SkillRecord(title="t", content="c"),
             ),
         ):
             results = store.search_hybrid("how do I do this", mode="hybrid")
@@ -773,9 +795,9 @@ class TestQdrantStoreHybrid:
     def test_upsert_skips_sparse_when_none_on_named_schema(self):
         """sparse_vec=None on a named schema writes the dense vector only."""
         store = _make_bare_qdrant_store(sparse_enabled=True)
-        proc = Procedure(title="t", content="c")
+        record = SkillRecord(title="t", content="c")
 
-        store._upsert_point(proc, emb=[0.1] * 8, sparse_vec=None)
+        store._upsert_point(record, emb=[0.1] * 8, sparse_vec=None)
 
         point = store._client.upsert.call_args.kwargs["points"][0]
         assert set(point.vector.keys()) == {"dense"}
@@ -886,10 +908,10 @@ class TestQdrantStoreHybrid:
         store._named_schema = True
         store._sparse_enabled = True
         store._client = MagicMock()
-        proc = Procedure(title="t", content="c")
+        record = SkillRecord(title="t", content="c")
         sparse = models.SparseVector(indices=[1, 2], values=[1.0, 2.0])
 
-        store._upsert_point(proc, emb=[0.1] * 8, sparse_vec=sparse)
+        store._upsert_point(record, emb=[0.1] * 8, sparse_vec=sparse)
 
         point = store._client.upsert.call_args.kwargs["points"][0]
         assert set(point.vector.keys()) == {"dense", "sparse"}
@@ -1040,7 +1062,7 @@ class TestBaseStoreBulkDefaults:
     def test_fake_delete_many_counts_actual_deletions(self):
         """Defaults report removed ids, unlike Qdrant's submitted-id count."""
         store = FakeSkillStore()
-        store.add(Procedure(id="a", title="A", content="x", user_id="u"))
+        store.add(SkillRecord(id="a", title="A", content="x", user_id="u"))
 
         assert store.count(user_id="u") == 1
         assert store.list_ids(user_id="u") == ["a"]

@@ -3,20 +3,20 @@
 
 """Small test stores with explicit search responses; no retrieval algorithm."""
 
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from memflow.store import BaseStore
 
 
 class FakeSkillStore(BaseStore):
     def __init__(self):
-        self.records: dict[str, Procedure] = {}
+        self.records: dict[str, SkillRecord] = {}
         self.search_results: list[SearchResult] = []
         self.search_calls: list[dict] = []
 
-    def add(self, procedure):
-        records = procedure if isinstance(procedure, list) else [procedure]
-        for record in records:
-            self.records[record.id] = record
+    def add(self, skill):
+        records = skill if isinstance(skill, list) else [skill]
+        for skill in records:
+            self.records[skill.id] = skill
         return len(records)
 
     def search(self, query, top_k=5, user_id=None, kind="skill"):
@@ -28,8 +28,8 @@ class FakeSkillStore(BaseStore):
         matches = [
             result
             for result in self.search_results
-            if (not user_id or result.procedure.user_id == user_id)
-            and result.procedure.kind == kind
+            if (not user_id or result.skill.user_id == user_id)
+            and result.skill.kind == kind
         ][:top_k]
         return [list(matches) for _ in query] if isinstance(query, list) else matches
 

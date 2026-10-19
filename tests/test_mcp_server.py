@@ -13,18 +13,18 @@ import pytest
 
 import memflow.mcp_server as mcp_server_module
 from memflow.mcp_server import read_skill_from_store, server
-from memflow.models import Procedure
+from memflow.models import SkillRecord
 from tests.fakes import FakeSkillStore
 
 
-def _procedure(
+def _skill_record(
     *,
     skill_id: str = "skill:commit-craft",
     kind: str = "skill",
     trust_state: str = "trusted",
     trust_mode: str = "instruction",
-) -> Procedure:
-    return Procedure(
+) -> SkillRecord:
+    return SkillRecord(
         id=skill_id,
         title="fallback-name",
         kind=kind,
@@ -46,23 +46,23 @@ def _procedure(
 
 def test_read_skill_returns_complete_content_and_minimal_metadata():
     store = FakeSkillStore()
-    procedure = _procedure()
-    store.add(procedure)
+    record = _skill_record()
+    store.add(record)
 
-    result = read_skill_from_store(store, procedure.id)
+    result = read_skill_from_store(store, record.id)
 
     assert result == {
-        "id": procedure.id,
+        "id": record.id,
         "name": "commit-craft",
         "trust_mode": "instruction",
-        "content": procedure.content,
+        "content": record.content,
     }
     assert "/private/source" not in repr(result)
 
 
 def test_read_skill_uses_exact_id_lookup_only():
     store = FakeSkillStore()
-    store.add(_procedure())
+    store.add(_skill_record())
 
     with pytest.raises(ValueError, match="skill not found"):
         read_skill_from_store(store, "commit-craft")
@@ -70,7 +70,7 @@ def test_read_skill_uses_exact_id_lookup_only():
 
 def test_read_skill_rejects_non_skill_records():
     store = FakeSkillStore()
-    store.records["procedure:one"] = _procedure(
+    store.records["procedure:one"] = _skill_record(
         skill_id="procedure:one", kind="procedure"
     )
 
@@ -84,7 +84,7 @@ def test_read_skill_rejects_non_skill_records():
 )
 def test_read_skill_rejects_blocked_skills(trust_state, trust_mode):
     store = FakeSkillStore()
-    store.add(_procedure(trust_state=trust_state, trust_mode=trust_mode))
+    store.add(_skill_record(trust_state=trust_state, trust_mode=trust_mode))
 
     with pytest.raises(PermissionError, match="skill is blocked"):
         read_skill_from_store(store, "skill:commit-craft")
@@ -92,7 +92,7 @@ def test_read_skill_rejects_blocked_skills(trust_state, trust_mode):
 
 def test_read_skill_defaults_unrecognized_trust_modes_to_data():
     store = FakeSkillStore()
-    store.add(_procedure(trust_state="unknown", trust_mode="unexpected"))
+    store.add(_skill_record(trust_state="unknown", trust_mode="unexpected"))
 
     result = read_skill_from_store(store, "skill:commit-craft")
 
@@ -112,8 +112,8 @@ def test_server_exposes_one_read_only_tool():
 
 def test_registered_tool_returns_text_and_structured_skill(monkeypatch):
     store = FakeSkillStore()
-    procedure = _procedure()
-    store.add(procedure)
+    record = _skill_record()
+    store.add(record)
     monkeypatch.setattr(
         mcp_server_module,
         "_manager",
@@ -121,14 +121,14 @@ def test_registered_tool_returns_text_and_structured_skill(monkeypatch):
     )
 
     content, structured = asyncio.run(
-        server.call_tool("read_skill", {"skill_id": procedure.id})
+        server.call_tool("read_skill", {"skill_id": record.id})
     )
 
     expected = {
-        "id": procedure.id,
+        "id": record.id,
         "name": "commit-craft",
         "trust_mode": "instruction",
-        "content": procedure.content,
+        "content": record.content,
     }
     assert structured == expected
     assert len(content) == 1

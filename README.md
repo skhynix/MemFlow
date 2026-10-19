@@ -346,10 +346,10 @@ MemFlow is a skill retrieval and injection layer. The CLI supports skill
 `memflow` prints help. The Python API also provides search, get, and delete:
 
 ```python
-from memflow import MemFlow, Procedure
+from memflow import MemFlow, SkillRecord
 
 memory = MemFlow()  # Qdrant, configured from the environment and CWD .env
-record = Procedure(title="Release checks", content="Check tests and release notes.")
+record = SkillRecord(title="Release checks", content="Check tests and release notes.")
 memory.add(record)
 hits = memory.search("prepare a release", user_id="default")
 stored = memory.get_skill(record.id)
@@ -366,7 +366,9 @@ The constructor is keyword-only: `MemFlow(store=store, use_env=False)` supports
 an injected store without service initialization. Without an explicit store,
 `use_env=True` loads CWD `.env` with shell settings taking precedence and uses
 Qdrant. `MEMFLOW_BACKEND`, if supplied, must be `qdrant`. The default collection
-name is `procedures`; the setup example explicitly selects `memflow_skills`.
+name is `memflow_skills`. Set `QDRANT_COLLECTION_NAME` or pass
+`collection_name` to `QdrantStore` to select another collection; an explicit
+constructor argument takes precedence over the environment.
 
 ## Optional MemMachine memory queries
 

@@ -14,11 +14,11 @@ from typing import Any
 
 
 @dataclass
-class Procedure:
-    """A stored procedural memory entry."""
+class SkillRecord:
+    """A stored skill snapshot and its retrieval metadata."""
 
     title: str
-    content: str  # Markdown text with numbered steps
+    content: str  # Stored Markdown snapshot
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str = "default"
     category: str = "general"
@@ -48,36 +48,29 @@ def _markdown_body_without_frontmatter(text: str) -> str:
     return text
 
 
-def skill_search_text(procedure: Procedure) -> str:
+def skill_search_text(record: SkillRecord) -> str:
     """Return full-body-derived text used to index and rank a skill."""
-    skill = procedure.metadata.get("skill", {})
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     parts = [
-        procedure.title,
+        record.title,
         skill.get("name", ""),
         skill.get("description", ""),
-        procedure.category,
-        _text_list(procedure.tags),
+        record.category,
+        _text_list(record.tags),
         _text_list(skill.get("aliases", [])),
         _text_list(skill.get("file_patterns", [])),
         _text_list(skill.get("tools", [])),
         skill.get("relative_path", ""),
-        _markdown_body_without_frontmatter(procedure.content),
+        _markdown_body_without_frontmatter(record.content),
     ]
     return "\n".join(str(part) for part in parts if part)
 
 
-def procedure_search_text(procedure: Procedure) -> str:
-    """Return the canonical text used for procedure embeddings/search."""
-    if procedure.kind == "skill":
-        return skill_search_text(procedure)
-    return f"# {procedure.title}\n\n{procedure.content}"
-
-
 @dataclass
 class SearchResult:
-    """A procedure retrieved from search with its relevance score."""
+    """A skill retrieved from search with its relevance score."""
 
-    procedure: Procedure
+    skill: SkillRecord
     score: float

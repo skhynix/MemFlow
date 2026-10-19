@@ -8,7 +8,7 @@ import hashlib
 import pytest
 
 from memflow.manager import MemFlow
-from memflow.models import Procedure, SearchResult
+from memflow.models import SearchResult, SkillRecord
 from memflow.skills import (
     build_resource_manifest,
     build_skill_metadata,
@@ -111,29 +111,29 @@ def test_load_skill_from_directory_preserves_raw_content_and_metadata(tmp_path):
         "Use focused commits.\n",
     )
 
-    proc = load_skill(root, user_id="alice", trust_state="trusted")
+    record = load_skill(root, user_id="alice", trust_state="trusted")
 
-    assert proc.id == skill_id(root / "SKILL.md", "commit-craft")
-    assert proc.title == "commit-craft"
-    assert proc.content == source_text
-    assert proc.user_id == "alice"
-    assert proc.category == "development"
-    assert proc.tags == ["git", "commits"]
-    assert proc.kind == "skill"
-    assert proc.source_path == str((root / "SKILL.md").resolve())
-    skill = proc.metadata["skill"]
+    assert record.id == skill_id(root / "SKILL.md", "commit-craft")
+    assert record.title == "commit-craft"
+    assert record.content == source_text
+    assert record.user_id == "alice"
+    assert record.category == "development"
+    assert record.tags == ["git", "commits"]
+    assert record.kind == "skill"
+    assert record.source_path == str((root / "SKILL.md").resolve())
+    skill = record.metadata["skill"]
     assert skill["root_path"] == str(root.resolve())
-    assert skill["source_path"] == proc.source_path
+    assert skill["source_path"] == record.source_path
     assert skill["relative_path"].endswith("commit-craft/SKILL.md")
     assert skill["frontmatter"]["unknown"] == "preserved"
     assert skill["aliases"] == ["patch series"]
     assert skill["file_patterns"] == ["*.py"]
     assert skill["tools"] == ["git"]
     assert skill["sha256"] == hashlib.sha256(source_text.encode()).hexdigest()
-    assert proc.metadata["governance"]["trust_state"] == "trusted"
-    assert proc.metadata["governance"]["mode"] == "instruction"
-    assert proc.metadata["governance"]["warnings"] == []
-    index = proc.metadata["index"]
+    assert record.metadata["governance"]["trust_state"] == "trusted"
+    assert record.metadata["governance"]["mode"] == "instruction"
+    assert record.metadata["governance"]["warnings"] == []
+    index = record.metadata["index"]
     body = "# Commit Craft\n\nUse focused commits.\n"
     assert index["frontmatter_present"] is True
     assert index["body_offset"] == source_text.index(body)
@@ -170,29 +170,29 @@ def test_indexed_skill_render_parts_uses_body_offset_and_legacy_fallback(tmp_pat
         root,
         "---\nname: render-skill\n---\n# Render Skill\n\nPINEAPPLE_MARKER\n",
     )
-    proc = load_skill(root, trust_state="trusted")
+    record = load_skill(root, trust_state="trusted")
 
-    frontmatter, body, warnings = indexed_skill_render_parts(proc)
+    frontmatter, body, warnings = indexed_skill_render_parts(record)
 
     assert frontmatter["name"] == "render-skill"
     assert body == "# Render Skill\n\nPINEAPPLE_MARKER\n"
     assert warnings == ()
 
-    legacy_proc = Procedure(
-        title=proc.title,
+    legacy_record = SkillRecord(
+        title=record.title,
         content=source_text,
-        id=proc.id,
+        id=record.id,
         kind="skill",
-        metadata={"skill": proc.metadata["skill"], "index": {}},
+        metadata={"skill": record.metadata["skill"], "index": {}},
     )
 
     legacy_frontmatter, legacy_body, legacy_warnings = indexed_skill_render_parts(
-        legacy_proc
+        legacy_record
     )
 
     assert legacy_frontmatter["name"] == "render-skill"
     assert legacy_body == source_text
-    assert legacy_warnings == (f"legacy_skill_render_metadata_missing:{proc.id}",)
+    assert legacy_warnings == (f"legacy_skill_render_metadata_missing:{record.id}",)
 
 
 @pytest.mark.parametrize(
@@ -210,8 +210,8 @@ def test_load_skill_governance_mode_tracks_trust_state(
     root.mkdir()
     _write_skill(root, f"---\nname: {trust_state}\n---\n# Skill\n")
 
-    proc = load_skill(root, trust_state=trust_state)
-    governance = proc.metadata["governance"]
+    record = load_skill(root, trust_state=trust_state)
+    governance = record.metadata["governance"]
 
     assert governance["trust_state"] == trust_state
     assert governance["mode"] == mode
@@ -226,12 +226,12 @@ def test_load_skill_without_frontmatter_uses_directory_name(tmp_path):
     root.mkdir()
     _write_skill(root, "# Simple\n\nBody\n")
 
-    proc = load_skill(root)
+    record = load_skill(root)
 
-    assert proc.title == "simple-skill"
-    assert proc.category == "skill"
-    assert proc.tags == []
-    assert proc.metadata["skill"]["description"] == ""
+    assert record.title == "simple-skill"
+    assert record.category == "skill"
+    assert record.tags == []
+    assert record.metadata["skill"]["description"] == ""
 
 
 def test_load_skill_from_direct_skill_md_path(tmp_path):
@@ -239,10 +239,10 @@ def test_load_skill_from_direct_skill_md_path(tmp_path):
     root.mkdir()
     _write_skill(root, "---\nname: direct-skill\n---\n# Direct\n")
 
-    proc = load_skill(root / "SKILL.md")
+    record = load_skill(root / "SKILL.md")
 
-    assert proc.title == "direct-skill"
-    assert proc.source_path == str((root / "SKILL.md").resolve())
+    assert record.title == "direct-skill"
+    assert record.source_path == str((root / "SKILL.md").resolve())
 
 
 def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path):
@@ -276,10 +276,10 @@ def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path):
     assert added["source_path"] == str(source.resolve())
     assert added["root_path"] == str(root.resolve())
     listed = manager.list_skills(user_id="alice", trust_state="trusted")
-    assert [proc.id for proc in listed] == [added["id"]]
+    assert [record.id for record in listed] == [added["id"]]
     manager.store.search_results = [SearchResult(listed[0], 0.8)]
     assert (
-        manager.search_skills("patch series", user_id="alice")[0].procedure.id
+        manager.search_skills("patch series", user_id="alice")[0].skill.id
         == (added["id"])
     )
     assert manager.get_skill("commit-craft").id == added["id"]
@@ -290,14 +290,14 @@ def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path):
     initial_indexed_at = listed[0].metadata["index"]["indexed_at"]
 
     unchanged = manager.sync_skill(added["id"])
-    unchanged_proc = manager.get_skill(added["id"])
+    unchanged_record = manager.get_skill(added["id"])
 
     assert unchanged["event"] == "NOOP_SYNC_SKILL"
     assert unchanged["status"] == "noop"
     assert unchanged["reason"] == "sha256_unchanged"
     assert unchanged["sha256"] == added["sha256"]
-    assert unchanged_proc.updated_at == initial_updated_at
-    assert unchanged_proc.metadata["index"]["indexed_at"] == initial_indexed_at
+    assert unchanged_record.updated_at == initial_updated_at
+    assert unchanged_record.metadata["index"]["indexed_at"] == initial_indexed_at
 
     updated = original + "\nNew sync content.\n"
     source.write_text(updated, encoding="utf-8")
@@ -348,7 +348,7 @@ def test_sync_skill_missing_source_returns_stale_without_reindexing(tmp_path):
 
     source.write_text(original, encoding="utf-8")
     restored = manager.sync_skill(added["id"])
-    restored_proc = manager.get_skill(added["id"])
+    restored_record = manager.get_skill(added["id"])
 
     assert restored["event"] == "SYNC_SKILL"
-    assert "stale" not in restored_proc.metadata["skill"]
+    assert "stale" not in restored_record.metadata["skill"]

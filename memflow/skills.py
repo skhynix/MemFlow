@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from memflow.models import Procedure, procedure_search_text
+from memflow.models import SkillRecord, skill_search_text
 
 SUPPORTED_TRUST_STATES = {"trusted", "unknown", "blocked"}
 _LIST_FRONTMATTER_FIELDS = {"tags", "aliases", "file_patterns", "tools"}
@@ -309,8 +309,8 @@ def build_skill_metadata(
         },
     }
     metadata["index"]["search_text_sha256"] = hashlib.sha256(
-        procedure_search_text(
-            Procedure(
+        skill_search_text(
+            SkillRecord(
                 title=name,
                 content=raw_text,
                 category=category,
@@ -329,8 +329,8 @@ def load_skill(
     *,
     source: str = "local",
     trust_state: str | None = None,
-) -> Procedure:
-    """Load a skill directory or direct SKILL.md path into a Procedure."""
+) -> SkillRecord:
+    """Load a skill directory or direct SKILL.md path into a SkillRecord."""
     source_path = _resolve_skill_path(path)
     root_path = source_path.parent
     raw_text = source_path.read_text(encoding="utf-8")
@@ -349,7 +349,7 @@ def load_skill(
         trust_state=trust_state,
         indexed_at=now,
     )
-    return Procedure(
+    return SkillRecord(
         id=skill_id(source_path, name),
         title=name,
         content=raw_text,
@@ -365,7 +365,7 @@ def load_skill(
 
 
 def indexed_skill_render_parts(
-    procedure: Procedure,
+    record: SkillRecord,
 ) -> tuple[dict[str, Any], str, tuple[str, ...]]:
     """Return frontmatter and body using indexed metadata only.
 
@@ -373,28 +373,28 @@ def indexed_skill_render_parts(
     records carry a body offset under metadata["index"]. Legacy records fall
     back to the stored content so body markers are still injected.
     """
-    skill = procedure.metadata.get("skill", {})
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     frontmatter = skill.get("frontmatter", {})
     if not isinstance(frontmatter, dict):
         frontmatter = {}
 
-    index = procedure.metadata.get("index", {})
+    index = record.metadata.get("index", {})
     if not isinstance(index, dict):
         index = {}
     body_offset = index.get("body_offset")
-    if isinstance(body_offset, int) and 0 <= body_offset <= len(procedure.content):
-        return dict(frontmatter), procedure.content[body_offset:], ()
+    if isinstance(body_offset, int) and 0 <= body_offset <= len(record.content):
+        return dict(frontmatter), record.content[body_offset:], ()
 
     return (
         dict(frontmatter),
-        procedure.content,
-        (f"legacy_skill_render_metadata_missing:{procedure.id}",),
+        record.content,
+        (f"legacy_skill_render_metadata_missing:{record.id}",),
     )
 
 
-def render_skill_for_injection(procedure: Procedure) -> str:
+def render_skill_for_injection(record: SkillRecord) -> str:
     """Return the indexed skill body for injection without reparsing frontmatter."""
-    _frontmatter, body, _warnings = indexed_skill_render_parts(procedure)
+    _frontmatter, body, _warnings = indexed_skill_render_parts(record)
     return body

@@ -46,7 +46,7 @@ Files:
   `category` (122 fine-grained labels), `domain` (10 labels)
 - `data/skills.jsonl` — `skill_id`, `name`, `description`, `body`, plus source
   metadata (`author`, `repo_slug`, `path`, `github_url`, `skillsmp_url`,
-  `stars`) preserved in `Procedure.metadata["skill"]` for downstream utility
+  `stars`) preserved in `SkillRecord.metadata["skill"]` for downstream utility
   analysis (`stars` is a popularity confound worth keeping)
 - `data/stats.json` — corpus stats and checksums
 

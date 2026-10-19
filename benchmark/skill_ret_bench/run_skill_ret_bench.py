@@ -88,7 +88,7 @@ def _parse_args() -> argparse.Namespace:
         "--clear-existing",
         action="store_true",
         help=(
-            "Delete matching existing SkillRet procedures for the user before "
+            "Delete matching existing SkillRet skills for the user before "
             "seeding every valid corpus record. By default, existing IDs are reused."
         ),
     )

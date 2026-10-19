@@ -680,14 +680,14 @@ def _activation_identities(
 
 
 def _rendered_skill_name(rendered: RenderedSkill) -> str:
-    procedure = rendered.candidate.procedure
-    skill = procedure.metadata.get("skill", {})
+    record = rendered.candidate.skill
+    skill = record.metadata.get("skill", {})
     if not isinstance(skill, dict):
         skill = {}
     frontmatter = skill.get("frontmatter", {})
     if not isinstance(frontmatter, dict):
         frontmatter = {}
-    return str(skill.get("name") or frontmatter.get("name") or procedure.title)
+    return str(skill.get("name") or frontmatter.get("name") or record.title)
 
 
 def _add_session_dedupe_audit(
