@@ -635,8 +635,9 @@ class TestRerankPipeline:
 
         llm = MagicMock(spec=BaseReranker)
         llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or len(c))]
-        # cap 0 -> None (no stage cap): nothing to warn about. An explicit 0
-        # arg falls back to the env default, so clear the env for "disabled".
+        # cap 0 -> None (no stage cap): nothing to warn about (env path;
+        # the explicit-arg path is covered by
+        # test_explicit_zero_arg_disables_cap_without_env).
         monkeypatch.setenv("MEMFLOW_RERANKER_LLM_TOP_K", "0")
         pipeline = RerankPipeline(pipeline="llm", llm_reranker=llm)
         with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
@@ -667,11 +668,46 @@ class TestRerankPipeline:
             out = pipeline.rerank("q", _results(*[str(i) for i in range(30)]), top_k=20)
         assert len(out) == 5
         warnings = [r for r in caplog.records if "silently receives" in r.message]
-        # Distinct cap values are each reported; identical caps across
-        # stages dedupe to one line by design.
         assert len(warnings) == 2
         assert "MEMFLOW_RERANKER_CE_TOP_K" in warnings[0].message
         assert "MEMFLOW_RERANKER_LLM_TOP_K" in warnings[1].message
+
+    def test_same_cap_across_stages_warns_for_each_stage(self, caplog) -> None:
+        # Dedupe is keyed on (stage, cap): ce=llm=10 below top_k must name
+        # both env vars — keying on cap alone would only ever mention the
+        # first stage, sending the operator to raise the wrong knob.
+        import logging
+
+        ce = MagicMock(spec=BaseReranker)
+        ce.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or 0)]
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or 0)]
+        pipeline = RerankPipeline(
+            pipeline="ce_llm", ce_reranker=ce, llm_reranker=llm, ce_top_k=10
+        )
+        cands = _results(*[str(i) for i in range(30)])
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", cands, top_k=20)
+        warnings = [r for r in caplog.records if "silently receives" in r.message]
+        assert len(warnings) == 2
+        assert "MEMFLOW_RERANKER_CE_TOP_K" in warnings[0].message
+        assert "MEMFLOW_RERANKER_LLM_TOP_K" in warnings[1].message
+
+    def test_explicit_zero_arg_disables_cap_without_env(
+        self, caplog, monkeypatch
+    ) -> None:
+        # Explicit 0 is the documented "no cap" sentinel — it must not fall
+        # through to the env default (10) via the falsy-or chain.
+        import logging
+
+        monkeypatch.delenv("MEMFLOW_RERANKER_LLM_TOP_K", raising=False)
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or len(c))]
+        pipeline = RerankPipeline(pipeline="llm", llm_reranker=llm, llm_top_k=0)
+        assert pipeline._reranker_llm_top_k is None
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", _results("a", "b"), top_k=20)
+        assert not [r for r in caplog.records if "silently receives" in r.message]
 
     def test_unknown_stage_logs_warning(self) -> None:
         # An unknown stage name yields NoopReranker fallback (stages() empty ->
@@ -680,3 +716,42 @@ class TestRerankPipeline:
         cands = _results("a", "b")
         out = pipeline.rerank("q", cands)
         assert [r.procedure.title for r in out] == ["a", "b"]
+
+    def test_unknown_stage_warns_once_across_calls(self, caplog) -> None:
+        # _stage_list() runs on every rerank(); a config typo would otherwise
+        # warn per served query.
+        import logging
+
+        pipeline = RerankPipeline(pipeline="llm_bogus")
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)
+        pipeline._reranker_llm = llm
+        cands = _results("a", "b")
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", cands)
+            pipeline.rerank("q", cands)
+        unknown = [r for r in caplog.records if "Unknown reranker stage" in r.message]
+        assert len(unknown) == 1
+
+    def test_negative_stage_cap_env_falls_back_to_default(
+        self, monkeypatch, caplog
+    ) -> None:
+        # A negative cap would reach result[:-5] and silently drop the last
+        # 5 candidates; _env_num must clamp to the default with a warning
+        # (mirrors manager._env_int).
+        monkeypatch.setenv("MEMFLOW_RERANKER_LLM_TOP_K", "-5")
+        pipeline = RerankPipeline(pipeline="llm", llm_reranker=MagicMock())
+        assert pipeline._reranker_llm_top_k == 10
+        assert any("must be >=" in r.message for r in caplog.records)
+
+    def test_negative_doc_cap_falls_back_to_default(self, monkeypatch) -> None:
+        from memflow.reranker import get_reranker_doc_cap
+
+        monkeypatch.setenv("MEMFLOW_RERANKER_DOC_CAP", "-100")
+        assert get_reranker_doc_cap() == 2000
+
+    def test_negative_temperature_falls_back_to_zero(self, monkeypatch) -> None:
+        from memflow.reranker import get_llm_reranker_temperature
+
+        monkeypatch.setenv("RERANKER_LLM_TEMPERATURE", "-0.5")
+        assert get_llm_reranker_temperature() == 0.0

@@ -521,7 +521,7 @@ def test_stage_top_k_below_max_k_warns(monkeypatch, tmp_path, capsys) -> None:
     runner.main()
 
     out = capsys.readouterr().out
-    assert "final-stage Top-K=10" in out
+    assert "LLM-stage Top-K=10" in out
     assert "R@K for K>10 measures the stage cap" in out
 
 

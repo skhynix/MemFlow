@@ -79,6 +79,10 @@ _RERANKER_ENV_KEYS = (
     "RERANKER_LLM_PROVIDER",
     "RERANKER_LLM_MODEL",
     "RERANKER_LLM_API_BASE",
+    # Determinism / context guards: the temperature changes the ranking
+    # itself, so results claiming to be self-describing must record it.
+    "RERANKER_LLM_TEMPERATURE",
+    "RERANKER_LLM_MAX_PROMPT_CHARS",
 )
 
 
@@ -90,7 +94,7 @@ def _reranker_effective() -> dict[str, Any]:
     actually-used values need resolving here too (mirrors the logic in
     memflow.reranker).
     """
-    from memflow.reranker import resolve_stage_scope
+    from memflow.reranker import _env_num, resolve_stage_scope
 
     pipeline = (os.environ.get("MEMFLOW_RERANKER_PIPELINE") or "none").lower()
     llm_provider = os.environ.get("RERANKER_LLM_PROVIDER") or os.environ.get(
@@ -99,8 +103,14 @@ def _reranker_effective() -> dict[str, Any]:
     llm_model = os.environ.get("RERANKER_LLM_MODEL") or os.environ.get("LLM_MODEL")
     effective: dict[str, Any] = {
         "pipeline": pipeline,
-        "ce_top_k": int(os.environ.get("MEMFLOW_RERANKER_CE_TOP_K") or 10),
-        "llm_top_k": int(os.environ.get("MEMFLOW_RERANKER_LLM_TOP_K") or 10),
+        # Same lenient parse as serving (_env_num: warn + default on malformed
+        # or negative values) — a strict int() here would crash the whole run
+        # while serving would have degraded gracefully, diverging bench from
+        # the behavior under test.
+        "ce_top_k": _env_num("MEMFLOW_RERANKER_CE_TOP_K", 10, cast=int, minimum=0)
+        or None,
+        "llm_top_k": _env_num("MEMFLOW_RERANKER_LLM_TOP_K", 10, cast=int, minimum=0)
+        or None,
         "ce_scope": resolve_stage_scope("ce"),
         "llm_scope": resolve_stage_scope("llm"),
         "llm_provider": llm_provider,
@@ -111,6 +121,12 @@ def _reranker_effective() -> dict[str, Any]:
             effective["llm_warning"] = (
                 "RERANKER_LLM_MODEL/LLM_MODEL unset — openai-compatible LLM "
                 "reranker cannot be built; pipeline degrades to no-op at runtime"
+            )
+        elif llm_provider == "ollama" and not os.environ.get("RERANKER_LLM_MODEL"):
+            effective["llm_warning"] = (
+                "RERANKER_LLM_MODEL unset — ollama falls back to LLM_MODEL or "
+                "the factory default (llama3.2), which may be too small for a "
+                "100-candidate listwise rerank"
             )
     return effective
 
@@ -219,9 +235,10 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="RRF fusion output depth for --mode (default: "
         "MEMFLOW_HYBRID_RRF_TOP_K env, else 100 — the same value serving "
-        "uses, so benchmark numbers are serving-comparable by default; "
-        "Recall@K is capped at this depth and a warning is printed when "
-        "--k-values exceed it)",
+        "uses, so benchmark numbers are serving-comparable by default). "
+        "It is a FLOOR, not a cap: the depth is raised to max(--k-values) "
+        "when deeper R@K is requested (noted in the run output), so R@K "
+        "measures the system rather than this depth setting.",
     )
     return parser.parse_args()
 
@@ -255,9 +272,9 @@ def _resolve_mode_params(args: argparse.Namespace) -> dict[str, Any]:
 
     ``rrf_top_k`` defaults to the serving value (MEMFLOW_HYBRID_RRF_TOP_K,
     else 100) so benchmark numbers are serving-comparable by default. It is
-    never silently raised to max(k_values): fusion output caps Recall@K, and
-    quietly serving a deeper pool than production would make benchmark and
-    online numbers incomparable. Callers warn when measured K exceeds it.
+    a FLOOR, not a cap — the actual fusion depth is
+    ``max(rrf_top_k, top_k)``, raised to whatever depth the requested K
+    needs, and the run prints a note when the raise kicks in.
     """
     sparse_top_k = args.sparse_top_k or args.prefetch_top_k
     dense_top_k = args.dense_top_k or args.prefetch_top_k
@@ -414,36 +431,49 @@ def main() -> None:
             executed_bypassed.append("reranker")
         executed_path = "dense_batch:bypassed=" + "+".join(executed_bypassed)
 
-    # On the env-routed path, a stage Top-K smaller than max(--k-values)
-    # silently caps deep Recall@K at the stage output depth.
+    # On the env-routed path, ANY stage Top-K smaller than max(--k-values)
+    # silently caps deep Recall@K at that stage's output depth — stages run
+    # serially, so a middle-stage cap bounds the final output just like the
+    # final one. Check every configured stage (mirrors the per-stage serving
+    # warning in RerankPipeline.rerank) instead of only the final stage.
     if not args.mode and rerank_pipeline_on:
         pipeline = effective["pipeline"]
-        final_stage_cap = (
-            effective["llm_top_k"]
-            if pipeline.endswith("llm")
-            else effective["ce_top_k"]
-        )
-        if final_stage_cap and top_k > final_stage_cap:
-            print(
-                f"\n[WARNING] reranker final-stage Top-K={final_stage_cap} "
-                f"(pipeline={pipeline}) is below max(--k-values)={top_k} — "
-                f"R@K for K>{final_stage_cap} measures the stage cap, not "
-                "the system. Raise MEMFLOW_RERANKER_"
-                f"{'LLM' if pipeline.endswith('llm') else 'CE'}_TOP_K or "
-                "lower --k-values."
+        stage_caps = [
+            (name, cap)
+            for name, cap in (
+                ("CE", effective["ce_top_k"]),
+                ("LLM", effective["llm_top_k"]),
             )
+            if name.lower() in pipeline and cap
+        ]
+        for name, cap in stage_caps:
+            if top_k > cap:
+                print(
+                    f"\n[WARNING] reranker {name}-stage Top-K={cap} "
+                    f"(pipeline={pipeline}) is below max(--k-values)={top_k} "
+                    f"— R@K for K>{cap} measures the stage cap, not the "
+                    f"system. Raise MEMFLOW_RERANKER_{name}_TOP_K or lower "
+                    "--k-values."
+                )
 
     mode_params: dict[str, Any] | None = None
     if args.mode:
-        if not getattr(memflow.store, "supports_hybrid", False):
+        # search_hybrid(mode="dense") works on any collection (dense-only
+        # included); only sparse-consuming modes need sparse vectors.
+        needs_sparse = [m for m in args.mode if m in ("sparse", "hybrid")]
+        if needs_sparse and not getattr(memflow.store, "supports_hybrid", False):
             raise SystemExit(
-                f"--mode {args.mode} requires store.search_hybrid; backend "
-                f"{backend!r} (or a collection without sparse vectors) does "
-                "not support it. Unset --mode to evaluate the env-routed "
-                "MemFlow.search path."
+                f"--mode {needs_sparse} requires store.search_hybrid with "
+                f"sparse vectors; backend {backend!r} (or a collection "
+                "without sparse vectors) does not support it. Unset --mode "
+                "to evaluate the env-routed MemFlow.search path."
             )
         mode_params = _resolve_mode_params(args)
         print("\nExplicit search-mode path (reranker bypassed).")
+        # Record it in the results JSON, not just stdout — the JSON is the
+        # artifact analysis cites, and reranker_env below describes config
+        # that provably did not run on this path.
+        executed_path = "search_mode:" + "+".join(args.mode) + ":reranker_bypassed"
         print(
             f"prefetch: sparse_top_k={mode_params['sparse_top_k']}  "
             f"dense_top_k={mode_params['dense_top_k']}"

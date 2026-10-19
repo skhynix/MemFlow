@@ -439,6 +439,49 @@ class TestMemFlowSearchReranker:
         # helper re-inflated this back to RRF_TOP_K=100.
         assert kwargs["rrf_top_k"] == 20
 
+    def test_search_fetch_below_rrf_warns_once(self, fake_llm, clean_env, caplog):
+        """FETCH_TOP_K < RRF_TOP_K silently shrinks the candidate pool below
+        the configured RRF depth — search() must warn once (every other
+        silent degradation in this pipeline warns)."""
+        import logging
+
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        os.environ["MEMFLOW_HYBRID_RRF_TOP_K"] = "100"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        with patch.object(manager, "_get_rerank_pipeline") as mock_get:
+            mock_get.return_value.rerank.return_value = []
+            with caplog.at_level(logging.WARNING, logger="memflow.manager"):
+                manager.search("deploy", top_k=5)
+                manager.search("build", top_k=5)
+
+        warnings = [r for r in caplog.records if "FETCH_TOP_K" in r.message]
+        assert len(warnings) == 1
+
+    def test_search_deep_top_k_exceeds_fetch_pool(self, fake_llm, clean_env):
+        """A caller asking deeper than the pool always gets its full request:
+        max(min(RRF, FETCH), top_k) — the pool is a floor for retrieval, not
+        a ceiling on the caller's top_k."""
+        os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
+        os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
+        os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
+        os.environ["MEMFLOW_HYBRID_RRF_TOP_K"] = "100"
+        store = MagicMock()
+        store.supports_hybrid = True
+        store.search_hybrid.return_value = []
+        manager = MemFlow(llm=fake_llm, store=store)
+
+        with patch.object(manager, "_get_rerank_pipeline") as mock_get:
+            mock_get.return_value.rerank.return_value = []
+            manager.search("deploy", top_k=200)
+
+        assert store.search_hybrid.call_args.kwargs["rrf_top_k"] == 200
+
     def test_search_batch_bypasses_reranker(self, fake_llm, clean_env):
         """Batch queries (list input) skip the reranker entirely."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"

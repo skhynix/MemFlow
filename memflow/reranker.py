@@ -45,10 +45,14 @@ logger = logging.getLogger(__name__)
 _FENCE_RE = re.compile(r"```(?:json)?\s*")
 
 # Matches <skill> data-delimiter variants (case-insensitive, whitespace
-# tolerant) in candidate text. Candidate content is untrusted (third-party
-# SKILL.md), so before wrapping a snippet in <skill> tags we strip any
-# variant that could close the delimiter early and escape the data framing.
-_SKILL_TAG_RE = re.compile(r"<\s*/?\s*skill\s*>", re.IGNORECASE)
+# tolerant, including attribute/self-closing forms like <skill role=x>) in
+# candidate text. Candidate content is untrusted (third-party SKILL.md), so
+# before wrapping a snippet in <skill> tags we strip any tag form that could
+# close the delimiter early and escape the data framing. This does not strip
+# other markup or forged "[N]" index prefixes inside the snippet — escaping
+# the framing requires a closing tag, and the system prompt additionally
+# instructs the model to treat everything inside the tags as data.
+_SKILL_TAG_RE = re.compile(r"<\s*/?\s*skill[^>]*>", re.IGNORECASE)
 
 # Reranker env vars are read lazily (at call/construction time, not import
 # time) because ``import memflow`` runs before ``MemFlow()`` loads ``.env`` —
@@ -57,15 +61,33 @@ _SKILL_TAG_RE = re.compile(r"<\s*/?\s*skill\s*>", re.IGNORECASE)
 # to the default instead of crashing.
 
 
-def _env_num(name: str, default: float, cast: type = float) -> int | float:
+def _env_num(
+    name: str,
+    default: float,
+    cast: type = float,
+    minimum: float | None = None,
+) -> int | float:
     raw = os.getenv(name)
     if raw is None:
         return default
     try:
-        return cast(raw)
+        value = cast(raw)
     except ValueError:
         logger.warning("Invalid %s=%r, falling back to %s", name, raw, default)
         return default
+    # Negative numeric knobs must not reach slicing semantics: result[:-5]
+    # silently drops the last 5 candidates instead of capping, and a negative
+    # DOC_CAP chops the tail of every doc. Mirror manager._env_int's clamp.
+    if minimum is not None and value < minimum:
+        logger.warning(
+            "Invalid %s=%r (must be >= %s), falling back to %s",
+            name,
+            raw,
+            minimum,
+            default,
+        )
+        return default
+    return value
 
 
 def get_reranker_scope() -> str:
@@ -79,7 +101,7 @@ def get_reranker_doc_cap() -> int:
     """Cap chars per candidate doc when building reranker input — guards
     against pathological skill_md length inflating CE/LLM context.
     Also bounds what the LLM listwise prompt shows per candidate."""
-    return _env_num("MEMFLOW_RERANKER_DOC_CAP", 2000, cast=int)
+    return _env_num("MEMFLOW_RERANKER_DOC_CAP", 2000, cast=int, minimum=1)
 
 
 # Per-stage doc-scope defaults — the SkillRet per-stage optima.
@@ -123,7 +145,7 @@ def get_reranker_prompt_budget() -> int:
     the env var to match the serving model. Exceeding it only warns — the
     call is still attempted, since the char->token estimate is coarse and
     pool-trimming policy belongs to the operator, not this guard."""
-    return _env_num("RERANKER_LLM_MAX_PROMPT_CHARS", 300_000, cast=int)
+    return _env_num("RERANKER_LLM_MAX_PROMPT_CHARS", 300_000, cast=int, minimum=1)
 
 
 def get_llm_reranker_temperature() -> float:
@@ -134,14 +156,16 @@ def get_llm_reranker_temperature() -> float:
     defect that disqualified CE. Deliberately does NOT fall back to a
     hypothetical LLM_* setting: any inheritance path would reintroduce a
     silent sampling hole."""
-    return _env_num("RERANKER_LLM_TEMPERATURE", 0.0)
+    return _env_num("RERANKER_LLM_TEMPERATURE", 0.0, minimum=0.0)
 
 
 def get_reranker_timeout() -> float:
-    """Request timeout (seconds) for reranker endpoint calls (CE /v1/score).
+    """Request timeout (seconds) for reranker endpoint calls — shared by the
+    CE /v1/score httpx call and the LLM reranker's chat client construction.
     Cross-encoder scoring over ~50 candidates is fast on a 4B model but the
-    endpoint may queue, so allow a generous ceiling."""
-    return _env_num("MEMFLOW_RERANKER_TIMEOUT", 60.0)
+    endpoint may queue, so allow a generous ceiling; a lowered value cuts
+    both stages, and a 100-candidate listwise prompt needs headroom too."""
+    return _env_num("MEMFLOW_RERANKER_TIMEOUT", 60.0, minimum=0.1)
 
 
 def _skill_description(procedure: Procedure) -> str:
@@ -256,6 +280,10 @@ class CEReranker(BaseReranker):
         # global MEMFLOW_RERANKER_SCOPE > "full" (CE's SkillRet optimum — the
         # body lexical signal in full doc text is CE's only ranking material).
         self._reranker_scope = resolve_stage_scope("ce", doc_scope)
+        # One-time labels for persistent endpoint failures: a downed
+        # endpoint fails per query, and per-query warnings would bury other
+        # log lines (later failures log at debug instead).
+        self._failure_warned: set[str] = set()
         if not self._reranker_ce_api_base:
             raise ValueError(
                 "CEReranker requires RERANKER_CE_API_BASE (vLLM --task score URL)."
@@ -296,11 +324,23 @@ class CEReranker(BaseReranker):
                 return None
             return [indexed[i] for i in range(len(docs))]
         except Exception as exc:
-            logger.warning(
-                "CE reranker batch /v1/score failed (%s: %s); falling back to per-doc.",
-                type(exc).__name__,
-                exc,
-            )
+            # Endpoint failures recur per query while the endpoint is down;
+            # the per-instance flag warns once and demotes the rest to debug
+            # so a sustained outage does not bury other log lines.
+            if "batch" not in self._failure_warned:
+                self._failure_warned.add("batch")
+                logger.warning(
+                    "CE reranker batch /v1/score failed (%s: %s); falling "
+                    "back to per-doc. (Further batch failures log at debug.)",
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "CE reranker batch /v1/score failed again (%s: %s).",
+                    type(exc).__name__,
+                    exc,
+                )
             return None
 
     def rerank(
@@ -325,9 +365,17 @@ class CEReranker(BaseReranker):
             for doc in docs:
                 row = self._score_batch(query, [doc])
                 if row is None:
-                    logger.warning(
-                        "CE reranker per-doc fallback failed; keeping retrieval order."
-                    )
+                    if "per_doc" not in self._failure_warned:
+                        self._failure_warned.add("per_doc")
+                        logger.warning(
+                            "CE reranker per-doc fallback failed; keeping "
+                            "retrieval order. (Further failures log at debug.)"
+                        )
+                    else:
+                        logger.debug(
+                            "CE reranker per-doc fallback failed again; "
+                            "keeping retrieval order."
+                        )
                     result = list(candidates)
                     return result[:top_k] if top_k is not None else result
                 scores.append(row[0])
@@ -360,6 +408,8 @@ class LLMReranker(BaseReranker):
         # config-driven (FETCH_TOP_K/DOC_CAP), so repeating it on every
         # served query would only bury other log lines.
         self._prompt_budget_warned = False
+        # One-time label for persistent endpoint failure (see CEReranker).
+        self._failure_warned: set[str] = set()
 
     def _default_llm(self) -> Any:
         from memflow.llm import LLMFactory
@@ -454,12 +504,21 @@ class LLMReranker(BaseReranker):
         try:
             raw = self._reranker_llm.generate(messages)
         except Exception as exc:
-            logger.warning(
-                "LLM reranker call failed (%s: %s); rerank is effectively "
-                "disabled for this query, returning retrieval order.",
-                type(exc).__name__,
-                exc,
-            )
+            if "llm_call" not in self._failure_warned:
+                self._failure_warned.add("llm_call")
+                logger.warning(
+                    "LLM reranker call failed (%s: %s); rerank is effectively "
+                    "disabled for this query, returning retrieval order. "
+                    "(Further failures log at debug.)",
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "LLM reranker call failed again (%s: %s); keeping retrieval order.",
+                    type(exc).__name__,
+                    exc,
+                )
             result = list(candidates)
             return result[:top_k] if top_k is not None else result
         try:
@@ -569,16 +628,28 @@ class RerankPipeline:
         # ``top_k`` truncates the final output. 0 (or a malformed value)
         # means "no stage cap" -> None. Default 10 matches MemFlow/`.env.example`
         # so standalone construction behaves like serving.
-        self._reranker_ce_top_k = (
-            ce_top_k or _env_num("MEMFLOW_RERANKER_CE_TOP_K", 10, cast=int) or None
+        self._reranker_ce_top_k = self._resolve_stage_top_k(
+            ce_top_k, "MEMFLOW_RERANKER_CE_TOP_K"
         )
-        self._reranker_llm_top_k = (
-            llm_top_k or _env_num("MEMFLOW_RERANKER_LLM_TOP_K", 10, cast=int) or None
+        self._reranker_llm_top_k = self._resolve_stage_top_k(
+            llm_top_k, "MEMFLOW_RERANKER_LLM_TOP_K"
         )
-        # Cap warnings fire once per pipeline instance (per cap value): the
+        # Cap warnings fire once per pipeline instance (per stage+cap): the
         # stage caps are config, so re-warning on every served query would
-        # spam the log with a message the operator already saw.
-        self._cap_warned: set[int] = set()
+        # spam the log with a message the operator already saw. The stage is
+        # part of the key so two stages sharing a cap value each name their
+        # own env var instead of only the first one reported.
+        self._cap_warned: set[tuple[str, int]] = set()
+        self._unknown_stages_warned: set[str] = set()
+
+    @staticmethod
+    def _resolve_stage_top_k(explicit: int | None, env_name: str) -> int | None:
+        # An explicit 0 must mean "no stage cap" — the `explicit or env` chain
+        # would swallow it into the env value (falsy), silently reinterpreting
+        # the documented sentinel for programmatic callers.
+        if explicit is not None:
+            return explicit if explicit > 0 else None
+        return _env_num(env_name, 10, cast=int, minimum=0) or None
 
     @property
     def pipeline(self) -> str:
@@ -627,11 +698,15 @@ class RerankPipeline:
             elif n == "llm":
                 pairs.append(("llm", self._ensure_llm()))
             else:
-                logger.warning(
-                    "Unknown reranker stage %r in pipeline %r",
-                    n,
-                    self._reranker_pipeline,
-                )
+                # Warn once per token: this runs on every rerank() call, and
+                # a config typo would otherwise repeat per served query.
+                if n not in self._unknown_stages_warned:
+                    self._unknown_stages_warned.add(n)
+                    logger.warning(
+                        "Unknown reranker stage %r in pipeline %r",
+                        n,
+                        self._reranker_pipeline,
+                    )
         return pairs
 
     def stages(self) -> list[BaseReranker]:
@@ -648,12 +723,13 @@ class RerankPipeline:
     def _warn_stage_cap_below_top_k(
         self, stage_name: str, cap: int, top_k: int
     ) -> None:
-        """Warn (once per cap value) that a stage cap silently truncates the
+        """Warn (once per stage+cap) that a stage cap silently truncates the
         caller's request below ``top_k`` — e.g. the Claude Code hook asks for
         candidate_k=20 skills but LLM_TOP_K=10 delivers 10 without any error."""
-        if cap in self._cap_warned:
+        key = (stage_name, cap)
+        if key in self._cap_warned:
             return
-        self._cap_warned.add(cap)
+        self._cap_warned.add(key)
         stage_env = {
             "ce": "MEMFLOW_RERANKER_CE_TOP_K",
             "llm": "MEMFLOW_RERANKER_LLM_TOP_K",
