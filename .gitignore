@@ -65,14 +65,6 @@ postgres_data/
 benchmark/results/
 results/
 
-# Local WikiHow benchmark corpus artifacts
-benchmark/wikihow_procedure_silver/.cache/
-benchmark/wikihow_procedure_silver/data/
-benchmark/wikihow_procedure_silver/raw/
-
-# Cloned external repositories
-benchmark/proced_mem_bench/Proced_mem_bench/
-
 # Local SkillReason-Bench corpus artifacts (downloaded from HuggingFace)
 benchmark/skill_reason_bench/data/
 
@@ -80,13 +72,4 @@ benchmark/skill_reason_bench/data/
 # plot_recall_curves.py); kept on disk for docs/papers, not versioned
 benchmark/skill_reason_bench/plots/
 
-# Execution artifacts produced by examples that exercise the bash tool.
-# TASK prompts in examples 09/10/13 instruct the LLM to create files
-# like file.txt, dst.txt, demo/, dst/ in the repo root.
-/file.txt
-/dst.txt
-/demo/
-/dst/
-/file_data/
-/memflow_data/
 benchmark/skill_ret_bench/data/SKILLRET/

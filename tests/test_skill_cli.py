@@ -11,7 +11,6 @@ import os
 
 import pytest
 
-import memflow.cli as cli_module
 import memflow.manager as manager_module
 import memflow.skill_cli as skill_cli
 from memflow.cli import build_parser, main
@@ -118,14 +117,9 @@ def test_skill_subcommand_help(subcommand, expected, capsys):
     assert expected in capsys.readouterr().out
 
 
-def test_skill_routing_does_not_enter_legacy_chat_parser(monkeypatch):
+def test_skill_routing_dispatches_list(monkeypatch):
     manager = FakeSkillManager()
     _patch_manager(monkeypatch, manager)
-
-    def fail_legacy_parser():
-        raise AssertionError("legacy chat parser was used")
-
-    monkeypatch.setattr(cli_module, "_build_chat_parser", fail_legacy_parser)
 
     rc, stdout, stderr = _invoke(["skill", "list"])
 

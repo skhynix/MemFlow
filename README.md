@@ -315,23 +315,9 @@ subagent compaction may reset shared state. See
 
 ## Benchmarks
 
-Benchmark harnesses live in [benchmark/](benchmark/README.md). The WikiHow
-Procedure Silver benchmark vendors its query bank, but full retrieval
-evaluation requires rebuilding the local procedure corpus from Kaggle source
-shards.
-
-Install the optional benchmark dependencies before downloading the WikiHow
-source data:
-
-```bash
-uv sync --extra benchmark
-uv run kaggle datasets download \
-  -d paolop/human-instructions-dataset-updated-json-files \
-  -p benchmark/wikihow_procedure_silver/raw \
-  --unzip
-uv run benchmark/install_benchmark.py wikihow_procedure_silver \
-  --raw-dir benchmark/wikihow_procedure_silver/raw
-```
+The [benchmark harnesses](benchmark/README.md) evaluate skill retrieval with
+SkillRet and SkillReason-Bench. Install optional plotting dependencies with
+`uv sync --extra benchmark`.
 
 The SkillRet benchmark is installed directly from HuggingFace (requires
 git-lfs):
@@ -341,3 +327,15 @@ git lfs install
 uv run benchmark/install_benchmark.py skill_ret_bench
 uv run benchmark/install_benchmark.py skill_ret_bench --commit-hash-skillret <hash>
 ```
+
+SkillReason-Bench has a separate downloader and supports official metrics,
+predictions, and Recall@k plots from saved results:
+
+```bash
+uv run benchmark/skill_reason_bench/download_data.py
+uv run --extra benchmark benchmark/skill_reason_bench/plot_recall_curves.py \
+  --results results/skillreason.json --by-domain
+```
+
+See the [SkillReason-Bench guide](benchmark/skill_reason_bench/README.md) for
+seeding, retrieval, evaluation, and plotting options.
