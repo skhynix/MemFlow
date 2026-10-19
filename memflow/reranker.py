@@ -113,6 +113,17 @@ def get_ce_query_instruction() -> str:
     return os.getenv("RERANKER_CE_QUERY_INSTRUCTION", "")
 
 
+def get_llm_reranker_temperature() -> float:
+    """Sampling temperature for the LLM reranker's chat call. Default 0
+    (greedy): listwise reranking is a deterministic ranking task, and
+    omitting temperature would inherit the vLLM server default (1.0 =
+    sampling), making the ranking nondeterministic across runs — the same
+    defect that disqualified CE. Deliberately does NOT fall back to a
+    hypothetical LLM_* setting: any inheritance path would reintroduce a
+    silent sampling hole."""
+    return _env_num("RERANKER_LLM_TEMPERATURE", 0.0)
+
+
 def get_reranker_timeout() -> float:
     """Request timeout (seconds) for reranker endpoint calls (CE /v1/score).
     Cross-encoder scoring over ~50 candidates is fast on a 4B model but the
@@ -351,6 +362,7 @@ class LLMReranker(BaseReranker):
             api_base=api_base,
             api_key=api_key,
             timeout=get_reranker_timeout(),
+            temperature=get_llm_reranker_temperature(),
         )
 
     def _build_prompt(self, query: str, candidates: list[SearchResult]) -> list[dict]:

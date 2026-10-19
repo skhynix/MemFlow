@@ -342,6 +342,101 @@ class TestLLMReranker:
         assert [r.procedure.title for r in out] == ["b", "a"]
 
 
+class TestLLMRerankerTemperature:
+    """Rerank is a deterministic ranking task, so the default LLM must be
+    built with temperature=0 — omitting it would inherit the vLLM server
+    default (1.0 = sampling) and make rankings nondeterministic across runs."""
+
+    def test_default_temperature_is_zero(self, monkeypatch) -> None:
+        from memflow.reranker import get_llm_reranker_temperature
+
+        monkeypatch.delenv("RERANKER_LLM_TEMPERATURE", raising=False)
+        assert get_llm_reranker_temperature() == 0.0
+
+    def test_temperature_env_override(self, monkeypatch) -> None:
+        from memflow.reranker import get_llm_reranker_temperature
+
+        monkeypatch.setenv("RERANKER_LLM_TEMPERATURE", "0.7")
+        assert get_llm_reranker_temperature() == 0.7
+
+    def test_malformed_temperature_falls_back_to_zero(self, monkeypatch) -> None:
+        from memflow.reranker import get_llm_reranker_temperature
+
+        monkeypatch.setenv("RERANKER_LLM_TEMPERATURE", "hot")
+        assert get_llm_reranker_temperature() == 0.0
+
+    def test_default_llm_receives_temperature(self, monkeypatch) -> None:
+        # _default_llm must forward the temperature to LLMFactory.create so
+        # the constructed client actually sends it on every request.
+        from memflow import reranker as reranker_mod
+
+        captured: dict = {}
+
+        class _Factory:
+            @staticmethod
+            def create(provider, **kwargs):
+                captured.update(kwargs)
+                return _FakeLLM("[]")
+
+        monkeypatch.delenv("RERANKER_LLM_TEMPERATURE", raising=False)
+        monkeypatch.setattr("memflow.llm.LLMFactory", _Factory)
+        # _default_llm imports LLMFactory inside the function from memflow.llm,
+        # so patching the class on the module is enough.
+        reranker_mod.LLMReranker()
+        assert captured["temperature"] == 0.0
+
+    def test_explicit_llm_skips_default_construction(self) -> None:
+        # Injected llm (tests, custom clients) must not trigger _default_llm.
+        llm = _FakeLLM("[]")
+        reranker = LLMReranker(llm=llm)
+        assert reranker._reranker_llm is llm
+
+
+class TestLLMTemperaturePlumbing:
+    """BaseLLM implementations must omit temperature when None (server
+    default applies, current behavior preserved) and send it when set."""
+
+    @pytest.fixture
+    def mock_openai_module(self):
+        """Mock openai module (same pattern as tests/test_llm.py) so these
+        tests run without the optional openai extra installed."""
+        mock_openai_class = MagicMock()
+
+        mock_openai = MagicMock()
+        mock_openai.OpenAI = mock_openai_class
+
+        with patch.dict("sys.modules", {"openai": mock_openai}):
+            yield mock_openai_class
+
+    def test_openai_compatible_omits_temperature_by_default(
+        self, mock_openai_module
+    ) -> None:
+        from memflow.llm import OpenAICompatibleLLM
+
+        llm = OpenAICompatibleLLM(model="m", api_base="http://x/v1")
+        llm.generate([{"role": "user", "content": "hi"}])
+        _, kwargs = mock_openai_module.return_value.chat.completions.create.call_args
+        assert "temperature" not in kwargs
+
+    def test_openai_compatible_sends_temperature_when_set(
+        self, mock_openai_module
+    ) -> None:
+        from memflow.llm import OpenAICompatibleLLM
+
+        llm = OpenAICompatibleLLM(model="m", api_base="http://x/v1", temperature=0.0)
+        llm.generate([{"role": "user", "content": "hi"}])
+        _, kwargs = mock_openai_module.return_value.chat.completions.create.call_args
+        assert kwargs["temperature"] == 0.0
+
+    def test_factory_passes_temperature(self, mock_openai_module) -> None:
+        from memflow.llm import LLMFactory
+
+        llm = LLMFactory.create(
+            "openai-compatible", model="m", api_base="http://x/v1", temperature=0.0
+        )
+        assert llm._temperature == 0.0
+
+
 # ---------------------------------------------------------------------------
 # RerankPipeline
 # ---------------------------------------------------------------------------

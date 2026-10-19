@@ -101,6 +101,7 @@ def clean_env():
         "RERANKER_LLM_MODEL",
         "RERANKER_LLM_API_BASE",
         "RERANKER_LLM_API_KEY",
+        "RERANKER_LLM_TEMPERATURE",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:
