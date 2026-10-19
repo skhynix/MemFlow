@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 
 import pytest
 
@@ -15,7 +16,6 @@ import memflow.manager as manager_module
 import memflow.skill_cli as skill_cli
 from memflow.cli import build_parser, main
 from memflow.models import Procedure
-from memflow.skill_runtime import SkillRetrievalLLM
 
 
 class FakeSkillManager:
@@ -271,11 +271,10 @@ def test_explicit_env_file_loads_before_manager_and_preserves_environment(
             observed["qdrant_url"] = os.environ.get("QDRANT_BASE_URL")
 
     class DummyMemFlow:
-        def __init__(self, *, llm, store, use_env):
+        def __init__(self, *, store, use_env):
             observed.update(
                 {
                     "backend": os.environ.get("MEMFLOW_BACKEND"),
-                    "llm": llm,
                     "store": store,
                     "use_env": use_env,
                 }
@@ -287,9 +286,8 @@ def test_explicit_env_file_loads_before_manager_and_preserves_environment(
     result = skill_cli.create_skill_manager(str(env_file))
 
     assert isinstance(result, DummyMemFlow)
-    assert observed["backend"] == "qdrant"
+    assert observed["backend"] == "QDRANT"
     assert observed["qdrant_url"] == "http://from-explicit-file"
-    assert isinstance(observed["llm"], SkillRetrievalLLM)
     assert isinstance(observed["store"], DummyQdrantStore)
     assert observed["use_env"] is False
 
@@ -313,7 +311,7 @@ def test_explicit_env_file_does_not_merge_cwd_dotenv(tmp_path, monkeypatch):
             )
 
     class DummyMemFlow:
-        def __init__(self, *, llm, store, use_env):
+        def __init__(self, *, store, use_env):
             observed["store"] = store
             observed["use_env"] = use_env
 
@@ -336,17 +334,15 @@ def test_manager_initializes_without_optional_llm_provider(tmp_path, monkeypatch
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    def fail_provider(*_args, **_kwargs):
-        raise AssertionError("optional LLM provider was initialized")
-
     monkeypatch.setattr(manager_module, "QdrantStore", DummyQdrantStore)
-    monkeypatch.setattr(manager_module.LLMFactory, "create", fail_provider)
+    monkeypatch.setitem(sys.modules, "ollama", None)
+    monkeypatch.setitem(sys.modules, "openai", None)
 
     manager = skill_cli.create_skill_manager()
 
-    assert isinstance(manager.llm, SkillRetrievalLLM)
+    assert not hasattr(manager, "llm")
     assert isinstance(manager.store, DummyQdrantStore)
-    assert os.environ["MEMFLOW_BACKEND"] == "qdrant"
+    assert os.environ["MEMFLOW_BACKEND"] == "QDRANT"
 
 
 @pytest.mark.parametrize(
@@ -357,7 +353,7 @@ def test_manager_initializes_without_optional_llm_provider(tmp_path, monkeypatch
         " qdrant ",
     ],
 )
-def test_qdrant_backend_is_normalized_before_manager(
+def test_qdrant_backend_validation_preserves_environment(
     configured_backend, tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -368,8 +364,7 @@ def test_qdrant_backend_is_normalized_before_manager(
         pass
 
     class DummyMemFlow:
-        def __init__(self, *, llm, store, use_env):
-            observed["llm"] = llm
+        def __init__(self, *, store, use_env):
             observed["store"] = store
             observed["use_env"] = use_env
             observed["backend"] = os.environ["MEMFLOW_BACKEND"]
@@ -380,10 +375,9 @@ def test_qdrant_backend_is_normalized_before_manager(
     manager = skill_cli.create_skill_manager()
 
     assert isinstance(manager, DummyMemFlow)
-    assert isinstance(observed["llm"], SkillRetrievalLLM)
     assert isinstance(observed["store"], DummyQdrantStore)
     assert observed["use_env"] is False
-    assert observed["backend"] == "qdrant"
+    assert observed["backend"] == configured_backend
 
 
 @pytest.mark.parametrize("backend", ["emulated", "file", "memmachine", "unsupported"])

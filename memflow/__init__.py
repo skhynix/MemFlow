@@ -2,25 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-MemFlow — Procedural Memory layer for AI agents.
+MemFlow — skill retrieval and injection for coding agents.
 """
 
-from memflow.executor import ToolRegistry
-from memflow.learner import Learner
-from memflow.llm import BaseLLM, LLMFactory, OllamaLLM, OpenAICompatibleLLM
 from memflow.manager import MemFlow
 from memflow.models import (
     Procedure,
-    RunResult,
     SearchResult,
-    Step,
-    StepResult,
-    StepType,
-    TaskPlan,
     procedure_search_text,
     skill_search_text,
 )
-from memflow.planner import LLMPlanner
 from memflow.reranker import (
     BaseReranker,
     CEReranker,
@@ -39,10 +30,6 @@ from memflow.skills import (
 )
 from memflow.store import (
     BaseStore,
-    EmulatedStore,
-    FileStore,
-    MemMachineBypass,
-    MemMachineStore,
     QdrantStore,
     VectorStore,
 )
@@ -53,11 +40,6 @@ __all__ = [
     # Models
     "Procedure",
     "SearchResult",
-    "Step",
-    "StepResult",
-    "StepType",
-    "TaskPlan",
-    "RunResult",
     "procedure_search_text",
     "skill_search_text",
     # Skill loading
@@ -67,23 +49,10 @@ __all__ = [
     "build_resource_manifest",
     "skill_id",
     "render_skill_for_injection",
-    # LLM
-    "LLMFactory",
-    "BaseLLM",
-    "OllamaLLM",
-    "OpenAICompatibleLLM",
     # Store
     "BaseStore",
     "VectorStore",
-    "EmulatedStore",
-    "FileStore",
-    "MemMachineStore",
-    "MemMachineBypass",
     "QdrantStore",
-    # Phase 3 components
-    "LLMPlanner",
-    "ToolRegistry",
-    "Learner",
     # Rerankers
     "BaseReranker",
     "CEReranker",

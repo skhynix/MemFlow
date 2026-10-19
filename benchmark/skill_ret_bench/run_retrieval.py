@@ -366,9 +366,7 @@ def main() -> None:
         raise ValueError("--k-values must contain at least one positive integer")
     top_k = max(k_values)
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     print("\n=== Starting SkillRet Retrieval Evaluation ===")
     print(f"Query bank: {args.query_bank_path}")
@@ -380,7 +378,7 @@ def main() -> None:
     else:
         print("Mode: async parallel processing")
 
-    memflow = MemFlow(sync_mode=args.sync)
+    memflow = MemFlow()
 
     # Get corpus size from existing procedures (server-side count; listing
     # full payloads just to count them transfers every skill body over the wire)
@@ -505,8 +503,6 @@ def main() -> None:
             user_id=args.user_id,
             corpus_size=corpus_size,
             backend=backend,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
             search_fn=(
                 _make_mode_search_fn(memflow, mode, mode_params) if mode else None
             ),
@@ -546,8 +542,6 @@ def main() -> None:
             "query_bank_path": str(args.query_bank_path),
             "max_queries": args.max_queries,
             "backend": backend,
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
             "sync_mode": args.sync,
             "max_concurrency": args.max_concurrency,
             # Reranker env snapshot — results must be self-describing;

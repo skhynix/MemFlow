@@ -1,15 +1,7 @@
 # Copyright 2026 SK hynix Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Storage backends for MemFlow.
-
-EmulatedStore     — in-memory dict, word-overlap search (testing / demos)
-FileStore         — Markdown files on disk, word-overlap search (local dev)
-MemMachineStore   — MemMachine VectorDB, semantic search (production)
-VectorStore       — Abstract base for vector DB backends with embedding logic
-QdrantStore       — Qdrant vector DB, cosine/dot/euclid distance (production)
-"""
+"""Qdrant persistence and the shared vector embedding pipeline."""
 
 from __future__ import annotations
 
@@ -22,13 +14,11 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from pathlib import Path
 from typing import Any
 
 import httpx
 
 # Default constants for batch operations
-DEFAULT_MAX_BATCHES = 32
 DEFAULT_MAX_WORKERS = 48
 
 # Page size for full-payload Qdrant scrolls, and point-id chunk size for
@@ -96,29 +86,6 @@ def _id_to_uuid(id_str: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, id_str))
 
 
-def _text_score(text: str, query: str) -> float:
-    """Word-overlap relevance score in [0, 1]."""
-    if not query.strip():
-        return 1.0
-    text_words = set(text.lower().split())
-    query_words = set(query.lower().split())
-    if not query_words:
-        return 0.0
-    return len(text_words & query_words) / len(query_words)
-
-
-def _matches_filters(
-    procedure: Procedure,
-    user_id: str | None = None,
-    kind: str | None = None,
-) -> bool:
-    if user_id and procedure.user_id != user_id:
-        return False
-    if kind is not None and procedure.kind != kind:
-        return False
-    return True
-
-
 def _metadata_json(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -131,34 +98,18 @@ def _metadata_json(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _metadata_scalar(value: str) -> str:
-    try:
-        parsed = json.loads(value)
-        return parsed if isinstance(parsed, str) else value
-    except Exception:
-        return value
+def _validate_skill_kind(kind: str | None) -> None:
+    if kind != "skill":
+        raise ValueError("only kind='skill' is supported")
 
 
-def _is_raw_skill_snapshot(procedure: Procedure) -> bool:
-    if procedure.kind != "skill":
-        return False
-    skill = procedure.metadata.get("skill")
-    if not isinstance(skill, dict) or not skill:
-        return False
-    return bool(skill.get("sha256") or procedure.source_path)
-
-
-def _split_file_record(text: str) -> tuple[str, str] | None:
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
-        return None
-
-    offset = len(lines[0])
-    for line in lines[1:]:
-        if line.strip() == "---":
-            return text[len(lines[0]) : offset], text[offset + len(line) :]
-        offset += len(line)
-    return None
+def _validate_skill_input(procedure: Procedure | list[Procedure]) -> None:
+    """Validate every record before sanitation, embedding, or persistence."""
+    records = procedure if isinstance(procedure, list) else [procedure]
+    for record in records:
+        if not isinstance(record, Procedure):
+            raise TypeError("expected a skill record or list of skill records")
+        _validate_skill_kind(record.kind)
 
 
 class BaseStore(ABC):
@@ -178,7 +129,7 @@ class BaseStore(ABC):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
     ) -> list[SearchResult] | list[list[SearchResult]]: ...
 
     @abstractmethod
@@ -234,7 +185,7 @@ class BaseStore(ABC):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         raise NotImplementedError("Async operations are only supported by QdrantStore")
@@ -245,580 +196,6 @@ class BaseStore(ABC):
         max_workers: int = DEFAULT_MAX_WORKERS,
     ) -> int:
         raise NotImplementedError("Async operations are only supported by QdrantStore")
-
-
-class EmulatedStore(BaseStore):
-    """
-    In-memory store with word-overlap search.
-
-    All data is lost on process restart.
-    Suitable for Phase 1 validation and testing.
-    """
-
-    def __init__(self) -> None:
-        self._store: dict[str, Procedure] = {}
-
-    def add(self, procedure: Procedure | list[Procedure]) -> int:
-        """Add a procedure or procedures."""
-        if isinstance(procedure, list):
-            for proc in procedure:
-                self._store[proc.id] = proc
-            return len(procedure)
-        else:
-            self._store[procedure.id] = procedure
-            return 1
-
-    def search(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Search using word-overlap scoring."""
-        if isinstance(query, list):
-            all_results = []
-            for q in query:
-                results = []
-                for proc in self._store.values():
-                    if user_id and proc.user_id != user_id:
-                        continue
-                    if kind is not None and proc.kind != kind:
-                        continue
-                    score = _text_score(procedure_search_text(proc), q)
-                    if score > 0:
-                        results.append(SearchResult(procedure=proc, score=score))
-                results.sort(key=lambda r: r.score, reverse=True)
-                all_results.append(results[:top_k])
-            return all_results
-        else:
-            results = []
-            for proc in self._store.values():
-                if user_id and proc.user_id != user_id:
-                    continue
-                if kind is not None and proc.kind != kind:
-                    continue
-                score = _text_score(procedure_search_text(proc), query)
-                if score > 0:
-                    results.append(SearchResult(procedure=proc, score=score))
-            results.sort(key=lambda r: r.score, reverse=True)
-            return results[:top_k]
-
-    def get(self, id: str) -> Procedure | None:
-        """Get a single procedure by ID."""
-        return self._store.get(id)
-
-    def delete(self, id: str | list[str]) -> int:
-        """Delete a procedure or procedures by ID."""
-        if isinstance(id, list):
-            num_deleted = 0
-            for i in id:
-                if i in self._store:
-                    del self._store[i]
-                    num_deleted += 1
-            return num_deleted
-        else:
-            if id in self._store:
-                del self._store[id]
-                return 1
-            return 0
-
-    def list(self, user_id: str | None = None) -> list[Procedure]:
-        """Get all procedures, optionally filtered by user_id."""
-        procs = list(self._store.values())
-        if user_id:
-            return [p for p in procs if p.user_id == user_id]
-        return procs
-
-
-class FileStore(BaseStore):
-    """
-    File-based store persisting each procedure as a Markdown file.
-
-    File format — simplified frontmatter followed by titled content:
-
-        ---
-        id: <uuid>
-        user_id: <user>
-        category: <category>
-        tags: ["tag1", "tag2"]
-        created_at: <iso-timestamp>
-        ---
-        # <title>
-
-        <content>
-
-    Persists across process restarts. Suitable for local development.
-    """
-
-    def __init__(self, file_dir: str = "./file_data") -> None:
-        self._dir = Path(file_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
-
-    def _path(self, id: str) -> Path:
-        return self._dir / f"{id}.md"
-
-    def _serialize(self, procedure: Procedure) -> str:
-        return (
-            "---\n"
-            f"id: {procedure.id}\n"
-            f"user_id: {procedure.user_id}\n"
-            f"category: {procedure.category}\n"
-            f"tags: {json.dumps(procedure.tags, ensure_ascii=False)}\n"
-            f"created_at: {procedure.created_at}\n"
-            "---\n"
-            f"# {procedure.title}\n"
-            "\n"
-            f"{procedure.content}\n"
-        )
-
-    def _deserialize(self, text: str) -> Procedure | None:
-        if not text.startswith("---"):
-            return None
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return None
-
-        meta: dict[str, str] = {}
-        for line in parts[1].strip().splitlines():
-            if ": " in line:
-                k, v = line.split(": ", 1)
-                meta[k.strip()] = v.strip()
-
-        body = parts[2].strip()
-        lines = body.splitlines()
-        title = ""
-        content_start = 0
-        for i, line in enumerate(lines):
-            if line.startswith("# "):
-                title = line[2:].strip()
-                content_start = i + 1
-                break
-
-        while content_start < len(lines) and not lines[content_start].strip():
-            content_start += 1
-        content = "\n".join(lines[content_start:])
-
-        try:
-            tags = json.loads(meta.get("tags", "[]"))
-        except Exception:
-            tags = []
-
-        created_at = meta.get("created_at", "")
-        updated_at = meta.get("updated_at", created_at)
-
-        return Procedure(
-            id=meta.get("id", ""),
-            title=title,
-            content=content,
-            user_id=meta.get("user_id", "default"),
-            category=meta.get("category", "general"),
-            tags=tags,
-            created_at=created_at,
-            updated_at=updated_at,
-        )
-
-    def _load_all(self) -> list[Procedure]:
-        procs = []
-        for path in sorted(self._dir.glob("*.md")):
-            proc = self._deserialize(path.read_text(encoding="utf-8"))
-            if proc and proc.id:
-                procs.append(proc)
-        return procs
-
-    def add(self, procedure: Procedure | list[Procedure]) -> int:
-        """Add a procedure or procedures."""
-        if isinstance(procedure, list):
-            for proc in procedure:
-                self._path(proc.id).write_text(self._serialize(proc), encoding="utf-8")
-            return len(procedure)
-        else:
-            self._path(procedure.id).write_text(
-                self._serialize(procedure), encoding="utf-8"
-            )
-            return 1
-
-    def search(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Search using word-overlap scoring."""
-        if isinstance(query, list):
-            all_results = []
-            for q in query:
-                results = []
-                for proc in self._load_all():
-                    if user_id and proc.user_id != user_id:
-                        continue
-                    if kind is not None and proc.kind != kind:
-                        continue
-                    score = _text_score(procedure_search_text(proc), q)
-                    if score > 0:
-                        results.append(SearchResult(procedure=proc, score=score))
-                results.sort(key=lambda r: r.score, reverse=True)
-                all_results.append(results[:top_k])
-            return all_results
-        else:
-            results = []
-            for proc in self._load_all():
-                if user_id and proc.user_id != user_id:
-                    continue
-                if kind is not None and proc.kind != kind:
-                    continue
-                score = _text_score(procedure_search_text(proc), query)
-                if score > 0:
-                    results.append(SearchResult(procedure=proc, score=score))
-            results.sort(key=lambda r: r.score, reverse=True)
-            return results[:top_k]
-
-    def get(self, id: str) -> Procedure | None:
-        """Get a single procedure by ID."""
-        path = self._path(id)
-        if path.exists():
-            return self._deserialize(path.read_text(encoding="utf-8"))
-        return None
-
-    def delete(self, id: str | list[str]) -> int:
-        """Delete a procedure or procedures by ID."""
-        if isinstance(id, list):
-            num_deleted = 0
-            for i in id:
-                path = self._path(i)
-                if path.exists():
-                    path.unlink()
-                    num_deleted += 1
-            return num_deleted
-        else:
-            path = self._path(id)
-            if path.exists():
-                path.unlink()
-                return 1
-            return 0
-
-    def list(self, user_id: str | None = None) -> list[Procedure]:
-        """Get all procedures, optionally filtered by user_id."""
-        procs = self._load_all()
-        if user_id:
-            return [p for p in procs if p.user_id == user_id]
-        return procs
-
-
-class MemMachineBypass:
-    """
-    Write-only bridge that routes non-procedural content to MemMachine.
-
-    When MemFlow classifies content as semantic or episodic, it forwards
-    the content here so MemMachine can store it in the appropriate backend
-    (VectorDB for semantic, GraphDB for episodic).
-
-    Requires the `memmachine-client` Python package and a running MemMachine server.
-    Connection is deferred to first use (lazy initialization).
-    """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:8080",
-        org_id: str = "default",
-        project_id: str = "memflow",
-        api_key: str | None = None,
-    ) -> None:
-        self._base_url = base_url
-        self._org_id = org_id
-        self._project_id = project_id
-        self._api_key = api_key
-        self._memory: Any = None
-        self._lock = threading.Lock()
-
-    def _get_memory(self) -> Any:
-        if self._memory is not None:
-            return self._memory
-        with self._lock:
-            if self._memory is None:
-                import memmachine_client as memmachine
-
-                kwargs: dict[str, Any] = {"base_url": self._base_url}
-                if self._api_key:
-                    kwargs["api_key"] = self._api_key
-                client = memmachine.MemMachineClient(**kwargs)
-                project = client.get_or_create_project(
-                    org_id=self._org_id, project_id=self._project_id
-                )
-                self._memory = project.memory()
-        return self._memory
-
-    def add(self, content: str, memory_type: str, user_id: str) -> None:
-        """Store content in MemMachine tagged with the given memory type."""
-        meta = {"mm_type": memory_type, "user_id": user_id}
-        self._get_memory().add(content=content, metadata=meta)
-
-
-class MemMachineStore(BaseStore):
-    """
-    MemMachine-backed store for procedural memory.
-
-    Procedures are stored as episodic memories with metadata tag
-    mm_type='procedural', which distinguishes them from semantic and episodic
-    memories also residing in the same MemMachine project.
-
-    An in-memory index (procedure.id → MemMachine episode id) is populated as
-    a side-effect of add() and search() to allow O(1) delete without a full scan.
-    On a cache-miss in delete(), list_all() is called once to hydrate the index.
-
-    Requires the `memmachine-client` Python package and a running MemMachine server.
-    Connection is deferred to first use (lazy initialization).
-    """
-
-    _MM_TYPE = "procedural"
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:8080",
-        org_id: str = "default",
-        project_id: str = "memflow",
-        api_key: str | None = None,
-    ) -> None:
-        self._base_url = base_url
-        self._org_id = org_id
-        self._project_id = project_id
-        self._api_key = api_key
-        self._memory: Any = None
-        self._lock = threading.Lock()
-        self._index: dict[str, str] = {}  # procedure.id → MemMachine episode id
-
-    def _get_memory(self) -> Any:
-        if self._memory is not None:
-            return self._memory
-        with self._lock:
-            if self._memory is None:
-                import memmachine_client as memmachine
-
-                kwargs: dict[str, Any] = {"base_url": self._base_url}
-                if self._api_key:
-                    kwargs["api_key"] = self._api_key
-                client = memmachine.MemMachineClient(**kwargs)
-                project = client.get_or_create_project(
-                    org_id=self._org_id, project_id=self._project_id
-                )
-                self._memory = project.memory()
-        return self._memory
-
-    @staticmethod
-    def _sanitize(meta: dict) -> dict:
-        """MemMachine requires all metadata values to be strings."""
-        result = {}
-        for k, v in meta.items():
-            if v is None:
-                continue
-            result[k] = (
-                json.dumps(v, ensure_ascii=False)
-                if isinstance(v, (dict, list))
-                else str(v)
-            )
-        return result
-
-    def _to_text(self, procedure: Procedure) -> str:
-        return f"# {procedure.title}\n\n{procedure.content}"
-
-    def _to_metadata(self, procedure: Procedure) -> dict:
-        return self._sanitize(
-            {
-                "mm_type": self._MM_TYPE,
-                "record_id": procedure.id,
-                "user_id": procedure.user_id,
-                "category": procedure.category,
-                "tags": procedure.tags,
-                "kind": procedure.kind,
-                "source_path": procedure.source_path,
-                "metadata": procedure.metadata,
-                "created_at": procedure.created_at,
-                "updated_at": procedure.updated_at,
-            }
-        )
-
-    def _extract_episodes(self, raw: Any) -> list[Any]:
-        """Extract episodes from SearchResult (both long-term and short-term)."""
-        episodes = []
-        if raw is None or raw.content is None or raw.content.episodic_memory is None:
-            return episodes
-        if raw.content.episodic_memory.long_term_memory is not None:
-            episodes.extend(raw.content.episodic_memory.long_term_memory.episodes)
-        if raw.content.episodic_memory.short_term_memory is not None:
-            episodes.extend(raw.content.episodic_memory.short_term_memory.episodes)
-        return episodes
-
-    def _parse_item(self, item: Any) -> tuple[Procedure | None, str]:
-        """Parse a MemMachine search result → (Procedure | None, episode_id)."""
-        if isinstance(item, dict):
-            ep_id = str(item.get("id", ""))
-            content = item.get("content", "")
-            meta = item.get("metadata", {}) or {}
-        else:
-            ep_id = str(getattr(item, "id", ""))
-            content = str(getattr(item, "content", "") or "")
-            meta = getattr(item, "metadata", {}) or {}
-
-        if meta.get("mm_type") != self._MM_TYPE:
-            return None, ep_id
-
-        lines = content.strip().splitlines()
-        title = lines[0].lstrip("# ").strip() if lines else ""
-        start = 1
-        while start < len(lines) and not lines[start].strip():
-            start += 1
-        body = "\n".join(lines[start:])
-
-        try:
-            tags = json.loads(meta.get("tags", "[]"))
-        except Exception:
-            tags = []
-        metadata = _metadata_json(meta.get("metadata", "{}"))
-        source_path = meta.get("source_path") or None
-        created_at = meta.get("created_at", "")
-        updated_at = meta.get("updated_at") or created_at
-
-        proc = Procedure(
-            id=meta.get("record_id", ep_id),
-            title=title,
-            content=body,
-            user_id=meta.get("user_id", "default"),
-            category=meta.get("category", "general"),
-            tags=tags,
-            kind=meta.get("kind", "skill"),
-            source_path=source_path,
-            metadata=metadata,
-            created_at=created_at,
-            updated_at=updated_at,
-        )
-        return proc, ep_id
-
-    def add(
-        self,
-        procedure: Procedure | list[Procedure],
-        batch_size: int = 50,
-    ) -> int:
-        if isinstance(procedure, list):
-            for proc in procedure:
-                result = self._get_memory().add(
-                    content=self._to_text(proc),
-                    metadata=self._to_metadata(proc),
-                )
-                if isinstance(result, dict):
-                    ep_id = str(result.get("id", proc.id))
-                elif result is not None:
-                    ep_id = str(getattr(result, "id", proc.id))
-                else:
-                    ep_id = proc.id
-                self._index[proc.id] = ep_id
-            return len(procedure)
-        else:
-            result = self._get_memory().add(
-                content=self._to_text(procedure),
-                metadata=self._to_metadata(procedure),
-            )
-            if isinstance(result, dict):
-                ep_id = str(result.get("id", procedure.id))
-            elif result is not None:
-                ep_id = str(getattr(result, "id", procedure.id))
-            else:
-                ep_id = procedure.id
-            self._index[procedure.id] = ep_id
-            return 1
-
-    def search(
-        self,
-        query: str | list[str],
-        top_k: int = 5,
-        user_id: str | None = None,
-        kind: str | None = "skill",
-    ) -> list[SearchResult] | list[list[SearchResult]]:
-        """Search using MemMachine semantic search."""
-        if isinstance(query, list):
-            all_results = []
-            for q in query:
-                raw = self._get_memory().search(query=q, limit=top_k * 3)
-                results = []
-                for item in self._extract_episodes(raw):
-                    score = float(item.score) if item.score is not None else 0.0
-                    proc, ep_id = self._parse_item(item)
-                    if proc is None:
-                        continue
-                    if ep_id:
-                        self._index[proc.id] = ep_id
-                    if not _matches_filters(proc, user_id=user_id, kind=kind):
-                        continue
-                    results.append(SearchResult(procedure=proc, score=score))
-                all_results.append(results[:top_k])
-            return all_results
-        else:
-            raw = self._get_memory().search(query=query, limit=top_k * 3)
-            results = []
-            for item in self._extract_episodes(raw):
-                score = float(item.score) if item.score is not None else 0.0
-                proc, ep_id = self._parse_item(item)
-                if proc is None:
-                    continue
-                if ep_id:
-                    self._index[proc.id] = ep_id
-                if not _matches_filters(proc, user_id=user_id, kind=kind):
-                    continue
-                results.append(SearchResult(procedure=proc, score=score))
-            return results[:top_k]
-
-    def get(self, id: str) -> Procedure | None:
-        for proc in self.list():
-            if proc.id == id:
-                return proc
-        return None
-
-    def delete(
-        self,
-        id: str | list[str],
-    ) -> int:
-        if isinstance(id, list):
-            num_deleted = 0
-            for i in id:
-                if i not in self._index:
-                    self.list()  # hydrate index
-                ep_id = self._index.get(i)
-                if not ep_id:
-                    continue
-                try:
-                    self._get_memory().delete(ep_id)
-                    self._index.pop(i, None)
-                    num_deleted += 1
-                except Exception:
-                    pass
-            return num_deleted
-        else:
-            if id not in self._index:
-                self.list()  # hydrate index
-            ep_id = self._index.get(id)
-            if not ep_id:
-                return 0
-            try:
-                self._get_memory().delete(ep_id)
-                self._index.pop(id, None)
-                return 1
-            except Exception:
-                return 0
-
-    def list(self, user_id: str | None = None) -> list[Procedure]:
-        raw = self._get_memory().search(query="", limit=10_000)
-        procs = []
-
-        for item in self._extract_episodes(raw):
-            proc, ep_id = self._parse_item(item)
-            if proc is None:
-                continue
-            if ep_id:
-                self._index[proc.id] = ep_id
-            if user_id and proc.user_id != user_id:
-                continue
-            procs.append(proc)
-        return procs
 
 
 class VectorStore(BaseStore):
@@ -1791,6 +1168,7 @@ class QdrantStore(VectorStore):
         Returns:
             1 for single, number of inserted procedures for batch
         """
+        _validate_skill_input(procedure)
         if isinstance(procedure, list):
             if not procedure:
                 return 0
@@ -1835,6 +1213,7 @@ class QdrantStore(VectorStore):
         Returns:
             1 for single, number of inserted procedures for batch
         """
+        _validate_skill_input(procedure)
         import asyncio
         from asyncio import Semaphore
 
@@ -1884,7 +1263,7 @@ class QdrantStore(VectorStore):
         query_emb: list[float],
         top_k: int,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
     ) -> list[SearchResult]:
         """Search using pre-computed query embedding."""
         query_filter = self._build_query_filter(user_id, kind)
@@ -1934,7 +1313,7 @@ class QdrantStore(VectorStore):
         query: str,
         rrf_top_k: int = 10,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
         mode: str = "hybrid",
         rrf_weights: list[float] | None = None,
         sparse_top_k: int = 200,
@@ -2000,6 +1379,7 @@ class QdrantStore(VectorStore):
             0.2 gate). Exception: a token-less query (no BM25 terms) runs the
             dense leg alone and keeps raw cosine scores.
         """
+        _validate_skill_kind(kind)
         if not self._sparse_enabled and mode != "dense":
             raise RuntimeError(
                 f"search_hybrid(mode={mode!r}) requires a collection with a "
@@ -2157,7 +1537,7 @@ class QdrantStore(VectorStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
         batch_size: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Search for procedures by semantic similarity.
@@ -2171,6 +1551,7 @@ class QdrantStore(VectorStore):
         Returns:
             Single list for single query, list of lists for batch
         """
+        _validate_skill_kind(kind)
         if isinstance(query, list):
             query_embs = self._compute_embs_batch(
                 query, batch_size=batch_size, is_query=True
@@ -2189,7 +1570,7 @@ class QdrantStore(VectorStore):
         query: str | list[str],
         top_k: int = 5,
         user_id: str | None = None,
-        kind: str | None = "skill",
+        kind: str = "skill",
         batch_size: int = 10,
         max_workers: int = 10,
     ) -> list[SearchResult] | list[list[SearchResult]]:
@@ -2205,6 +1586,7 @@ class QdrantStore(VectorStore):
         Returns:
             Single list for single query, list of lists for batch
         """
+        _validate_skill_kind(kind)
         import asyncio
         from asyncio import Semaphore
 

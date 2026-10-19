@@ -206,9 +206,7 @@ def test_integrated_runner_awaits_corpus_seeding(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(runner, "_load_env_file", lambda *_: None)
     monkeypatch.setattr(runner, "_parse_args", lambda: args)
-    # The integrated runner constructs MemFlow(sync_mode=...), so the stub must
-    # accept the keyword argument.
-    monkeypatch.setattr(runner, "MemFlow", lambda **kwargs: object())
+    monkeypatch.setattr(runner, "MemFlow", lambda: object())
     monkeypatch.setattr(
         runner, "seed_skill_reason_corpus", fake_seed_skill_reason_corpus
     )
@@ -245,9 +243,7 @@ def test_runners_reject_nonpositive_k_values_as_systemexit(
                 user_id="bench",
                 sync=True,
             ),
-            backend="emulated",
-            llm_provider="ollama",
-            llm_model="x",
+            backend="qdrant",
         )
 
     args = Namespace(
@@ -768,8 +764,6 @@ def test_adapter_retrieve_fetches_extra_and_excludes() -> None:
         user_id="bench",
         corpus_size=5,
         backend="test",
-        llm_provider="test",
-        llm_model="test",
     )
     results = adapter.retrieve("q", k=2, exclude_procedure_ids={"excluded"})
 

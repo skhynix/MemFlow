@@ -1569,14 +1569,14 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "matplotlib", marker = "extra == 'benchmark'", specifier = ">=3.8" },
     { name = "mcp", specifier = ">=1.29,<2" },
-    { name = "memmachine-client", marker = "extra == 'memmachine'", specifier = ">=0.3.0" },
+    { name = "memmachine-client", marker = "extra == 'memmachine'", specifier = ">=0.3.3" },
     { name = "ollama", marker = "extra == 'ollama'", specifier = ">=0.6.1" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.30.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qdrant-client", specifier = "==1.18.0" },
 ]
-provides-extras = ["benchmark", "ollama", "memmachine", "openai", "hybrid"]
+provides-extras = ["benchmark", "ollama", "openai", "memmachine", "hybrid"]
 
 [package.metadata.requires-dev]
 dev = [

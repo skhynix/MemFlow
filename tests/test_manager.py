@@ -11,256 +11,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from memflow.manager import MemFlow, _load_env_file
-from memflow.models import (
-    Procedure,
-    RunResult,
-    SearchResult,
-    Step,
-    StepResult,
-    StepType,
-    TaskPlan,
-)
-from memflow.store import (
-    EmulatedStore,
-    FileStore,
-    MemMachineBypass,
-    MemMachineStore,
-)
-
-
-class TestMemFlowInit:
-    """Tests for MemFlow initialization."""
-
-    def test_init_with_llm_and_store(self, fake_llm):
-        """Test initialization with LLM and store."""
-        store = EmulatedStore()
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        assert manager.llm == fake_llm
-        assert manager.store == store
-
-    def test_init_with_llm_only(self, fake_llm):
-        """Test initialization creates default EmulatedStore."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        assert isinstance(manager.store, EmulatedStore)
-
-    def test_init_without_llm_and_use_env_false_should_fail(self):
-        """Test that initializing without LLM and use_env=False raises error."""
-        with pytest.raises(ValueError, match="LLM must be provided"):
-            MemFlow(use_env=False)
-
-    def test_init_with_llm_only_and_use_env_false(self, fake_llm):
-        """Test that store defaults to EmulatedStore when not provided."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-        assert isinstance(manager.store, EmulatedStore)
-
-    def test_init_with_bypass(self, fake_llm):
-        """Test initialization with bypass."""
-        bypass = MemMachineBypass()
-        manager = MemFlow(llm=fake_llm, bypass=bypass, use_env=False)
-
-        # Note: No public getter for bypass, so we verify it was accepted
-        # by checking the manager was created successfully with bypass
-        assert manager is not None
-        assert manager.llm is fake_llm
-
-    def test_planner_lazy_initialization(self, fake_llm):
-        """Test that planner is lazily initialized on first use."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # Trigger planner creation by calling plan() with mocked LLMPlanner
-        with patch("memflow.manager.LLMPlanner") as mock_planner_cls:
-            mock_planner_cls.return_value.plan.return_value = TaskPlan(
-                task="Test", steps=[]
-            )
-            result = manager.plan("Test task")
-
-        # Verify planner was called with correct kwargs
-        mock_planner_cls.assert_called_once()
-        call_kwargs = mock_planner_cls.call_args.kwargs
-        assert call_kwargs["llm"] is fake_llm
-        assert isinstance(result, TaskPlan)
-
-    def test_executor_lazy_initialization(self, fake_llm):
-        """Test that executor is lazily initialized on first use."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # Trigger executor creation by calling run() with mocked dependencies
-        with (
-            patch("memflow.manager.LLMPlanner"),
-            patch("memflow.manager.ToolRegistry") as mock_registry_cls,
-            patch("memflow.manager.Learner"),
-        ):
-            mock_registry_cls.return_value.execute_step.return_value = StepResult(
-                step_id="step-1", success=True, output="test"
-            )
-            result = manager.run("Test task")
-
-        # Verify executor was called with correct kwargs
-        mock_registry_cls.assert_called_once()
-        call_kwargs = mock_registry_cls.call_args.kwargs
-        assert call_kwargs["llm"] is fake_llm
-        assert isinstance(result, RunResult)
-
-    def test_learner_lazy_initialization(self, fake_llm):
-        """Test that learner is lazily initialized on first use."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # Trigger learner creation by calling run() with mocked dependencies
-        with (
-            patch("memflow.manager.LLMPlanner"),
-            patch("memflow.manager.ToolRegistry"),
-            patch("memflow.manager.Learner") as mock_learner_cls,
-        ):
-            mock_learner = MagicMock()
-            mock_learner.extract.return_value = Procedure(
-                title="Test", content="1. Step"
-            )
-            mock_learner_cls.return_value = mock_learner
-
-            # Use multi_stage=False for simpler single-shot execution path
-            result = manager.run("Test task", multi_stage=False)
-
-        # Verify learner was instantiated and extract was called
-        mock_learner_cls.assert_called_once()
-        mock_learner.extract.assert_called_once()
-        assert isinstance(result, RunResult)
-
-
-class TestMemFlowFromEnv:
-    """Tests for MemFlow.from_env() - now via use_env=True."""
-
-    @patch("memflow.manager.LLMFactory")
-    def test_explicit_llm_takes_priority_over_env(self, mock_factory, clean_env):
-        """Test that explicitly provided LLM is not overwritten by .env."""
-        os.environ["LLM_PROVIDER"] = "ollama"
-        os.environ["LLM_MODEL"] = "env-model"
-
-        custom_llm = MagicMock()
-        manager = MemFlow(llm=custom_llm, use_env=True)
-
-        # LLMFactory.create 가 호출되지 않아야 함 (명시적 LLM 사용)
-        mock_factory.create.assert_not_called()
-        assert manager.llm is custom_llm
-
-    @patch("memflow.manager.LLMFactory")
-    def test_explicit_store_takes_priority_over_env(self, mock_factory, clean_env):
-        """Test that explicitly provided store is not overwritten by .env."""
-        os.environ["MEMFLOW_BACKEND"] = "file"
-
-        custom_store = MemMachineStore(
-            base_url="http://custom", org_id="org", project_id="proj"
-        )
-        manager = MemFlow(llm=mock_factory.create(), store=custom_store, use_env=True)
-
-        # custom_store 가 유지되어야 함
-        assert manager.store is custom_store
-
-    @patch("memflow.manager.LLMFactory")
-    def test_explicit_bypass_takes_priority_over_env(self, mock_factory, clean_env):
-        """Test that explicitly provided bypass is not overwritten by .env."""
-        os.environ["MEMFLOW_BACKEND"] = "memmachine"
-
-        custom_bypass = MemMachineBypass(base_url="http://custom")
-        manager = MemFlow(llm=mock_factory.create(), bypass=custom_bypass, use_env=True)
-
-        # custom_bypass 가 유지되어야 함
-        assert manager._bypass is custom_bypass
-
-    @patch("memflow.manager.LLMFactory")
-    def test_backend_inferred_from_explicit_store(self, mock_factory, clean_env):
-        """Test that backend is inferred from explicitly provided store type."""
-        mock_store = MagicMock()
-        manager = MemFlow(llm=mock_factory.create(), store=mock_store, use_env=False)
-        # internal logic verification - store 가 그대로 유지되어야 함
-        assert manager.store is mock_store
-
-    @patch("memflow.manager.LLMFactory")
-    def test_from_env_defaults(self, mock_factory, clean_env):
-        """Test initialization with use_env=True uses default values."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        manager = MemFlow(use_env=True)
-
-        # Verify LLMFactory.create was called with ollama provider
-        mock_factory.create.assert_called_once()
-        call_args = mock_factory.create.call_args
-        assert call_args.args[0] == "ollama"
-        assert call_args.kwargs.get("api_base") == "http://localhost:11434"
-        assert isinstance(manager.store, EmulatedStore)
-
-    @patch("memflow.manager.LLMFactory")
-    def test_from_env_with_ollama(self, mock_factory, clean_env):
-        """Test initialization with use_env=True with ollama provider."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        os.environ["LLM_PROVIDER"] = "ollama"
-        os.environ["LLM_MODEL"] = "llama3.2"
-
-        manager = MemFlow(use_env=True)
-
-        assert isinstance(manager.store, EmulatedStore)
-
-    @patch("memflow.manager.LLMFactory")
-    def test_from_env_with_file_backend(self, mock_factory, clean_env):
-        """Test initialization with use_env=True with file backend."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        os.environ["MEMFLOW_BACKEND"] = "file"
-        os.environ["MEMFLOW_FILE_DIR"] = "/tmp/test_data"
-
-        manager = MemFlow(use_env=True)
-
-        assert isinstance(manager.store, FileStore)
-
-    @patch("memflow.manager.LLMFactory")
-    def test_from_env_with_memmachine_backend(self, mock_factory, clean_env):
-        """Test initialization with use_env=True with memmachine backend."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        os.environ["MEMFLOW_BACKEND"] = "memmachine"
-        os.environ["MEMMACHINE_BASE_URL"] = "http://test:8080"
-        os.environ["MEMMACHINE_ORG_ID"] = "test-org"
-        os.environ["MEMMACHINE_PROJECT"] = "test-project"
-
-        manager = MemFlow(use_env=True)
-
-        assert isinstance(manager.store, MemMachineStore)
-        # Note: No public getter for bypass, verify manager was created successfully
-        assert manager is not None
-
-    @patch("memflow.manager.LLMFactory")
-    def test_from_env_with_openai_provider(self, mock_factory, clean_env):
-        """Test initialization with use_env=True with openai-compatible provider."""
-        mock_llm = MagicMock()
-        mock_factory.create.return_value = mock_llm
-
-        os.environ["LLM_PROVIDER"] = "openai-compatible"
-        os.environ["LLM_MODEL"] = "gpt-4"
-        os.environ["LLM_API_BASE"] = "http://vllm:8000/v1"
-        os.environ["LLM_API_KEY"] = "test-key"
-
-        MemFlow(use_env=True)
-
-        mock_factory.create.assert_called_once_with(
-            "openai-compatible",
-            model="gpt-4",
-            api_base="http://vllm:8000/v1",
-            api_key="test-key",
-        )
+from memflow.models import Procedure, SearchResult
+from tests.fakes import FakeSkillStore
 
 
 class TestMemFlowAdd:
     """Tests for MemFlow.add()."""
 
-    def test_add_procedure_direct(self, fake_llm):
+    def test_add_procedure_direct(self):
         """Test adding a procedure directly."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
+        manager = MemFlow(store=FakeSkillStore(), use_env=False)
         proc = Procedure(title="Test", content="1. Step")
 
         result = manager.add(procedure=proc)
@@ -269,102 +29,77 @@ class TestMemFlowAdd:
         assert result["id"] == proc.id
         assert proc in [p for p in manager.store.list()]
 
-    def test_add_procedure_requires_either_messages_or_procedure(self, fake_llm):
-        """Test that add requires either messages or procedure."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        with pytest.raises(ValueError, match="Either 'messages' or 'procedure'"):
-            manager.add()
-
-    def test_add_with_string_messages_keyword_detection(self, fake_llm):
-        """Test add with string messages - classification is now LLM-based."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # Set LLM to classify as "none" (non-procedural)
-        fake_llm.set_response('{"type": "none"}')
-        result = manager.add(messages="This has no procedural keywords")
-
-        # LLM-based classification now - should be skipped as "classified as none"
-        assert result.get("skipped") == "classified as none"
-
-    def test_add_with_procedural_keywords(self, fake_llm):
-        """Test add with procedural keywords triggers extraction."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # LLM will classify as procedural and extract
-        result = manager.add(messages="how to deploy step 1 step 2")
-
-        # Should have attempted extraction
-        assert "results" in result
-
 
 class TestMemFlowSearch:
     """Tests for MemFlow.search()."""
 
-    def test_search_delegates_to_store(self, fake_llm):
+    def test_search_delegates_to_store(self):
         """Test that search delegates to store."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
+        store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         results = manager.search("deploy")
 
         assert len(results) == 1
         assert results[0].procedure.title == "Deploy guide"
 
-    def test_search_with_user_id(self, fake_llm):
+    def test_search_with_user_id(self):
         """Test search filters by user_id."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         store.add(Procedure(title="User1 deploy", content="1. Deploy", user_id="user1"))
         store.add(Procedure(title="User2 deploy", content="1. Deploy", user_id="user2"))
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
+        store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         results = manager.search("deploy", user_id="user1")
 
         assert len(results) == 1
         assert results[0].procedure.user_id == "user1"
 
-    def test_search_with_top_k(self, fake_llm):
+    def test_search_with_top_k(self):
         """Test search limits results to top_k."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         for i in range(10):
             store.add(Procedure(title=f"Deploy {i}", content=f"1. Deploy {i}"))
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
+        store.search_results = [SearchResult(p, 0.8) for p in store.list()]
         results = manager.search("deploy", top_k=3)
 
         assert len(results) == 3
 
-    def test_search_kind_filter(self, fake_llm):
+    def test_search_kind_filter(self):
         """Test MemFlow.search passes kind filters to the store."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         skill = Procedure(title="Deploy skill", content="deploy")
         procedure = Procedure(
             title="Deploy procedure",
             content="deploy",
             kind="procedure",
         )
-        store.add([skill, procedure])
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        store.records.update({skill.id: skill, procedure.id: procedure})
+        store.search_results = [SearchResult(p, 0.8) for p in store.list()]
+        manager = MemFlow(store=store, use_env=False)
 
         assert [r.procedure.id for r in manager.search("deploy")] == [skill.id]
-        assert [r.procedure.id for r in manager.search("deploy", kind="procedure")] == [
-            procedure.id
-        ]
-        assert {r.procedure.id for r in manager.search("deploy", kind=None)} == {
-            skill.id,
-            procedure.id,
-        }
+        for kind in ("procedure", None):
+            with pytest.raises(ValueError):
+                manager.search("deploy", kind=kind)
+        assert len(store.search_calls) == 1
 
 
 class TestMemFlowSearchReranker:
     """Tests for reranker integration in MemFlow.search()."""
 
-    def test_search_no_reranker_by_default(self, fake_llm, clean_env):
+    def test_search_no_reranker_by_default(self, clean_env):
         """With MEMFLOW_RERANKER_PIPELINE unset, search delegates directly to store."""
-        store = EmulatedStore()
-        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        manager = MemFlow(llm=fake_llm, store=store)
+        store = FakeSkillStore()
+        store.search_results = [
+            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+        ]
+        manager = MemFlow(store=store)
 
         results = manager.search("deploy")
 
@@ -372,13 +107,15 @@ class TestMemFlowSearchReranker:
         assert results[0].procedure.title == "Deploy guide"
         assert manager._rerank_pipeline_obj is None  # never built
 
-    def test_search_reranks_when_pipeline_enabled(self, fake_llm, clean_env):
+    def test_search_reranks_when_pipeline_enabled(self, clean_env):
         """MEMFLOW_RERANKER_PIPELINE=ce routes candidates through the rerank pipeline."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
         os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "10"
-        store = EmulatedStore()
-        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        manager = MemFlow(llm=fake_llm, store=store)
+        store = FakeSkillStore()
+        store.search_results = [
+            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+        ]
+        manager = MemFlow(store=store)
 
         mock_pipeline = MagicMock()
         mock_pipeline.rerank.return_value = [
@@ -394,13 +131,13 @@ class TestMemFlowSearchReranker:
         assert len(results) == 1
         assert results[0].procedure.title == "reranked"
 
-    def test_search_over_fetches_when_rerank_enabled(self, fake_llm, clean_env):
+    def test_search_over_fetches_when_rerank_enabled(self, clean_env):
         """store.search receives top_k=max(top_k, candidate_k) when reranking."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
         os.environ["MEMFLOW_RERANKER_FETCH_TOP_K"] = "20"
         mock_store = MagicMock()
         mock_store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=mock_store)
+        manager = MemFlow(store=mock_store)
 
         manager.search("deploy", top_k=5)
 
@@ -408,17 +145,17 @@ class TestMemFlowSearchReranker:
         call_kwargs = mock_store.search.call_args.kwargs
         assert call_kwargs["top_k"] == 20
 
-    def test_search_no_over_fetch_when_rerank_disabled(self, fake_llm, clean_env):
+    def test_search_no_over_fetch_when_rerank_disabled(self, clean_env):
         """Without reranking, store.search receives the caller's top_k."""
         mock_store = MagicMock()
         mock_store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=mock_store)
+        manager = MemFlow(store=mock_store)
 
         manager.search("deploy", top_k=5)
 
         assert mock_store.search.call_args.kwargs["top_k"] == 5
 
-    def test_search_hybrid_respects_fetch_cap_server_side(self, fake_llm, clean_env):
+    def test_search_hybrid_respects_fetch_cap_server_side(self, clean_env):
         """Hybrid+rerank: FETCH_TOP_K < RRF_TOP_K must shrink the server-side
         rrf_top_k, not just truncate client-side."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
@@ -428,7 +165,7 @@ class TestMemFlowSearchReranker:
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store)
+        manager = MemFlow(store=store)
 
         with patch.object(manager, "_get_rerank_pipeline") as mock_get:
             mock_get.return_value.rerank.return_value = []
@@ -439,7 +176,7 @@ class TestMemFlowSearchReranker:
         # helper re-inflated this back to RRF_TOP_K=100.
         assert kwargs["rrf_top_k"] == 20
 
-    def test_search_fetch_below_rrf_warns_once(self, fake_llm, clean_env, caplog):
+    def test_search_fetch_below_rrf_warns_once(self, clean_env, caplog):
         """FETCH_TOP_K < RRF_TOP_K silently shrinks the candidate pool below
         the configured RRF depth — search() must warn once (every other
         silent degradation in this pipeline warns)."""
@@ -452,7 +189,7 @@ class TestMemFlowSearchReranker:
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store)
+        manager = MemFlow(store=store)
 
         with patch.object(manager, "_get_rerank_pipeline") as mock_get:
             mock_get.return_value.rerank.return_value = []
@@ -463,7 +200,7 @@ class TestMemFlowSearchReranker:
         warnings = [r for r in caplog.records if "FETCH_TOP_K" in r.message]
         assert len(warnings) == 1
 
-    def test_search_deep_top_k_exceeds_fetch_pool(self, fake_llm, clean_env):
+    def test_search_deep_top_k_exceeds_fetch_pool(self, clean_env):
         """A caller asking deeper than the pool always gets its full request:
         max(min(RRF, FETCH), top_k) — the pool is a floor for retrieval, not
         a ceiling on the caller's top_k."""
@@ -474,7 +211,7 @@ class TestMemFlowSearchReranker:
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store)
+        manager = MemFlow(store=store)
 
         with patch.object(manager, "_get_rerank_pipeline") as mock_get:
             mock_get.return_value.rerank.return_value = []
@@ -482,12 +219,12 @@ class TestMemFlowSearchReranker:
 
         assert store.search_hybrid.call_args.kwargs["rrf_top_k"] == 200
 
-    def test_search_batch_bypasses_reranker(self, fake_llm, clean_env):
+    def test_search_batch_bypasses_reranker(self, clean_env):
         """Batch queries (list input) skip the reranker entirely."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
         mock_store = MagicMock()
         mock_store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=mock_store)
+        manager = MemFlow(store=mock_store)
 
         manager.search(["deploy", "build"], top_k=3)
 
@@ -495,9 +232,7 @@ class TestMemFlowSearchReranker:
         assert mock_store.search.call_args.kwargs["top_k"] == 3
         assert manager._rerank_pipeline_obj is None
 
-    def test_misconfigured_pipeline_warns_and_keeps_order(
-        self, fake_llm, clean_env, caplog
-    ):
+    def test_misconfigured_pipeline_warns_and_keeps_order(self, clean_env, caplog):
         """PIPELINE=ce without RERANKER_CE_API_BASE must not crash search():
         warn once, degrade to retrieval order, and cache the fallback so the
         failed build is not retried on every query."""
@@ -505,9 +240,11 @@ class TestMemFlowSearchReranker:
 
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
         os.environ.pop("RERANKER_CE_API_BASE", None)
-        store = EmulatedStore()
-        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        manager = MemFlow(llm=fake_llm, store=store)
+        store = FakeSkillStore()
+        store.search_results = [
+            SearchResult(Procedure(title="Deploy guide", content="1. Deploy"), 0.8)
+        ]
+        manager = MemFlow(store=store)
 
         with caplog.at_level(logging.WARNING, logger="memflow.manager"):
             first = manager.search("deploy", top_k=1)
@@ -521,7 +258,7 @@ class TestMemFlowSearchReranker:
 
         assert isinstance(manager._rerank_pipeline_obj, NoopReranker)
 
-    def test_pipeline_built_once_under_concurrency(self, fake_llm, clean_env):
+    def test_pipeline_built_once_under_concurrency(self, clean_env):
         """The double-checked lock must construct the pipeline at most once
         even when many threads hit a cold cache simultaneously."""
         import threading
@@ -529,7 +266,7 @@ class TestMemFlowSearchReranker:
         from memflow.reranker import RerankPipeline
 
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
-        manager = MemFlow(llm=fake_llm, store=EmulatedStore())
+        manager = MemFlow(store=FakeSkillStore())
 
         build_calls = []
         real_init = RerankPipeline.__init__
@@ -551,9 +288,7 @@ class TestMemFlowSearchReranker:
 
         assert len(build_calls) == 1
 
-    def test_search_rerank_false_skips_overfetch_and_reranker(
-        self, fake_llm, clean_env
-    ):
+    def test_search_rerank_false_skips_overfetch_and_reranker(self, clean_env):
         """rerank=False bypasses the pipeline even when globally enabled:
         no candidate over-fetch, no pipeline construction."""
         os.environ["MEMFLOW_RERANKER_PIPELINE"] = "ce"
@@ -561,7 +296,7 @@ class TestMemFlowSearchReranker:
         hit = SearchResult(procedure=Procedure(title="Deploy", content="x"), score=1.0)
         mock_store = MagicMock()
         mock_store.search.return_value = [hit]
-        manager = MemFlow(llm=fake_llm, store=mock_store)
+        manager = MemFlow(store=mock_store)
 
         manager.search("deploy", top_k=3, rerank=False)
 
@@ -579,12 +314,12 @@ class TestMemFlowSearchReranker:
 class TestMemFlowDelete:
     """Tests for MemFlow.delete()."""
 
-    def test_delete_removes_procedure(self, fake_llm):
+    def test_delete_removes_procedure(self):
         """Test deleting a procedure by ID."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         proc = Procedure(title="Deploy guide", content="1. Deploy")
         store.add(proc)
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
         result = manager.delete(proc.id)
 
@@ -596,9 +331,9 @@ class TestMemFlowDelete:
         }
         assert store.get(proc.id) is None
 
-    def test_delete_missing_id_returns_not_found(self, fake_llm):
+    def test_delete_missing_id_returns_not_found(self):
         """Test deleting a missing ID returns not_found."""
-        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=False)
+        manager = MemFlow(store=FakeSkillStore(), use_env=False)
 
         result = manager.delete("missing-id")
 
@@ -609,16 +344,16 @@ class TestMemFlowDelete:
             "error": "not_found",
         }
 
-    def test_delete_batch_removes_multiple_procedures(self, fake_llm):
+    def test_delete_batch_removes_multiple_procedures(self):
         """Test deleting multiple procedures by ID."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         kept = Procedure(title="Keep", content="1. Keep")
         deleted = [
             Procedure(title="Deploy guide", content="1. Deploy"),
             Procedure(title="Rollback guide", content="1. Roll back"),
         ]
         store.add([kept, *deleted])
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
         result = manager.delete([deleted[0].id, deleted[1].id, "missing-id"])
 
@@ -631,9 +366,9 @@ class TestMemFlowDelete:
         assert store.get(deleted[1].id) is None
         assert store.get(kept.id) is kept
 
-    def test_delete_respects_user_scope(self, fake_llm):
+    def test_delete_respects_user_scope(self):
         """Test scoped delete does not remove another user's procedure."""
-        store = EmulatedStore()
+        store = FakeSkillStore()
         proc = Procedure(
             id="shared-looking-id",
             title="Private deploy guide",
@@ -641,7 +376,7 @@ class TestMemFlowDelete:
             user_id="user-a",
         )
         store.add(proc)
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
+        manager = MemFlow(store=store, use_env=False)
 
         result = manager.delete(proc.id, user_id="user-b")
 
@@ -652,481 +387,6 @@ class TestMemFlowDelete:
             "error": "not_found",
         }
         assert store.get(proc.id) is proc
-
-
-class TestMemFlowChat:
-    """Tests for MemFlow.chat()."""
-
-    def test_chat_with_procedures(self, fake_llm):
-        """Test chat with retrieved procedures."""
-        store = EmulatedStore()
-        # Add procedure with content that will match the search query
-        store.add(
-            Procedure(
-                title="How to deploy",
-                content="1. Run deploy.sh to deploy the application",
-            )
-        )
-        # First call: intent classification -> SEARCH
-        # Second call: chat response generation (SEARCH handler uses LLM for response)
-        fake_llm.set_response('{"intents": ["SEARCH"], "primary": "SEARCH"}')
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        # First verify search works directly
-        search_results = manager.search("How to deploy?")
-        assert len(search_results) > 0, "Search should find the procedure"
-
-        result = manager.chat("How to deploy?")
-
-        # chat() returns dict with response key
-        assert "response" in result
-        # The SEARCH handler returns procedures text
-        assert (
-            "How to deploy" in result["response"] or "deploy.sh" in result["response"]
-        )
-        assert len(fake_llm.generate_calls) >= 1
-
-    def test_chat_without_procedures(self, fake_llm):
-        """Test chat when no procedures found."""
-        store = EmulatedStore()
-        fake_llm.set_response(
-            '{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}'
-        )
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat("How to deploy?")
-
-        assert len(fake_llm.generate_calls) > 0
-        assert "response" in result
-
-    def test_chat_strips_surrounding_blank_response_lines(self, fake_llm):
-        """Test chat responses do not include LLM-added blank padding lines."""
-        store = EmulatedStore()
-        fake_llm.response = "\n\n    Hello!\n\n"
-        fake_llm.set_response(
-            '{"intents": ["CONVERSATION"], "primary": "CONVERSATION"}'
-        )
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat("hi")
-
-        assert result["response"] == "    Hello!"
-
-    def test_chat_add_intent_routes_to_add_handler(self, fake_llm):
-        """Test that chat with ADD intent triggers learning via handler."""
-        store = EmulatedStore()
-
-        # Configure LLM to respond to intent classification and extraction
-        # First call: intent classification, Second call: extraction
-        fake_llm.response = '{"intents": ["ADD"], "primary": "ADD"}'
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat("Test query")
-
-        # Verify ADD intent was processed
-        assert "ADD" in result.get("intents", [])
-        # Check that handler_results contains ADD handler result
-        assert "ADD" in result.get("handler_results", {})
-
-    def test_chat_normalizes_primary_intent(self, fake_llm):
-        """Test primary_intent stays within validated intents."""
-        store = EmulatedStore()
-        store.add(Procedure(title="Deploy guide", content="1. Deploy"))
-        fake_llm.set_response(
-            '{"intents": ["SEARCH", "CONVERSATION"], "primary": "CONVERSATION"}'
-        )
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat("How do I deploy?")
-
-        assert result["intents"] == ["SEARCH"]
-        assert result["primary_intent"] == "SEARCH"
-
-    def test_chat_delete_requires_confirmation_by_default(self, fake_llm):
-        """Test DELETE intent does not delete without allow_delete."""
-        store = EmulatedStore()
-        proc = Procedure(
-            id="proc-delete-1",
-            title="Deploy guide",
-            content="1. Deploy",
-        )
-        store.add(proc)
-        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat(f"Delete procedure {proc.id}")
-
-        assert result["requires_confirmation"] is True
-        assert result["candidates"][0]["id"] == proc.id
-        assert result["handler_results"]["DELETE"]["deleted"] is False
-        assert store.get(proc.id) is proc
-
-    def test_chat_delete_with_allow_delete_and_id_deletes(self, fake_llm):
-        """Test DELETE intent deletes when allow_delete and ID are explicit."""
-        store = EmulatedStore()
-        proc = Procedure(
-            id="proc-delete-2",
-            title="Deploy guide",
-            content="1. Deploy",
-        )
-        store.add(proc)
-        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat(f"Delete procedure {proc.id}", allow_delete=True)
-
-        delete_result = result["handler_results"]["DELETE"]["data"]
-        assert delete_result["deleted"] is True
-        assert delete_result["id"] == proc.id
-        assert store.get(proc.id) is None
-
-    def test_chat_delete_with_allow_delete_hides_other_user_ids(self, fake_llm):
-        """Test DELETE intent does not reveal another user's ID."""
-        store = EmulatedStore()
-        proc = Procedure(
-            id="proc-delete-other-user",
-            title="Private deploy guide",
-            content="1. Deploy",
-            user_id="user-a",
-        )
-        store.add(proc)
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
-        foreign_result = manager.chat(
-            f"Delete procedure {proc.id}",
-            user_id="user-b",
-            allow_delete=True,
-        )
-        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
-        missing_result = manager.chat(
-            "Delete procedure missing-id",
-            user_id="user-b",
-            allow_delete=True,
-        )
-
-        foreign_delete = foreign_result["handler_results"]["DELETE"]
-        missing_delete = missing_result["handler_results"]["DELETE"]
-        assert foreign_delete == missing_delete
-        assert foreign_delete["error"] == "explicit_id_required"
-        assert foreign_delete["candidates"] == []
-        assert "data" not in foreign_delete
-        assert foreign_result["candidates"] == []
-        assert store.get(proc.id) is proc
-
-    def test_chat_delete_with_allow_delete_requires_explicit_id(self, fake_llm):
-        """Test DELETE intent with no ID returns candidates instead of deleting."""
-        store = EmulatedStore()
-        proc = Procedure(
-            id="proc-delete-3",
-            title="Deploy guide",
-            content="1. Deploy application",
-        )
-        store.add(proc)
-        fake_llm.set_response('{"intents": ["DELETE"], "primary": "DELETE"}')
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        result = manager.chat("Delete the deploy procedure", allow_delete=True)
-
-        delete_result = result["handler_results"]["DELETE"]
-        assert result["requires_confirmation"] is True
-        assert delete_result["deleted"] is False
-        assert delete_result["error"] == "explicit_id_required"
-        assert result["candidates"][0]["id"] == proc.id
-        assert store.get(proc.id) is proc
-
-
-class TestMemFlowPlan:
-    """Tests for MemFlow.plan()."""
-
-    @patch("memflow.manager.LLMPlanner")
-    def test_plan_retrieves_context(self, mock_planner_cls, fake_llm):
-        """Test that plan retrieves relevant procedures as context."""
-        store = EmulatedStore()
-        # Use title and content that will match the search query "deploy app"
-        store.add(Procedure(title="Deploy Guide", content="1. Run deploy.sh"))
-
-        mock_plan = TaskPlan(task="Deploy", steps=[])
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-        assert manager.plan("deploy app") == mock_plan
-
-        # Verify planner was called with context containing procedure
-        mock_planner_cls.return_value.plan.assert_called_once()
-        call_kwargs = mock_planner_cls.return_value.plan.call_args.kwargs
-        context = call_kwargs.get("context", "")
-        # Context should contain the retrieved procedure title and content
-        assert "Deploy Guide" in context
-        assert "deploy.sh" in context
-
-    @patch("memflow.manager.LLMPlanner")
-    def test_plan_creates_planner_if_needed(self, mock_planner_cls, fake_llm):
-        """Test that plan creates planner if not exists."""
-        fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        mock_plan = TaskPlan(task="Test", steps=[])
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        manager.plan("Test task")
-
-        # Verify planner was called with correct kwargs
-        mock_planner_cls.assert_called_once()
-        call_kwargs = mock_planner_cls.call_args.kwargs
-        assert call_kwargs["llm"] is fake_llm
-
-    @patch("memflow.manager.LLMPlanner")
-    def test_plan_returns_task_plan(self, mock_planner_cls, fake_llm):
-        """Test that plan returns TaskPlan."""
-        fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        mock_plan = TaskPlan(
-            task="Deploy",
-            steps=[
-                Step(id="step-1", goal="Deploy", type=StepType.TOOL, tool_name="bash")
-            ],
-        )
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        plan = manager.plan("Deploy app")
-
-        assert isinstance(plan, TaskPlan)
-        assert plan.task == "Deploy"
-
-
-class TestMemFlowRun:
-    """Tests for MemFlow.run()."""
-
-    @patch("memflow.manager.LLMPlanner")
-    @patch("memflow.manager.ToolRegistry")
-    @patch("memflow.manager.Learner")
-    def test_run_full_pipeline(
-        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
-    ):
-        """Test full run: plan -> execute -> learn."""
-        fake_llm.set_response('{"type": "procedural"}')
-        store = EmulatedStore()
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        # Mock plan
-        mock_plan = TaskPlan(
-            task="Deploy",
-            steps=[
-                Step(
-                    id="step-1",
-                    goal="Deploy",
-                    type=StepType.TOOL,
-                    tool_name="bash",
-                    args={"command": "./deploy.sh"},
-                )
-            ],
-        )
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        # Mock executor
-        mock_registry = MagicMock()
-        mock_registry.execute_step.return_value = StepResult(
-            step_id="step-1", success=True, output="Deployed"
-        )
-        mock_registry_cls.return_value = mock_registry
-
-        # Mock learner
-        mock_learned = Procedure(title="Learned Deploy", content="1. Run deploy.sh")
-        mock_learner = MagicMock()
-        mock_learner.extract.return_value = mock_learned
-        mock_learner_cls.return_value = mock_learner
-
-        result = manager.run("Deploy app")
-
-        assert isinstance(result, RunResult)
-        assert result.plan == mock_plan
-        assert len(result.step_results) == 1
-        assert result.learned == mock_learned
-
-    @patch("memflow.manager.LLMPlanner")
-    @patch("memflow.manager.ToolRegistry")
-    @patch("memflow.manager.Learner")
-    def test_run_with_custom_tools(
-        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
-    ):
-        """Test run with custom tools."""
-        fake_llm.set_response('{"type": "procedural"}')
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        mock_plan = TaskPlan(task="Test", steps=[])
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        mock_registry = MagicMock()
-        mock_registry_cls.return_value = mock_registry
-
-        def custom_tool(arg: str) -> str:
-            return f"Custom: {arg}"
-
-        manager.run("Test", tools={"custom": custom_tool})
-
-        # Verify custom tool was registered
-        mock_registry.register.assert_called_with("custom", custom_tool)
-
-    @patch("memflow.manager.LLMPlanner")
-    @patch("memflow.manager.ToolRegistry")
-    @patch("memflow.manager.Learner")
-    def test_run_stores_learned_procedure(
-        self, mock_learner_cls, mock_registry_cls, mock_planner_cls, fake_llm
-    ):
-        """Test that run stores the learned procedure."""
-        store = EmulatedStore()
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        mock_plan = TaskPlan(task="Test", steps=[])
-        mock_planner_cls.return_value.plan.return_value = mock_plan
-
-        mock_registry = MagicMock()
-        mock_registry_cls.return_value = mock_registry
-
-        mock_learner = MagicMock()
-        mock_learner_cls.return_value = mock_learner
-
-        learned_proc = Procedure(title="Learned", content="1. Step")
-        mock_learner.extract.return_value = learned_proc
-
-        initial_count = len(store.list())
-        # Use multi_stage=False for simpler execution path
-        manager.run("Test task", multi_stage=False)
-        final_count = len(store.list())
-
-        assert final_count == initial_count + 1
-
-    def test_run_scopes_global_guard_to_single_call(self, fake_llm):
-        """Test cycle detection state does not leak across run() calls."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        first_failed_step = Step(
-            id="step-1",
-            goal="Create report",
-            type=StepType.TOOL,
-            tool_name="bash",
-        )
-        second_failed_step = Step(
-            id="step-2",
-            goal="Create report",
-            type=StepType.TOOL,
-            tool_name="bash",
-        )
-
-        planner = MagicMock()
-        planner.plan.side_effect = [
-            TaskPlan(task="Task A", steps=[first_failed_step]),
-            TaskPlan(task="Create report", steps=[]),
-            TaskPlan(task="Task B", steps=[second_failed_step]),
-            TaskPlan(task="Create report", steps=[]),
-        ]
-        manager._planner = planner
-
-        executor = MagicMock()
-        executor.execute_step.return_value = StepResult(
-            step_id="step",
-            success=False,
-            output="",
-            error="permission denied",
-            retryable=False,
-        )
-        manager._executor = executor
-
-        manager.run("Task A")
-        manager.run("Task B")
-
-        assert planner.plan.call_count == 4
-
-    def test_run_replans_failed_step_with_history(self, fake_llm):
-        """Test failed steps are replanned through the replan path."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        failed_step = Step(
-            id="step-1",
-            goal="Create report",
-            type=StepType.TOOL,
-            tool_name="bash",
-        )
-
-        planner = MagicMock()
-        planner.plan.side_effect = [
-            TaskPlan(task="Task", steps=[failed_step]),
-            TaskPlan(task="Create report", steps=[]),
-        ]
-        manager._planner = planner
-
-        executor = MagicMock()
-        executor.execute_step.return_value = StepResult(
-            step_id="step-1",
-            success=False,
-            output="",
-            error="permission denied",
-            retryable=False,
-        )
-        manager._executor = executor
-
-        manager.run("Task")
-
-        replan_call = planner.plan.call_args_list[1]
-        assert replan_call.args == ("Create report",)
-        assert replan_call.kwargs["multi_stage"] is True
-        assert replan_call.kwargs["executed_steps"] == [failed_step]
-
-
-class TestMemFlowUtils:
-    """Tests for MemFlow utility methods via public API."""
-
-    def test_add_detects_procedural_keywords(self, fake_llm):
-        """Test that add() detects procedural keywords and triggers extraction."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # When input contains procedural keywords, extraction should be attempted
-        result = manager.add(messages="how to deploy step by step")
-
-        # Verify extraction was attempted (result should have 'results' key)
-        assert "results" in result
-
-    def test_add_skips_non_procedural_content(self, fake_llm):
-        """Test that add() skips content classified as non-procedural."""
-        manager = MemFlow(llm=fake_llm, use_env=False)
-
-        # Set LLM to classify as "none" (non-procedural)
-        fake_llm.set_response('{"type": "none"}')
-        result = manager.add(messages="what is the capital of France")
-
-        # Verify extraction was skipped
-        assert result.get("skipped") == "classified as none"
-
-    def test_classify_memory_type_via_chat(self, fake_llm):
-        """Test memory type classification via chat() public API."""
-        store = EmulatedStore()
-        fake_llm.set_response(
-            '{"type": "procedural", "title": "Test", "content": "1. Step"}'
-        )
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        # Chat should trigger auto-learn for procedural content
-        manager.chat("how to deploy step by step")
-
-        # Verify LLM was called for classification (check generate_calls)
-        assert len(fake_llm.generate_calls) > 0
-
-    def test_classify_memory_type_on_error(self, fake_llm):
-        """Test classification falls back safely on error."""
-        store = EmulatedStore()
-        fake_llm.set_response("invalid json response")
-        manager = MemFlow(llm=fake_llm, store=store, use_env=False)
-
-        # Should not raise even with invalid LLM response
-        result = manager.chat("test content")
-
-        # Verify LLM was called
-        assert len(fake_llm.generate_calls) > 0
-        # chat() returns a dict with response key
-        assert isinstance(result, dict)
-        assert "response" in result
 
 
 class TestLoadEnvFile:
@@ -1227,13 +487,13 @@ class TestLoadEnvFile:
 class TestMemFlowHybridSearch:
     """Tests for MemFlow hybrid search routing and env config."""
 
-    def test_single_query_routes_to_hybrid_when_enabled(self, fake_llm, clean_env):
+    def test_single_query_routes_to_hybrid_when_enabled(self, clean_env):
         """Enabled + hybrid-capable store → single query uses search_hybrid."""
         os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         manager.search("deploy", top_k=3)
 
@@ -1243,48 +503,48 @@ class TestMemFlowHybridSearch:
         assert kwargs["mode"] == "hybrid"
         assert kwargs["rrf_top_k"] >= 3  # never under-sized vs top_k
 
-    def test_batch_query_uses_dense_even_when_enabled(self, fake_llm, clean_env):
+    def test_batch_query_uses_dense_even_when_enabled(self, clean_env):
         """Batch (list) queries always go through the dense store.search path."""
         os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
         store = MagicMock()
         store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         manager.search(["a", "b"], top_k=3)
 
         store.search.assert_called_once()
         store.search_hybrid.assert_not_called()
 
-    def test_single_query_uses_dense_when_disabled(self, fake_llm, clean_env):
+    def test_single_query_uses_dense_when_disabled(self, clean_env):
         """Disabled → single query uses plain store.search."""
         store = MagicMock()
         store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         manager.search("deploy", top_k=3)
 
         store.search.assert_called_once()
         store.search_hybrid.assert_not_called()
 
-    def test_store_without_search_hybrid_falls_back(self, fake_llm, clean_env):
-        """A store lacking search_hybrid (e.g. EmulatedStore) uses dense path."""
+    def test_store_without_search_hybrid_falls_back(self, clean_env):
+        """A store lacking search_hybrid (e.g. FakeSkillStore) uses dense path."""
         os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
         store = MagicMock(spec=["search"])  # no supports_hybrid attribute
         store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         manager.search("deploy", top_k=3)
 
         store.search.assert_called_once()
 
-    def test_store_without_sparse_falls_back_to_dense(self, fake_llm, clean_env):
+    def test_store_without_sparse_falls_back_to_dense(self, clean_env):
         """Enabled but store.supports_hybrid is False (collection without
         sparse vector) → dense search, search_hybrid never called."""
         os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
         store = MagicMock()
         store.supports_hybrid = False
         store.search.return_value = []
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         results = manager.search("deploy", top_k=3)
 
@@ -1294,7 +554,7 @@ class TestMemFlowHybridSearch:
         )
         assert results == []
 
-    def test_search_hybrid_runtime_error_propagates(self, fake_llm, clean_env):
+    def test_search_hybrid_runtime_error_propagates(self, clean_env):
         """Capability is probed up front, so a RuntimeError from a capable
         store (e.g. connection failure) is a real failure and must propagate,
         not be silently downgraded to dense."""
@@ -1302,19 +562,19 @@ class TestMemFlowHybridSearch:
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.side_effect = RuntimeError("connection refused")
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         with pytest.raises(RuntimeError, match="connection refused"):
             manager.search("deploy", top_k=3)
         store.search.assert_not_called()
 
-    def test_search_hybrid_truncates_to_top_k(self, fake_llm, clean_env):
+    def test_search_hybrid_truncates_to_top_k(self, clean_env):
         """_search_hybrid returns only top_k results from the deeper RRF pool."""
         os.environ["MEMFLOW_HYBRID_SEARCH_ENABLED"] = "on"
         store = MagicMock()
         store.supports_hybrid = True
         store.search_hybrid.return_value = [MagicMock() for _ in range(10)]
-        manager = MemFlow(llm=fake_llm, store=store, use_env=True)
+        manager = MemFlow(store=store, use_env=True)
 
         results = manager.search("deploy", top_k=3)
 
@@ -1332,15 +592,15 @@ class TestMemFlowHybridSearch:
             ("-1,2", (0.6, 0.4)),  # negative → fallback
         ],
     )
-    def test_parse_rrf_weights(self, fake_llm, clean_env, raw, expected):
+    def test_parse_rrf_weights(self, clean_env, raw, expected):
         os.environ["MEMFLOW_HYBRID_RRF_WEIGHTS"] = raw
-        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=True)
+        manager = MemFlow(store=FakeSkillStore(), use_env=True)
         assert manager._parse_rrf_weights() == expected
 
-    def test_bad_int_env_falls_back(self, fake_llm, clean_env):
+    def test_bad_int_env_falls_back(self, clean_env):
         """Malformed int env vars degrade to defaults instead of crashing."""
         os.environ["MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K"] = "not-a-number"
         os.environ["MEMFLOW_HYBRID_RRF_K"] = ""
-        manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=True)
+        manager = MemFlow(store=FakeSkillStore(), use_env=True)
         assert manager._hybrid_sparse_search_top_k == 200
         assert manager._hybrid_rrf_k == 60

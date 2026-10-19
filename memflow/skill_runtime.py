@@ -10,8 +10,6 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from memflow.llm import BaseLLM
-
 if TYPE_CHECKING:
     from memflow.manager import MemFlow
 
@@ -50,13 +48,6 @@ def resolve_env_file(
     return (project / path).resolve()
 
 
-class SkillRetrievalLLM(BaseLLM):
-    """Prevent skill operations from invoking a generation LLM."""
-
-    def generate(self, messages: list[dict]) -> str:
-        raise RuntimeError("skill retrieval does not support LLM calls")
-
-
 def create_skill_manager(
     env_file: str | None = None, *, config_path: str | None = None
 ) -> MemFlow:
@@ -80,5 +71,4 @@ def create_skill_manager(
             f"unsupported skill backend {backend!r}; set MEMFLOW_BACKEND to qdrant"
         )
 
-    os.environ["MEMFLOW_BACKEND"] = backend
-    return MemFlow(llm=SkillRetrievalLLM(), store=QdrantStore(), use_env=False)
+    return MemFlow(store=QdrantStore(), use_env=False)

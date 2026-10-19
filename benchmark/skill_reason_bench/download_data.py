@@ -19,7 +19,7 @@ Usage:
     uv run benchmark/skill_reason_bench/download_data.py
     uv run benchmark/skill_reason_bench/download_data.py --force
 
-Uses ``huggingface_hub`` when installed (``uv sync --extra benchmark``);
+Uses ``huggingface_hub`` when separately installed;
 any hub download failure — package missing, network down, 401, hub API
 error — falls back to a plain HTTPS ``resolve/main/<file>`` download.
 """

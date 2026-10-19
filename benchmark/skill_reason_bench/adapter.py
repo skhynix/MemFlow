@@ -513,15 +513,11 @@ class MemFlowSkillReasonAdapter:
         user_id: str,
         corpus_size: int,
         backend: str,
-        llm_provider: str,
-        llm_model: str,
     ) -> None:
         self.memflow = memflow
         self.user_id = user_id
         self.corpus_size = corpus_size
         self.backend = backend
-        self.llm_provider = llm_provider
-        self.llm_model = llm_model
 
     def get_system_name(self) -> str:
         return "memflow_search_skill_reason_bench"
@@ -532,8 +528,6 @@ class MemFlowSkillReasonAdapter:
             "backend": self.backend,
             "user_id": self.user_id,
             "corpus_size": self.corpus_size,
-            "llm_provider": self.llm_provider,
-            "llm_model": self.llm_model,
         }
 
     def retrieve(

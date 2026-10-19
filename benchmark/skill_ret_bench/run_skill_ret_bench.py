@@ -172,9 +172,7 @@ def main() -> None:
         raise ValueError("--k-values must contain at least one positive integer")
     top_k = max(k_values) if k_values else None
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     memflow = MemFlow()
 
@@ -202,8 +200,6 @@ def main() -> None:
                 "backend": backend,
                 "user_id": args.user_id,
                 "corpus_size": corpus_size,
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
             },
             "settings": {
                 "user_id": args.user_id,
@@ -213,14 +209,6 @@ def main() -> None:
                 "seed_only": args.seed_only,
                 "clear_existing": args.clear_existing,
                 "backend": backend,
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
-                "llm_api_base": os.environ.get("LLM_API_BASE"),
-                "data_dir": os.environ.get("MEMFLOW_DATA_DIR"),
-                "memmachine_base_url": os.environ.get("MEMMACHINE_BASE_URL"),
-                "memmachine_org_id": os.environ.get("MEMMACHINE_ORG_ID"),
-                "memmachine_project": os.environ.get("MEMMACHINE_PROJECT"),
-                "memmachine_api_key": os.environ.get("MEMMACHINE_API_KEY"),
             },
             "corpus_stats": seed_stats_payload,
             "execution_time_seconds": elapsed,
@@ -247,8 +235,6 @@ def main() -> None:
         user_id=args.user_id,
         corpus_size=corpus_size,
         backend=backend,
-        llm_provider=llm_provider,
-        llm_model=llm_model,
     )
 
     query_bank_total = count_query_bank_records(args.query_bank_path)
@@ -285,14 +271,6 @@ def main() -> None:
             "max_queries": args.max_queries,
             "source_holdout_policy": "per_query_source_skill_id",
             "backend": backend,
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
-            "llm_api_base": os.environ.get("LLM_API_BASE"),
-            "data_dir": os.environ.get("MEMFLOW_DATA_DIR"),
-            "memmachine_base_url": os.environ.get("MEMMACHINE_BASE_URL"),
-            "memmachine_org_id": os.environ.get("MEMMACHINE_ORG_ID"),
-            "memmachine_project": os.environ.get("MEMMACHINE_PROJECT"),
-            "memmachine_api_key": os.environ.get("MEMMACHINE_API_KEY"),
         },
         "corpus_stats": seed_stats.to_dict(),
         "query_bank_stats": {

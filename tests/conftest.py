@@ -4,43 +4,13 @@
 """Shared fixtures for unit tests."""
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 
-class FakeLLM:
-    """Fake LLM for deterministic unit tests."""
-
-    def __init__(
-        self,
-        response: str = '{"has_procedure": true, "title": "Test", "content": "1. Step one"}',
-    ):
-        self.response = response
-        self.generate_calls = []
-        self._custom_response = None
-
-    def generate(self, messages: list[dict]) -> str:
-        self.generate_calls.append(messages)
-        if self._custom_response is not None:
-            response = self._custom_response
-            self._custom_response = None  # Clear after one use
-            return response
-        return self.response
-
-    def set_response(self, response: str):
-        """Set a custom response for the next generate call only."""
-        self._custom_response = response
-
-
 @pytest.fixture
-def fake_llm():
-    """Provide a FakeLLM instance."""
-    return FakeLLM()
-
-
-@pytest.fixture
-def clean_env():
+def clean_env(monkeypatch):
     """Clear relevant environment variables before test and prevent .env file loading.
 
     This fixture:
@@ -50,16 +20,10 @@ def clean_env():
     4. Restores original environment variables after test
     """
     vars_to_clear = [
-        "LLM_PROVIDER",
-        "LLM_MODEL",
-        "LLM_API_BASE",
-        "LLM_API_KEY",
         "MEMFLOW_BACKEND",
-        "MEMFLOW_FILE_DIR",
-        "MEMMACHINE_BASE_URL",
-        "MEMMACHINE_ORG_ID",
-        "MEMMACHINE_PROJECT",
-        "MEMMACHINE_API_KEY",
+        "MEMFLOW_EMBEDDING_STRICT",
+        "EMBEDDING_REQUEST_TIMEOUT",
+        "EMBEDDING_MAX_RETRIES",
         # Vector DB embedding config (shared)
         "VECTOR_EMBEDDING_MODEL",
         "VECTOR_EMBEDDING_API_BASE",
@@ -83,6 +47,11 @@ def clean_env():
         "MEMFLOW_HYBRID_RRF_TOP_K",
         "MEMFLOW_HYBRID_RRF_WEIGHTS",
         "MEMFLOW_HYBRID_RRF_K",
+        # Compatibility fallbacks used by the optional LLM reranker.
+        "LLM_PROVIDER",
+        "LLM_MODEL",
+        "LLM_API_BASE",
+        "LLM_API_KEY",
         # Reranker (order mirrors .env / .env.example)
         "MEMFLOW_RERANKER_PIPELINE",
         "MEMFLOW_RERANKER_FETCH_TOP_K",
@@ -108,6 +77,10 @@ def clean_env():
     for k in vars_to_clear:
         os.environ.pop(k, None)
 
+    # These settings are evaluated at import time, before this fixture runs.
+    monkeypatch.setattr("memflow.store.EMBEDDING_REQUEST_TIMEOUT", 60.0)
+    monkeypatch.setattr("memflow.store.EMBEDDING_MAX_RETRIES", 2)
+
     # Patch _load_env_file to prevent .env file loading
     with patch("memflow.manager._load_env_file"):
         yield
@@ -117,37 +90,3 @@ def clean_env():
             os.environ[k] = v
         else:
             os.environ.pop(k, None)
-
-
-@pytest.fixture
-def memmachine_mock():
-    """Mock memmachine_client module for MemMachineStore and MemMachineBypass tests."""
-    mock_memory = MagicMock()
-    mock_project = MagicMock()
-    mock_project.memory.return_value = mock_memory
-    mock_client = MagicMock()
-    mock_client.get_or_create_project.return_value = mock_project
-    mock_module = MagicMock()
-    mock_module.MemMachineClient.return_value = mock_client
-
-    yield mock_client, mock_memory, mock_module
-
-
-@pytest.fixture
-def mock_http_response():
-    """Provide a mock HTTP response factory."""
-
-    def _factory(content: bytes = b'{"status": "ok"}'):
-        mock_response = MagicMock()
-        mock_response.read.return_value = content
-        return mock_response
-
-    return _factory
-
-
-@pytest.fixture
-def mock_urlopen_context(mock_http_response):
-    """Mock urllib.request.urlopen for HTTP tests."""
-    with patch("urllib.request.urlopen") as mock_urlopen:
-        mock_urlopen.return_value.__enter__.return_value = mock_http_response()
-        yield mock_urlopen

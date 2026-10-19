@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -19,7 +20,7 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(os, "environ", os.environ.copy())
     for name in list(os.environ):
-        if name.startswith(("MEMFLOW_", "QDRANT_", "VECTOR_EMBEDDING_", "LLM_")):
+        if name.startswith(("MEMFLOW_", "QDRANT_", "VECTOR_EMBEDDING_")):
             monkeypatch.delenv(name)
 
     class FakeQdrantStore:
@@ -27,11 +28,9 @@ def runtime(monkeypatch, tmp_path):
             self.url = os.getenv("QDRANT_BASE_URL")
             self.collection = os.getenv("QDRANT_COLLECTION_NAME")
 
-    def fail_llm(*_args, **_kwargs):
-        raise AssertionError("skill operations must not initialize a generation LLM")
-
     monkeypatch.setattr(manager_module, "QdrantStore", FakeQdrantStore)
-    monkeypatch.setattr(manager_module.LLMFactory, "create", fail_llm)
+    monkeypatch.setitem(sys.modules, "ollama", None)
+    monkeypatch.setitem(sys.modules, "openai", None)
 
 
 @pytest.fixture(params=["cli", "hook", "mcp"])
@@ -49,8 +48,8 @@ def test_defaults_to_qdrant_without_generation_llm(factory, tmp_path):
     manager = factory(None)
 
     assert manager.store.url == "http://default-file"
-    with pytest.raises(RuntimeError, match="does not support LLM calls"):
-        manager.llm.generate([])
+    assert not hasattr(manager, "llm")
+    assert "MEMFLOW_BACKEND" not in os.environ
 
 
 def test_explicit_file_is_not_merged_with_cwd_dotenv(factory, tmp_path, monkeypatch):

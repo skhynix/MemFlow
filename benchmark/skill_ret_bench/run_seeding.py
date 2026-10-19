@@ -152,9 +152,7 @@ def main() -> None:
     _load_env_file(str(Path(__file__).resolve().parents[2] / ".env"))
     args = _parse_args()
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     print("\n=== Starting SkillRet Corpus Seeding ===")
     print(f"Corpus path: {args.corpus_path}")
@@ -166,7 +164,7 @@ def main() -> None:
         print("Mode: async parallel processing")
     print(f"Max batches: {args.max_batches}, Max workers: {args.max_workers}")
 
-    memflow = MemFlow(sync_mode=args.sync)
+    memflow = MemFlow()
 
     start = time.perf_counter()
 
@@ -197,16 +195,12 @@ def main() -> None:
             "backend": backend,
             "user_id": args.user_id,
             "corpus_size": corpus_size,
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
         },
         "settings": {
             "user_id": args.user_id,
             "corpus_path": str(args.corpus_path),
             "clear_existing": args.clear_existing,
             "backend": backend,
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
             "sync_mode": args.sync,
             "max_batches": args.max_batches,
             "max_workers": args.max_workers,

@@ -15,8 +15,7 @@ Two reranker backends, both driven by env config:
   Reuses ``OpenAICompatibleLLM`` (vLLM / LM Studio / etc.). Sends the query
   plus candidate titles/descriptions and asks the model to return a JSON
   list of ``{"id", "score"}``; parsed locally (fence stripping + bracket
-  slice + ``json.loads``) because ``memflow.llm.parse_json`` only handles
-  JSON objects, not arrays.
+  slice + ``json.loads``).
 
 ``RerankPipeline`` chains rerankers in a configured order
 (``ce`` | ``llm`` | ``ce_llm`` | ``llm_ce`` | ``none``). Each stage truncates
@@ -414,9 +413,7 @@ class LLMReranker(BaseReranker):
     def _default_llm(self) -> Any:
         from memflow.llm import LLMFactory
 
-        # Provider default mirrors MemFlow's own default ("ollama") so the
-        # reranker does not silently target a different backend than the
-        # main LLM when only LLM_PROVIDER is unset.
+        # Retain LLM_* as fallback configuration for existing reranker setups.
         provider = os.getenv("RERANKER_LLM_PROVIDER") or os.getenv(
             "LLM_PROVIDER", "ollama"
         )
@@ -522,8 +519,7 @@ class LLMReranker(BaseReranker):
             result = list(candidates)
             return result[:top_k] if top_k is not None else result
         try:
-            # The LLM returns a JSON array; parse the raw string directly to a
-            # list (memflow.llm.parse_json expects a dict, so it isn't usable).
+            # The LLM returns a JSON array; parse it directly to a list.
             text = raw.strip()
             # strip markdown fences defensively
             text = _FENCE_RE.sub("", text).strip().rstrip("`").strip()

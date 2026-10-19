@@ -38,7 +38,7 @@ from memflow.skill_context import (
     selected_skill_metadata,
 )
 from memflow.skills import load_skill
-from memflow.store import EmulatedStore
+from tests.fakes import FakeSkillStore
 
 
 def _write_skill(root, text: str) -> None:
@@ -48,7 +48,6 @@ def _write_skill(root, text: str) -> None:
 
 def _manager_with_skill(
     tmp_path,
-    fake_llm,
     *,
     name: str = "commit-craft",
     body: str = "# Commit Craft\n\nSplit commits into reviewable units.\n",
@@ -68,8 +67,9 @@ def _manager_with_skill(
         "---\n"
         f"{body}",
     )
-    manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=False)
+    manager = MemFlow(store=FakeSkillStore(), use_env=False)
     manager.add_skill(root, trust_state=trust_state)
+    manager.store.search_results = [SearchResult(manager.store.list()[0], 0.8)]
     return manager
 
 
@@ -894,11 +894,10 @@ def test_skill_context_selector_filters_dedupes_and_ranks_candidates(tmp_path):
     assert manager.get_skill_calls == 0
 
 
-def test_default_catalog_discloses_only_mcp_skill_reference(tmp_path, fake_llm):
+def test_default_catalog_discloses_only_mcp_skill_reference(tmp_path):
     body_secret = "BODY-SECRET-stored-only"
     manager = _manager_with_skill(
         tmp_path,
-        fake_llm,
         body=f"# Commit Craft\n\n{body_secret}\n",
     )
     procedure = manager.list_skills()[0]
@@ -989,8 +988,8 @@ def test_catalog_skips_complete_oversized_entry_without_truncation():
     assert result.skills[0].rendered_chars <= 500
 
 
-def test_explicit_legacy_renderer_keeps_inline_body(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_explicit_legacy_renderer_keeps_inline_body(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(tmp_path)
 
     output = run_hook(
@@ -1059,8 +1058,8 @@ def test_catalog_enforce_dedupe_rediscloses_after_descriptor_changes(tmp_path):
     )
 
 
-def test_valid_hook_input_returns_parseable_claude_json(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_valid_hook_input_returns_parseable_claude_json(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(tmp_path)
     prompt = "Please split these commits into reviewable patch series."
 
@@ -1111,8 +1110,8 @@ def test_valid_hook_input_returns_parseable_claude_json(tmp_path, fake_llm):
     assert audit["selected_skills"][0]["trust_mode"] == "instruction"
 
 
-def test_below_threshold_results_return_empty_stdout(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_below_threshold_results_return_empty_stdout(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(tmp_path, retrieval={"min_score": 0.99})
 
     output = run_hook(
@@ -1128,8 +1127,8 @@ def test_below_threshold_results_return_empty_stdout(tmp_path, fake_llm):
     assert audit["session_dedupe"]["lifecycle_tracking"] == ("session_events")
 
 
-def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_invalid_json_and_non_user_prompt_events_fail_open(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(
         tmp_path,
         claude={
@@ -1363,8 +1362,8 @@ def test_run_hook_retrieval_only_manager_avoids_indexing_and_sync(tmp_path):
     assert manager.get_skill_calls == 1
 
 
-def test_audit_logging_errors_fail_open(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_audit_logging_errors_fail_open(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     audit_dir = tmp_path / "audit-is-directory"
     audit_dir.mkdir()
     config_path = _config_path(tmp_path, logging={"path": str(audit_dir)})
@@ -1378,10 +1377,9 @@ def test_audit_logging_errors_fail_open(tmp_path, fake_llm):
     assert output == ""
 
 
-def test_renderer_escapes_xml_special_characters(tmp_path, fake_llm):
+def test_renderer_escapes_xml_special_characters(tmp_path):
     manager = _manager_with_skill(
         tmp_path,
-        fake_llm,
         name="'escape <& \"skill\"'",
         description="'Use <xml> & quotes'",
         body="# Escape & Stuff\n\nHandle <tag> & quotes.\n",
@@ -1401,9 +1399,9 @@ def test_renderer_escapes_xml_special_characters(tmp_path, fake_llm):
     assert "Handle &lt;tag&gt; &amp; quotes." in context
 
 
-def test_renderer_respects_total_hard_and_per_skill_budgets(tmp_path, fake_llm):
+def test_renderer_respects_total_hard_and_per_skill_budgets(tmp_path):
     long_body = "# Long Skill\n\n" + "budget content " * 200
-    manager = _manager_with_skill(tmp_path, fake_llm, body=long_body)
+    manager = _manager_with_skill(tmp_path, body=long_body)
     config_path = _config_path(
         tmp_path,
         rendering={
@@ -1427,12 +1425,11 @@ def test_renderer_respects_total_hard_and_per_skill_budgets(tmp_path, fake_llm):
     assert audit["selected_skills"][0]["rendered_chars"] <= 900
 
 
-def test_audit_log_excludes_raw_prompt_and_skill_body_by_default(tmp_path, fake_llm):
+def test_audit_log_excludes_raw_prompt_and_skill_body_by_default(tmp_path):
     prompt_secret = "SECRET_PROMPT_SHOULD_NOT_BE_LOGGED"
     body_secret = "SECRET_SKILL_BODY_SHOULD_NOT_BE_LOGGED"
     manager = _manager_with_skill(
         tmp_path,
-        fake_llm,
         body=f"# Privacy\n\nprivacy logging {body_secret}\n",
     )
     config_path = _config_path(tmp_path)
@@ -1451,10 +1448,9 @@ def test_audit_log_excludes_raw_prompt_and_skill_body_by_default(tmp_path, fake_
     assert body_secret not in audit_text
 
 
-def test_blocked_skill_is_not_injected(tmp_path, fake_llm):
+def test_blocked_skill_is_not_injected(tmp_path):
     manager = _manager_with_skill(
         tmp_path,
-        fake_llm,
         body="# Blocked\n\nblocked workflow split commits\n",
         trust_state="blocked",
     )
@@ -1472,10 +1468,9 @@ def test_blocked_skill_is_not_injected(tmp_path, fake_llm):
     assert audit["selected_skills"] == []
 
 
-def test_untrusted_skill_is_marked_as_data_context(tmp_path, fake_llm):
+def test_untrusted_skill_is_marked_as_data_context(tmp_path):
     manager = _manager_with_skill(
         tmp_path,
-        fake_llm,
         body="# Unknown Trust\n\nunknown workflow split commits\n",
         trust_state="unknown",
     )
@@ -3831,8 +3826,8 @@ def test_invalid_shadow_state_dir_audits_effective_off_without_state_work(tmp_pa
     assert "invalid_session_dedupe_state_dir" in row["warnings"]
 
 
-def test_invalid_catalog_mode_falls_back_and_audits_warning(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_invalid_catalog_mode_falls_back_and_audits_warning(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(
         tmp_path,
         claude={"native_catalog_mode": "not-a-mode"},
@@ -3862,8 +3857,8 @@ def test_invalid_catalog_mode_falls_back_and_audits_warning(tmp_path, fake_llm):
     assert "invalid_native_catalog_mode" in audit["warnings"]
 
 
-def test_non_object_claude_config_falls_back_without_fail_open(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_non_object_claude_config_falls_back_without_fail_open(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(tmp_path, claude="bad")
 
     output = run_hook(
@@ -3879,8 +3874,8 @@ def test_non_object_claude_config_falls_back_without_fail_open(tmp_path, fake_ll
     assert "invalid_claude_config" in audit["warnings"]
 
 
-def test_user_prompt_hook_does_not_mutate_claude_settings(tmp_path, fake_llm):
-    manager = _manager_with_skill(tmp_path, fake_llm)
+def test_user_prompt_hook_does_not_mutate_claude_settings(tmp_path):
+    manager = _manager_with_skill(tmp_path)
     config_path = _config_path(tmp_path)
     settings_path = tmp_path / ".claude" / "settings.local.json"
     settings_path.parent.mkdir(parents=True)

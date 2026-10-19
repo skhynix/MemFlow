@@ -234,8 +234,6 @@ def _make_adapter(**kwargs):
         user_id="benchmark",
         corpus_size=1,
         backend="qdrant",
-        llm_provider="openai-compatible",
-        llm_model="m",
         **kwargs,
     )
     return adapter, calls
@@ -441,7 +439,7 @@ def _install_runner_mocks(monkeypatch, tmp_path, args) -> None:
     class FakeMemFlow:
         store = FakeStore()
 
-        def __init__(self, sync_mode=False):
+        def __init__(self):
             pass
 
     eval_result = SimpleNamespace(

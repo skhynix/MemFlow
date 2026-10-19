@@ -398,8 +398,7 @@ class TestLLMTemperaturePlumbing:
 
     @pytest.fixture
     def mock_openai_module(self):
-        """Mock openai module (same pattern as tests/test_llm.py) so these
-        tests run without the optional openai extra installed."""
+        """Run transport tests without installing the optional openai extra."""
         mock_openai_class = MagicMock()
 
         mock_openai = MagicMock()

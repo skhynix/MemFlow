@@ -391,8 +391,6 @@ class MemFlowSkillRetAdapter:
         user_id: str,
         corpus_size: int,
         backend: str,
-        llm_provider: str,
-        llm_model: str,
         search_fn: Callable[..., list[Any]] | None = None,
         mode_label: str | None = None,
     ) -> None:
@@ -412,8 +410,6 @@ class MemFlowSkillRetAdapter:
         self.user_id = user_id
         self.corpus_size = corpus_size
         self.backend = backend
-        self.llm_provider = llm_provider
-        self.llm_model = llm_model
         self.search_fn = search_fn
         self.mode_label = mode_label
 
@@ -436,8 +432,6 @@ class MemFlowSkillRetAdapter:
             "backend": self.backend,
             "user_id": self.user_id,
             "corpus_size": self.corpus_size,
-            "llm_provider": self.llm_provider,
-            "llm_model": self.llm_model,
         }
         if self.mode_label:
             info["mode"] = self.mode_label

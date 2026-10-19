@@ -169,9 +169,7 @@ def main() -> None:
     _load_env_file(str(Path(__file__).resolve().parents[2] / ".env"))
     args = _parse_args()
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     print("\n=== Starting SkillReason-Bench Corpus Seeding ===")
     print(f"Corpus path: {args.corpus_path}")
@@ -185,7 +183,7 @@ def main() -> None:
 
     verify_data_file_checksum(args.corpus_path, skip_verify=args.skip_verify)
 
-    memflow = MemFlow(sync_mode=args.sync)
+    memflow = MemFlow()
 
     start = time.perf_counter()
 
@@ -217,8 +215,6 @@ def main() -> None:
             "user_id": args.user_id,
             "corpus_size": corpus_size,
             "embedding_model": os.environ.get("VECTOR_EMBEDDING_MODEL", ""),
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
         },
         "settings": {
             "user_id": args.user_id,
@@ -226,8 +222,6 @@ def main() -> None:
             "clear_existing": args.clear_existing,
             "backend": backend,
             "embedding_model": os.environ.get("VECTOR_EMBEDDING_MODEL", ""),
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
             "sync_mode": args.sync,
             "max_batches": args.max_batches,
             "max_workers": args.max_workers,

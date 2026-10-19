@@ -222,8 +222,6 @@ def run_evaluation(
     memflow: MemFlow,
     args: argparse.Namespace,
     backend: str,
-    llm_provider: str,
-    llm_model: str,
 ) -> tuple[
     SkillReasonEvaluationResult,
     MemFlowSkillReasonAdapter,
@@ -272,8 +270,6 @@ def run_evaluation(
         user_id=args.user_id,
         corpus_size=corpus_size,
         backend=backend,
-        llm_provider=llm_provider,
-        llm_model=llm_model,
     )
 
     if args.sync:
@@ -306,20 +302,16 @@ def main() -> None:
 
     verify_data_file_checksum(args.queries_path, skip_verify=args.skip_verify)
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     # Must run before MemFlow(): the store caches the instruction at init.
     _install_query_instruction()
 
-    memflow = MemFlow(sync_mode=args.sync)
+    memflow = MemFlow()
     eval_result, retrieval_system, queries, corpus_size, elapsed = run_evaluation(
         memflow=memflow,
         args=args,
         backend=backend,
-        llm_provider=llm_provider,
-        llm_model=llm_model,
     )
 
     system_name = retrieval_system.get_system_name()
@@ -338,8 +330,6 @@ def main() -> None:
             "max_queries": args.max_queries,
             "backend": backend,
             "embedding_model": os.environ.get("VECTOR_EMBEDDING_MODEL", ""),
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
             "sync_mode": args.sync,
             "max_concurrency": args.max_concurrency,
         },

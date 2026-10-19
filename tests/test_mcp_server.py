@@ -14,7 +14,7 @@ import pytest
 import memflow.mcp_server as mcp_server_module
 from memflow.mcp_server import read_skill_from_store, server
 from memflow.models import Procedure
-from memflow.store import EmulatedStore
+from tests.fakes import FakeSkillStore
 
 
 def _procedure(
@@ -45,7 +45,7 @@ def _procedure(
 
 
 def test_read_skill_returns_complete_content_and_minimal_metadata():
-    store = EmulatedStore()
+    store = FakeSkillStore()
     procedure = _procedure()
     store.add(procedure)
 
@@ -61,7 +61,7 @@ def test_read_skill_returns_complete_content_and_minimal_metadata():
 
 
 def test_read_skill_uses_exact_id_lookup_only():
-    store = EmulatedStore()
+    store = FakeSkillStore()
     store.add(_procedure())
 
     with pytest.raises(ValueError, match="skill not found"):
@@ -69,8 +69,10 @@ def test_read_skill_uses_exact_id_lookup_only():
 
 
 def test_read_skill_rejects_non_skill_records():
-    store = EmulatedStore()
-    store.add(_procedure(skill_id="procedure:one", kind="procedure"))
+    store = FakeSkillStore()
+    store.records["procedure:one"] = _procedure(
+        skill_id="procedure:one", kind="procedure"
+    )
 
     with pytest.raises(ValueError, match="record is not a skill"):
         read_skill_from_store(store, "procedure:one")
@@ -81,7 +83,7 @@ def test_read_skill_rejects_non_skill_records():
     [("blocked", "data"), ("unknown", "blocked")],
 )
 def test_read_skill_rejects_blocked_skills(trust_state, trust_mode):
-    store = EmulatedStore()
+    store = FakeSkillStore()
     store.add(_procedure(trust_state=trust_state, trust_mode=trust_mode))
 
     with pytest.raises(PermissionError, match="skill is blocked"):
@@ -89,7 +91,7 @@ def test_read_skill_rejects_blocked_skills(trust_state, trust_mode):
 
 
 def test_read_skill_defaults_unrecognized_trust_modes_to_data():
-    store = EmulatedStore()
+    store = FakeSkillStore()
     store.add(_procedure(trust_state="unknown", trust_mode="unexpected"))
 
     result = read_skill_from_store(store, "skill:commit-craft")
@@ -109,7 +111,7 @@ def test_server_exposes_one_read_only_tool():
 
 
 def test_registered_tool_returns_text_and_structured_skill(monkeypatch):
-    store = EmulatedStore()
+    store = FakeSkillStore()
     procedure = _procedure()
     store.add(procedure)
     monkeypatch.setattr(

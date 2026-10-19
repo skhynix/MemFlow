@@ -1,18 +1,7 @@
 # Copyright 2026 SK hynix Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-MemFlow — core orchestrator for MemFlow.
-
-Public API:
-  add(messages, procedure, user_id)  — store a procedure
-  search(query, user_id, top_k)      — retrieve procedures
-  delete(id, user_id)                — delete a procedure by id
-  chat(query, user_id)               — respond using procedure context
-  plan(task, user_id)                — decompose task into executable steps
-  execute(plan, tools)               — execute a task plan
-  run(task, user_id, tools)          — plan + execute + learn
-"""
+"""Qdrant skill storage, retrieval, and SKILL.md synchronization."""
 
 from __future__ import annotations
 
@@ -20,38 +9,18 @@ import copy
 import hashlib
 import logging
 import os
-import re
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from memflow.executor import ToolRegistry
-from memflow.learner import Learner
-from memflow.llm import BaseLLM, LLMFactory, parse_json
-from memflow.models import (
-    Procedure,
-    RunResult,
-    SearchResult,
-    Step,
-    StepResult,
-    TaskPlan,
-)
-from memflow.planner import LLMPlanner
-from memflow.prompts import (
-    CHAT_SYSTEM_PROMPT,
-    CLASSIFICATION_PROMPT,
-    EXTRACTION_PROMPT,
-    INTENT_CLASSIFICATION_PROMPT,
-)
+from memflow.models import Procedure, SearchResult
 from memflow.skills import load_skill
 from memflow.store import (
     BaseStore,
-    EmulatedStore,
-    FileStore,
-    MemMachineBypass,
-    MemMachineStore,
     QdrantStore,
+    _validate_skill_input,
+    _validate_skill_kind,
     env_flag,
 )
 
@@ -161,16 +130,6 @@ def _skill_source_candidate(path: Path) -> str:
     return str((path / "SKILL.md").resolve(strict=False))
 
 
-def _strip_surrounding_blank_lines(text: str) -> str:
-    """Remove blank padding lines without changing indentation in content."""
-    lines = text.splitlines()
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(lines)
-
-
 def _load_env_file(env_path: str | None = None) -> None:
     """
     Load environment variables from .env file using python-dotenv.
@@ -198,231 +157,22 @@ def _load_env_file(env_path: str | None = None) -> None:
     load_dotenv(dotenv_path=path, override=False)
 
 
-# ---------------------------------------------------------------------------
-# Guard structures for execution control
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class GlobalGuard:
-    """Guard at run() level - controls overall execution.
-
-    Design document specification:
-    - max_attempts: maximum replan attempts
-    - cycle detection: detect same goal+failure repetition via hash
-    """
-
-    max_attempts: int = 5
-    goal_fingerprints: dict = None
-
-    def __post_init__(self):
-        if self.goal_fingerprints is None:
-            self.goal_fingerprints = {}
-
-    def is_cycle_detected(self, goal: str, failure: str) -> bool:
-        """Detect if same goal+failure is repeating."""
-        key = (goal, failure)
-        if key in self.goal_fingerprints:
-            return True
-        self.goal_fingerprints[key] = True
-        return False
-
-    def can_attempt(self, attempt: int) -> bool:
-        return attempt < self.max_attempts
-
-
-@dataclass
-class PlanGuard:
-    """Guard at plan() level - controls recursion depth.
-
-    Design document specification:
-    - max_depth: maximum vertical recursion depth for plan decomposition
-    """
-
-    max_depth: int = 3
-    current_depth: int = 0
-
-    def can_recurse(self) -> bool:
-        return self.current_depth < self.max_depth
-
-    def enter(self):
-        self.current_depth += 1
-
-    def exit(self):
-        self.current_depth -= 1
-
-
-@dataclass
-class ToolGuard:
-    """Guard at tool call level - controls retry count.
-
-    Design document specification:
-    - max_retry: maximum retry for transient failures (network timeout, etc.)
-    - retry is for same method, replan is for different approach
-    """
-
-    max_retry: int = 3
-
-    def should_retry(self, attempt: int) -> bool:
-        return attempt < self.max_retry
-
-
 class MemFlow:
-    """
-    Core orchestrator for MemFlow operations.
+    """Manage skills with an explicit store or environment-configured Qdrant."""
 
-    Coordinates LLM, storage, and Phase 3 components (planner, executor, learner).
-    Supports automatic bypass routing for non-procedural memories.
-
-    Environment variables (read when use_env=True):
-        Priorities: explicit env var > .env file > fallback defaults
-
-        LLM_PROVIDER              — LLM provider: ollama | openai-compatible
-        LLM_MODEL                 — Model name
-        LLM_API_BASE              — LLM server URL
-        LLM_API_KEY               — API key for authenticated endpoints
-        MEMFLOW_BACKEND           — Storage backend: emulated | file | memmachine | qdrant
-        MEMFLOW_FILE_DIR          — File directory for FileStore
-        VECTOR_EMBEDDING_MODEL    — Embedding model (shared across vector backends)
-        VECTOR_EMBEDDING_API_BASE — Embedding API base URL (shared, required for qdrant)
-        VECTOR_EMBEDDING_API_KEY  — Embedding API key (shared)
-        VECTOR_EMBEDDING_DIMENSIONS — Embedding dimensions (shared)
-        QDRANT_BASE_URL           — Qdrant server URL for QdrantStore
-        QDRANT_API_KEY            — Qdrant API key (optional, for secured clusters)
-        QDRANT_COLLECTION_NAME    — Qdrant collection name
-        QDRANT_INDEX_TYPE         — Index type: hnsw or flat
-        QDRANT_DISTANCE           — Distance metric: Cosine, Dot, or Euclid
-        MEMMACHINE_BASE_URL       — MemMachine server URL
-        MEMMACHINE_ORG_ID         — MemMachine organization ID
-        MEMMACHINE_PROJECT        — MemMachine project ID
-        MEMMACHINE_API_KEY        — MemMachine API key (optional)
-
-    Note:
-        When use_env=True, automatically loads .env file from current directory
-        if it exists. Values in .env are used only if not already set as
-        environment variables.
-    """
-
-    def __init__(
-        self,
-        llm: BaseLLM | None = None,
-        store: BaseStore | None = None,
-        bypass: MemMachineBypass | None = None,
-        max_steps_per_iteration: int | None = None,
-        max_plan_iterations: int | None = None,
-        use_env: bool = True,
-        sync_mode: bool = False,
-    ) -> None:
-        # Track which components are explicitly provided (should not be overwritten by .env)
-        llm_provided = llm is not None
-        store_provided = store is not None
-        bypass_provided = bypass is not None
-        self._sync_mode = sync_mode
-
-        # Load .env file first (if enabled) so environment variables are available
+    def __init__(self, *, store: BaseStore | None = None, use_env: bool = True) -> None:
         if use_env:
             _load_env_file()
-
-        # Validate LLM is provided when use_env=False
-        if not use_env and llm is None:
-            raise ValueError("LLM must be provided when use_env=False")
-
-        # Determine backend: explicit store type takes priority, then .env, then default
-        if store_provided:
-            # Infer backend from explicitly provided store type
-            if isinstance(store, QdrantStore):
-                backend = "qdrant"
-            elif isinstance(store, MemMachineStore):
-                backend = "memmachine"
-            elif isinstance(store, FileStore):
-                backend = "file"
-            else:
-                backend = "emulated"
-        else:
-            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
-
-        # LLM Configuration - only from .env if not explicitly provided
-        if not llm_provided and use_env:
-            llm_provider = os.getenv("LLM_PROVIDER", "ollama")
-            llm_model = os.getenv("LLM_MODEL")
-            llm_api_base = os.getenv("LLM_API_BASE", "http://localhost:11434")
-            llm_api_key = os.getenv("LLM_API_KEY")
-            llm = LLMFactory.create(
-                llm_provider,
-                model=llm_model,
-                api_base=llm_api_base,
-                api_key=llm_api_key,
-            )
-
-        # Storage Backend
-        # Only read MEMFLOW_BACKEND from env when a store wasn't explicitly
-        # provided, so the isinstance inference above takes effect.
-        if not store_provided:
-            backend = os.getenv("MEMFLOW_BACKEND", "emulated")
-        file_dir = os.getenv("MEMFLOW_FILE_DIR", "./file_data")
-
-        # MemMachine Configuration
-        mm_url = os.getenv("MEMMACHINE_BASE_URL", "http://localhost:8080")
-        mm_org = os.getenv("MEMMACHINE_ORG_ID", "default")
-        mm_proj = os.getenv("MEMMACHINE_PROJECT", "memflow")
-        mm_key = os.getenv("MEMMACHINE_API_KEY")
-
-        # Vector DB embedding configuration (shared across vector backends)
-        vd_emb_model = os.getenv("VECTOR_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-4B")
-        vd_emb_api_base = os.getenv("VECTOR_EMBEDDING_API_BASE")
-        vd_emb_api_key = os.getenv("VECTOR_EMBEDDING_API_KEY", "EMPTY")
-        vd_emb_dim = os.getenv("VECTOR_EMBEDDING_DIMENSIONS", "2560")
-
-        # Qdrant Store Configuration
-        qd_url = os.getenv("QDRANT_BASE_URL", "http://localhost:6333")
-        qd_api_key = os.getenv("QDRANT_API_KEY")
-        qd_collection = os.getenv("QDRANT_COLLECTION_NAME", "procedures")
-        qd_index_type = os.getenv("QDRANT_INDEX_TYPE", "hnsw")
-        qd_distance = os.getenv("QDRANT_DISTANCE", "Cosine")
-        qd_index_m = os.getenv("QDRANT_INDEX_M", "16")
-        qd_index_ef = os.getenv("QDRANT_INDEX_EF_CONSTRUCT", "100")
-
-        if not store_provided and use_env:
-            if backend == "file":
-                store = FileStore(file_dir=file_dir)
-            elif backend == "memmachine":
-                store = MemMachineStore(
-                    base_url=mm_url, org_id=mm_org, project_id=mm_proj, api_key=mm_key
+        if store is None:
+            if not use_env:
+                raise ValueError("An explicit store is required when use_env=False")
+            backend = os.getenv("MEMFLOW_BACKEND", "qdrant").strip().lower()
+            if backend != "qdrant":
+                raise ValueError(
+                    f"unsupported backend {backend!r}; set MEMFLOW_BACKEND to qdrant"
                 )
-            elif backend == "qdrant":
-                store = QdrantStore(
-                    base_url=qd_url,
-                    api_key=qd_api_key,
-                    collection_name=qd_collection,
-                    index_type=qd_index_type,
-                    distance=qd_distance,
-                    hnsw_m=int(qd_index_m),
-                    hnsw_ef_construct=int(qd_index_ef),
-                    emb_model=vd_emb_model,
-                    emb_api_base=vd_emb_api_base,
-                    emb_api_key=vd_emb_api_key,
-                    emb_dim=int(vd_emb_dim),
-                )
-            else:
-                store = EmulatedStore()
-
-        if not bypass_provided and use_env and backend == "memmachine":
-            bypass = MemMachineBypass(
-                base_url=mm_url,
-                org_id=mm_org,
-                project_id=mm_proj,
-                api_key=mm_key,
-            )
-
-        self.llm = llm
-        self.store = store or EmulatedStore()
-        self._bypass = bypass  # routes semantic/episodic content to MemMachine
-        self._max_steps_per_iteration = max_steps_per_iteration
-        self._max_plan_iterations = max_plan_iterations
-        # Phase 3 components — lazily initialised on first use
-        self._planner: LLMPlanner | None = None
-        self._executor: ToolRegistry | None = None
-        self._learner: Learner | None = None
+            store = QdrantStore()
+        self.store = store
         # Hybrid search config (read from env).
         # Top-K parameters govern the pipeline depth:
         #   HYBRID_SPARSE_SEARCH_TOP_K / HYBRID_DENSE_SEARCH_TOP_K — Qdrant prefetch limits
@@ -466,48 +216,19 @@ class MemFlow:
         # RRF_TOP_K (config fixed at init — per-query warnings would spam).
         self._fetch_cap_warned = False
 
-    # ------------------------------------------------------------------
-    # add
-    # ------------------------------------------------------------------
-
-    def add(
-        self,
-        messages: str | list[dict] | None = None,
-        procedure: Procedure | list[Procedure] | None = None,
-        user_id: str = "default",
-    ) -> dict:
-        """Store a procedure or procedures.
-
-        Path 1 — direct: pass a Procedure object or list via `procedure=`.
-        Path 2 — extract: pass conversation text/messages via `messages=`.
-
-        Args:
-            messages: Conversation text/messages for extraction
-            procedure: Single Procedure or list of Procedures
-            user_id: User ID for the procedure(s)
-
-        Returns:
-            dict with event info for single, dict with counts for batch
-        """
-        if procedure is not None:
-            if isinstance(procedure, list):
-                # Batch add
-                total = len(procedure)
-                num_seeded = self.store.add(procedure)
-                return {
-                    "num_seeded": num_seeded,
-                    "num_skipped": total - num_seeded,
-                    "total": total,
-                }
-            else:
-                # Single add
-                self.store.add(procedure)
-                return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
-
-        if messages is None:
-            raise ValueError("Either 'messages' or 'procedure' must be provided")
-
-        return self._extract_and_store(messages, user_id)
+    def add(self, procedure: Procedure | list[Procedure]) -> dict:
+        """Store skill records, returning event information or batch counts."""
+        _validate_skill_input(procedure)
+        if isinstance(procedure, list):
+            total = len(procedure)
+            num_seeded = self.store.add(procedure) if procedure else 0
+            return {
+                "num_seeded": num_seeded,
+                "num_skipped": total - num_seeded,
+                "total": total,
+            }
+        self.store.add(procedure)
+        return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
 
     def add_skill(
         self,
@@ -526,6 +247,8 @@ class MemFlow:
     def sync_skill(self, path_or_id: str | Path) -> dict:
         """Refresh a skill record from its canonical SKILL.md source."""
         existing = self.store.get(str(path_or_id))
+        if existing is not None and existing.kind != "skill":
+            raise ValueError("sync_skill only supports skill records")
         path = Path(path_or_id).expanduser()
         if existing is None:
             resolved = _skill_source_candidate(path)
@@ -636,437 +359,6 @@ class MemFlow:
                 return proc if include_content else replace(proc, content="")
         return None
 
-    def _extract_and_store(
-        self,
-        messages: str | list[dict],
-        user_id: str,
-    ) -> dict:
-        # Normalize
-        if isinstance(messages, str):
-            combined = messages
-            msg_list = [{"role": "user", "content": messages}]
-        else:
-            combined = " ".join(m.get("content", "") for m in messages)
-            msg_list = messages
-
-        # Stage 1: LLM classification (memory type routing)
-        memory_type = self._classify_memory_type(combined)
-        if memory_type in ("semantic", "episodic"):
-            if self._bypass is not None:
-                try:
-                    self._bypass.add(combined, memory_type, user_id)
-                except Exception:
-                    pass  # bypass failures are non-critical
-                return {"results": [], "routed_to": "bypass", "type": memory_type}
-            return {
-                "results": [],
-                "skipped": f"classified as {memory_type}",
-                "type": memory_type,
-            }
-        if memory_type == "none":
-            return {"results": [], "skipped": "classified as none", "type": memory_type}
-
-        # Stage 2: LLM extraction (procedure extraction)
-        extraction_messages = [
-            {"role": "system", "content": EXTRACTION_PROMPT},
-            *msg_list,
-            {"role": "user", "content": "Extract procedural memory from the above."},
-        ]
-        try:
-            response = self.llm.generate(extraction_messages)
-            data = parse_json(response)
-        except Exception as e:
-            return {"results": [], "error": str(e), "type": memory_type}
-
-        if not data.get("has_procedure"):
-            return {"results": [], "type": memory_type}
-
-        proc = Procedure(
-            title=data.get("title", "Untitled"),
-            content=data.get("content", ""),
-            user_id=user_id,
-            category=data.get("category", "general"),
-            kind="procedure",
-        )
-        self.store.add(proc)
-        return {
-            "results": [{"id": proc.id, "title": proc.title, "event": "ADD"}],
-            "type": memory_type,
-        }
-
-    # ------------------------------------------------------------------
-    # chat - Primary user interface
-    # ------------------------------------------------------------------
-
-    def chat(
-        self,
-        message: str,
-        user_id: str | None = None,
-        history: list[dict] | None = None,
-        allow_execute: bool = False,
-        allow_delete: bool = False,
-    ) -> dict:
-        """
-        Primary user interface for MemFlow.
-
-        Classifies user intent and routes to appropriate handler:
-        - SEARCH: Retrieve and respond with relevant procedures
-        - ADD: Extract and store procedural knowledge
-        - EXECUTE: Run the task (requires allow_execute=True)
-        - DELETE: Delete a procedure by explicit id (requires allow_delete=True)
-        - CONVERSATION: Respond naturally without memory operations
-
-        Args:
-            message:       User's message
-            user_id:       User scope for memory operations
-            history:       Previous conversation messages for context
-            allow_execute: If True, EXECUTE intent will run the task.
-                          If False, asks for confirmation first.
-            allow_delete:  If True, DELETE intent may delete by explicit id.
-                          If False, returns candidates for confirmation.
-
-        Returns:
-            dict with response and metadata:
-            - response: str - The response text
-            - intents: list[str] - All detected intents
-            - primary_intent: str - Main intent for response formatting
-            - handler_results: dict - Results from each intent handler
-            - requires_confirmation: bool - (optional) True when action needs confirmation
-            - candidates: list[dict] - (optional) scoped DELETE candidates
-        """
-        # Combine current message with history for context
-        if history:
-            context_messages = history[-5:]  # Last 5 messages for context
-            full_context = (
-                "\n".join(
-                    f"{m.get('role', 'user')}: {m.get('content', '')}"
-                    for m in context_messages
-                )
-                + f"\nuser: {message}"
-            )
-        else:
-            full_context = message
-
-        # Classify intents (may return multiple)
-        intents_data = self._classify_intents(full_context)
-        intents = intents_data.get("intents", ["CONVERSATION"])
-        primary_intent = intents_data.get(
-            "primary", intents[0] if intents else "CONVERSATION"
-        )
-
-        # Check EXECUTE confirmation before processing
-        if "EXECUTE" in intents and not allow_execute:
-            # Ask for confirmation before executing
-            return {
-                "response": f"I can help you with: {message}\n\nThis will execute a task. Would you like me to proceed? (confirm to execute)",
-                "intents": intents,
-                "primary_intent": primary_intent,
-                "requires_confirmation": True,
-            }
-
-        # Process intents in order
-        responses = []
-        handler_results = {}
-
-        handlers = {
-            "SEARCH": self._handle_search,
-            "ADD": self._handle_add,
-            "EXECUTE": self._handle_execute,
-            "DELETE": lambda msg, uid, hist: self._handle_delete(
-                msg, uid, hist, allow_delete=allow_delete
-            ),
-            "CONVERSATION": self._handle_conversation,
-        }
-
-        for intent in intents:
-            handler = handlers.get(intent, self._handle_conversation)
-            result = handler(message, user_id, history)
-            responses.append(result.get("response", ""))
-            handler_results[intent] = result
-
-        # Combine responses
-        combined_response = (
-            "\n\n".join(responses) if len(responses) > 1 else responses[0]
-        )
-        combined_response = _strip_surrounding_blank_lines(combined_response)
-
-        response_data = {
-            "response": combined_response,
-            "intents": intents,
-            "primary_intent": primary_intent,
-            "handler_results": handler_results,
-        }
-        if any(r.get("requires_confirmation") for r in handler_results.values()):
-            response_data["requires_confirmation"] = True
-        if "DELETE" in handler_results and "candidates" in handler_results["DELETE"]:
-            response_data["candidates"] = handler_results["DELETE"]["candidates"]
-        return response_data
-
-    def _classify_intents(self, context: str) -> dict:
-        """Classify user intents using LLM. Returns multiple intents if applicable."""
-        messages = [
-            {"role": "system", "content": INTENT_CLASSIFICATION_PROMPT},
-            {"role": "user", "content": context},
-        ]
-        try:
-            response = self.llm.generate(messages)
-            data = parse_json(response)
-            intents = data.get("intents", [])
-            primary = data.get("primary", "CONVERSATION")
-
-            # Validate intents
-            valid_intents = []
-            for intent in intents:
-                if intent in ("SEARCH", "ADD", "EXECUTE", "DELETE", "CONVERSATION"):
-                    valid_intents.append(intent)
-
-            if not valid_intents:
-                return {"intents": ["CONVERSATION"], "primary": "CONVERSATION"}
-
-            # If CONVERSATION is mixed with others, remove it (others take priority)
-            if len(valid_intents) > 1 and "CONVERSATION" in valid_intents:
-                valid_intents.remove("CONVERSATION")
-
-            if primary not in valid_intents:
-                primary = valid_intents[0]
-
-            return {"intents": valid_intents, "primary": primary}
-        except Exception:
-            return {"intents": ["CONVERSATION"], "primary": "CONVERSATION"}
-
-    def _handle_search(
-        self, message: str, user_id: str | None, history: list[dict] | None
-    ) -> dict:
-        """Handle SEARCH intent - retrieve and respond."""
-        # chat() answers bypass the reranker (top_k=2~3 against a personal
-        # store: the over-fetch + endpoint latency buys little) — the
-        # reranked path is search()/search_skills (hook catalog). See
-        # _rerank_if_enabled for the deliberate scope split.
-        results = self.search(
-            message, user_id=user_id, top_k=3, kind=None, rerank=False
-        )
-
-        if results:
-            procedures_text = "\n\n".join(
-                f"**{r.procedure.title}** (Category: {r.procedure.category})\n{r.procedure.content}"
-                for r in results
-            )
-            response = (
-                f"Found {len(results)} relevant procedure(s):\n\n{procedures_text}"
-            )
-        else:
-            response = "I couldn't find any relevant procedures for that. Let me help with what I know..."
-            # Still provide LLM response
-            chat_response = self._generate_chat_response(message, [])
-            response += f"\n\n{chat_response}"
-
-        return {"response": response, "intent": "SEARCH", "results": results}
-
-    def _handle_add(
-        self, message: str, user_id: str | None, history: list[dict] | None
-    ) -> dict:
-        """Handle ADD intent - extract and store procedure."""
-        # Use existing extraction logic
-        result = self._extract_and_store(message, user_id or "default")
-        if result.get("results"):
-            return {
-                "response": f"Saved: {result['results'][0].get('title', 'Procedure')}",
-                "intent": "ADD",
-                "data": result,
-            }
-        elif result.get("skipped"):
-            return {
-                "response": f"I couldn't extract a procedure from that. Reason: {result['skipped']}",
-                "intent": "ADD",
-                "data": result,
-            }
-        return {
-            "response": "I couldn't extract a procedure. Please provide clearer step-by-step instructions.",
-            "intent": "ADD",
-        }
-
-    def _handle_execute(
-        self, message: str, user_id: str | None, history: list[dict] | None
-    ) -> dict:
-        """Handle EXECUTE intent - run the task."""
-        try:
-            result = self.run(message, user_id=user_id, multi_stage=True)
-            # Format execution result
-            success_count = sum(1 for r in result.step_results if r.success)
-            total = len(result.step_results)
-
-            steps_output = []
-            for i, r in enumerate(result.step_results):
-                status = "✓" if r.success else "✗"
-                step = result.plan.steps[i] if i < len(result.plan.steps) else None
-                desc = step.goal if step else "Unknown step"
-                steps_output.append(f"{status} {desc}")
-                if r.output:
-                    steps_output.append(f"    Output: {r.output[:100]}")
-
-            response = (
-                f"Executed {total} step(s), {success_count} succeeded:\n\n"
-                + "\n".join(steps_output)
-            )
-
-            if result.learned:
-                response += f"\n\nLearned: {result.learned.title}"
-
-            return {
-                "response": response,
-                "intent": "EXECUTE",
-                "data": {"result": result},
-            }
-        except Exception as e:
-            return {
-                "response": f"Execution failed: {str(e)}",
-                "intent": "EXECUTE",
-                "error": str(e),
-            }
-
-    def _handle_delete(
-        self,
-        message: str,
-        user_id: str | None,
-        history: list[dict] | None,
-        allow_delete: bool = False,
-    ) -> dict:
-        """Handle DELETE intent - delete only with confirmation and explicit id."""
-        explicit_ids, explicit_procs = self._find_explicit_delete_targets(
-            message, user_id
-        )
-        candidates = self._delete_candidates(message, user_id, explicit_procs)
-
-        if not allow_delete:
-            return {
-                "response": "Please confirm deletion with an explicit procedure id.",
-                "intent": "DELETE",
-                "requires_confirmation": True,
-                "candidates": candidates,
-                "deleted": False,
-            }
-
-        if len(explicit_ids) == 1:
-            result = self.delete(explicit_ids[0], user_id=user_id)
-            if result.get("deleted"):
-                response = f"Deleted: {result['title']} ({result['id']})"
-            else:
-                response = (
-                    f"Could not delete procedure {result['id']}: "
-                    f"{result.get('error', 'unknown_error')}"
-                )
-            return {"response": response, "intent": "DELETE", "data": result}
-
-        if len(explicit_ids) > 1:
-            response = "Please provide exactly one procedure id to delete."
-            error = "multiple_ids"
-        else:
-            response = "Please provide an explicit procedure id to delete."
-            error = "explicit_id_required"
-
-        return {
-            "response": response,
-            "intent": "DELETE",
-            "requires_confirmation": True,
-            "candidates": candidates,
-            "deleted": False,
-            "error": error,
-        }
-
-    def _handle_conversation(
-        self, message: str, user_id: str | None, history: list[dict] | None
-    ) -> dict:
-        """Handle CONVERSATION intent - respond naturally."""
-        # Search for relevant context (cheap path — see _handle_search).
-        results = self.search(
-            message, user_id=user_id, top_k=2, kind=None, rerank=False
-        )
-
-        response = self._generate_chat_response(message, results)
-        return {"response": response, "intent": "CONVERSATION"}
-
-    def _generate_chat_response(self, message: str, search_results: list) -> str:
-        """Generate a natural language response using LLM."""
-        procedures_text = (
-            "\n\n".join(
-                f"### {r.procedure.title}\n{r.procedure.content}"
-                for r in search_results
-            )
-            if search_results
-            else "No relevant procedures found."
-        )
-
-        messages = [
-            {
-                "role": "system",
-                "content": CHAT_SYSTEM_PROMPT.format(procedures=procedures_text),
-            },
-            {"role": "user", "content": message},
-        ]
-        return self.llm.generate(messages)
-
-    @staticmethod
-    def _message_mentions_id(message: str, id: str) -> bool:
-        """Return True when a stored id appears as a standalone token."""
-        if not id:
-            return False
-        pattern = rf"(?<![A-Za-z0-9_-]){re.escape(id)}(?![A-Za-z0-9_-])"
-        return re.search(pattern, message) is not None
-
-    def _find_explicit_delete_targets(
-        self, message: str, user_id: str | None
-    ) -> tuple[list[str], list[Procedure]]:
-        """Find exact mentioned ids and scoped procedures safe to show."""
-        scoped_procs = self.store.list(user_id=user_id)
-        scoped_matches = [
-            proc for proc in scoped_procs if self._message_mentions_id(message, proc.id)
-        ]
-        explicit_ids = [proc.id for proc in scoped_matches]
-
-        return explicit_ids, scoped_matches
-
-    @staticmethod
-    def _procedure_candidate(procedure: Procedure) -> dict:
-        return {
-            "id": procedure.id,
-            "title": procedure.title,
-            "category": procedure.category,
-        }
-
-    def _delete_candidates(
-        self,
-        message: str,
-        user_id: str | None,
-        explicit_procs: list[Procedure],
-        top_k: int = 3,
-    ) -> list[dict]:
-        """Return scoped delete candidates from exact id matches, search, or list."""
-        candidates: list[Procedure] = []
-        seen = set()
-
-        def add_candidate(proc: Procedure) -> None:
-            if proc.id in seen or len(candidates) >= top_k:
-                return
-            seen.add(proc.id)
-            candidates.append(proc)
-
-        for proc in explicit_procs:
-            add_candidate(proc)
-        for result in self.search(
-            message, user_id=user_id, top_k=top_k, kind=None, rerank=False
-        ):
-            add_candidate(result.procedure)
-        if not candidates:
-            procs = self.store.list(user_id=user_id)
-            for proc in procs:
-                add_candidate(proc)
-
-        return [self._procedure_candidate(proc) for proc in candidates]
-
-    # ------------------------------------------------------------------
-    # Hybrid search helpers
-    # ------------------------------------------------------------------
-
     def _parse_rrf_weights(self) -> tuple[float, float]:
         """Parse the MEMFLOW_HYBRID_RRF_WEIGHTS env value into a (dense, sparse) tuple."""
         raw = self._hybrid_rrf_weights
@@ -1099,7 +391,7 @@ class MemFlow:
         self,
         query: str,
         user_id: str | None,
-        kind: str | None,
+        kind: str,
         rrf_top_k: int,
     ) -> list[SearchResult]:
         """Hybrid retrieval (sparse+dense RRF) for a single query.
@@ -1124,10 +416,6 @@ class MemFlow:
             dense_top_k=self._hybrid_dense_search_top_k,
             rrf_k=self._hybrid_rrf_k,
         )
-
-    # ------------------------------------------------------------------
-    # Reranker helpers
-    # ------------------------------------------------------------------
 
     def _get_rerank_pipeline(self) -> Any:
         """Lazily build the RerankPipeline (stage clients are only
@@ -1191,11 +479,8 @@ class MemFlow:
         """Rerank candidates when MEMFLOW_RERANKER_PIPELINE is set; otherwise truncate.
 
         ``rerank=False`` skips reranking even when it is globally enabled —
-        used by internal low-top_k callers (chat context, planner context,
-        delete candidates) that should not pay the reranker's over-fetch +
-        endpoint latency. Note this means chat() answers are NOT reranked
-        even under the adopted reranker config; the reranked path is
-        search()/search_skills (e.g. the Claude Code hook).
+        callers can use this to request retrieval order without candidate
+        over-fetch or reranker endpoint latency.
         """
         if not candidates:
             return []
@@ -1204,16 +489,12 @@ class MemFlow:
             return pipeline.rerank(query, candidates, top_k=top_k)
         return candidates[:top_k]
 
-    # ------------------------------------------------------------------
-    # search
-    # ------------------------------------------------------------------
-
     def search(
         self,
         query: str | list[str],
         user_id: str | None = None,
         top_k: int = 5,
-        kind: str | None = "skill",
+        kind: str = "skill",
         rerank: bool = True,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity.
@@ -1241,15 +522,15 @@ class MemFlow:
             query: Single query string or list of queries
             user_id: User ID for filtering
             top_k: Number of results per query (final truncation)
-            kind: Record kind filter. Use None to search all records.
+            kind: Only the skill record kind is supported.
             rerank: Set False to bypass the reranker (and its candidate
                 over-fetch) even when ``MEMFLOW_RERANKER_PIPELINE`` is on —
-                for internal low-top_k callers (chat context, delete
-                candidates) that should not pay reranker latency.
+                for callers that only need retrieval order.
 
         Returns:
             Single list for single query, list of lists for batch
         """
+        _validate_skill_kind(kind)
         if isinstance(query, list):
             return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
         rerank_on = rerank and self._reranker_enabled()
@@ -1295,10 +576,9 @@ class MemFlow:
                 "Hybrid search enabled but %s is attached to a collection "
                 "without sparse vectors (created before hybrid support); "
                 "using dense search. Existing collections keep their "
-                "schema regardless of the switch — to enable hybrid, "
-                "drop and re-seed the collection while "
-                "MEMFLOW_HYBRID_SEARCH_ENABLED=on (e.g. run_seeding.py "
-                "--clear-existing).",
+                "schema regardless of the switch or re-seeding. To enable "
+                "hybrid, use a separate new collection created with "
+                "MEMFLOW_HYBRID_SEARCH_ENABLED=on.",
                 type(self.store).__name__,
             )
         # Dense-only path: over-fetch to reranker candidate depth when reranking.
@@ -1306,16 +586,12 @@ class MemFlow:
         candidates = self.store.search(query, top_k=fetch_k, user_id=user_id, kind=kind)
         return self._rerank_if_enabled(query, candidates, top_k, rerank=rerank)
 
-    # ------------------------------------------------------------------
-    # search_async - Async search for single or multiple queries
-    # ------------------------------------------------------------------
-
     async def search_async(
         self,
         query: str | list[str],
         user_id: str | None = None,
         top_k: int = 5,
-        kind: str | None = "skill",
+        kind: str = "skill",
         max_workers: int = 50,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity asynchronously.
@@ -1324,12 +600,13 @@ class MemFlow:
             query: Single query string or list of queries
             user_id: User ID for filtering
             top_k: Number of results per query
-            kind: Record kind filter. Use None to search all records.
-            max_concurrency: Max concurrent requests (default: 50)
+            kind: Only the skill record kind is supported.
+            max_workers: Max concurrent requests (default: 50)
 
         Returns:
             Single list for single query, list of lists for batch
         """
+        _validate_skill_kind(kind)
         if isinstance(query, list):
             return await self.store.search_async(
                 query,
@@ -1342,10 +619,6 @@ class MemFlow:
             import asyncio
 
             return await asyncio.to_thread(self.search, query, user_id, top_k, kind)
-
-    # ------------------------------------------------------------------
-    # delete
-    # ------------------------------------------------------------------
 
     def delete(
         self,
@@ -1408,10 +681,6 @@ class MemFlow:
                 "deleted": False,
                 "error": "delete_failed",
             }
-
-    # ------------------------------------------------------------------
-    # delete_async - Async delete for single or multiple procedures
-    # ------------------------------------------------------------------
 
     async def delete_async(
         self,
@@ -1476,31 +745,31 @@ class MemFlow:
                 "error": "delete_failed",
             }
 
-    # ------------------------------------------------------------------
-    # add_async - Async add for single or multiple procedures
-    # ------------------------------------------------------------------
-
     async def add_async(
         self,
         procedure: Procedure | list[Procedure],
-        user_id: str = "default",
+        *,
         max_workers: int = 50,
     ) -> dict:
         """Add a procedure or procedures asynchronously.
 
         Args:
             procedure: Single Procedure or list of Procedures
-            user_id: User ID for the procedure(s)
             max_workers: Max concurrent operations (default: 50)
 
         Returns:
             dict with event info for single, dict with counts for batch
         """
 
+        _validate_skill_input(procedure)
         if isinstance(procedure, list):
             # Batch async add
             total = len(procedure)
-            num_seeded = await self.store.add_async(procedure, max_workers=max_workers)
+            num_seeded = (
+                await self.store.add_async(procedure, max_workers=max_workers)
+                if procedure
+                else 0
+            )
             return {
                 "num_seeded": num_seeded,
                 "num_skipped": total - num_seeded,
@@ -1510,403 +779,3 @@ class MemFlow:
             # Single async add
             await self.store.add_async(procedure, max_workers=max_workers)
             return {"id": procedure.id, "title": procedure.title, "event": "ADD"}
-
-    # ------------------------------------------------------------------
-    # plan
-    # ------------------------------------------------------------------
-
-    def plan(
-        self,
-        task: str,
-        user_id: str | None = None,
-        multi_stage: bool = False,
-        executed_steps: list[Step] | None = None,
-        max_depth: int | None = None,
-    ) -> TaskPlan:
-        """Decompose a task into executable steps.
-
-        Relevant procedures are retrieved first and injected into the planning
-        prompt so the LLM can reuse existing SOPs (Retrieve → Planner back-edge).
-
-        Args:
-            task:             High-level task description.
-            user_id:          User scope for retrieval.
-            multi_stage:      If True, plan only a few steps for iterative execution.
-            executed_steps:   Previously executed steps with attached results.
-            max_depth:        Maximum recursion depth for plan decomposition.
-
-        Returns:
-            TaskPlan with steps to execute.
-        """
-        # NOTE: planner context keeps the reranker ON (unlike chat/delete
-        # callers) — this MR only unified the search path and deliberately
-        # does not change run() behavior. Cost: with reranking on, each plan
-        # and replan pays the FETCH_TOP_K over-fetch + one rerank round trip
-        # to pick top_k=5. Switch to rerank=False if that latency is not
-        # justified.
-        results = self.search(task, user_id=user_id, kind=None)
-        context = (
-            "\n\n---\n\n".join(
-                f"### {r.procedure.title}\n{r.procedure.content}" for r in results
-            )
-            if results
-            else ""
-        )
-
-        if self._planner is None:
-            self._planner = LLMPlanner(
-                llm=self.llm,
-                max_steps_per_iteration=self._max_steps_per_iteration or 1,
-                max_iterations=self._max_plan_iterations or 5,
-            )
-
-        # PlanGuard for max_depth control
-        plan_guard = PlanGuard(max_depth=max_depth or 3)
-
-        return self._planner.plan(
-            task,
-            context=context,
-            multi_stage=multi_stage,
-            executed_steps=executed_steps,
-            plan_guard=plan_guard,
-        )
-
-    # ------------------------------------------------------------------
-    # execute
-    # ------------------------------------------------------------------
-
-    def execute(
-        self,
-        plan: TaskPlan,
-        tools: dict[str, Callable[..., str]] | None = None,
-    ) -> list[StepResult]:
-        """Execute a task plan.
-
-        Args:
-            plan:  TaskPlan object containing steps to execute.
-            tools: Extra tools to register {name: callable}.
-                   Each callable receives Step.args as keyword arguments
-                   and must return a string.
-
-        Returns:
-            List of StepResult objects from executing each step.
-        """
-        if self._executor is None:
-            self._executor = ToolRegistry(llm=self.llm)
-        if tools:
-            for name, fn in tools.items():
-                self._executor.register(name, fn)
-
-        step_results: list[StepResult] = []
-        for step in plan.steps:
-            result = self._executor.execute_step(step)
-            self._attach_step_result(step, result)
-            step_results.append(result)
-        return step_results
-
-    # ------------------------------------------------------------------
-    # run
-    # ------------------------------------------------------------------
-
-    def run(
-        self,
-        task: str,
-        user_id: str | None = None,
-        tools: dict[str, Callable[..., str]] | None = None,
-        multi_stage: bool = True,
-    ) -> RunResult:
-        """Plan, execute, and learn from a task.
-
-        This is the unified entry point for task execution. Use multi_stage=True
-        (default) for adaptive planning that learns from execution results, or
-        multi_stage=False for simple single-shot planning.
-
-        Steps:
-          1. Retrieve relevant procedures (context for planning).
-          2. Plan: LLM decomposes the task into steps.
-          3. Execute: run each step with the registered tools.
-          4. Learn: extract a reusable Procedure from successful steps
-             and store it automatically (Learn → Retrieve back-edge).
-
-        Args:
-            task:       High-level task description.
-            user_id:    User scope for retrieval and storage.
-            tools:      Extra tools to register {name: callable}.
-                        Each callable receives Step.args as keyword arguments
-                        and must return a string.
-            multi_stage: If True, use Reflect-and-Refine loop (plan a few steps,
-                        execute, replan). If False, single-shot plan then execute.
-
-        Returns:
-            RunResult with plan, step results, and learned procedure.
-        """
-        if multi_stage:
-            return self._run_with_partial_replan(task, user_id=user_id, tools=tools)
-        else:
-            return self._run_single_shot(task, user_id=user_id, tools=tools)
-
-    def _run_single_shot(
-        self,
-        task: str,
-        user_id: str | None = None,
-        tools: dict[str, Callable[..., str]] | None = None,
-    ) -> RunResult:
-        """Single-shot execution: plan once, execute, learn (internal)."""
-        task_plan = self.plan(task, user_id=user_id)
-        step_results = self.execute(task_plan, tools=tools)
-
-        if self._learner is None:
-            self._learner = Learner(self.llm)
-
-        learned = self._learner.extract(
-            task, task_plan.steps, user_id=user_id or "default"
-        )
-        if learned is not None:
-            self.store.add(learned)
-
-        return RunResult(plan=task_plan, step_results=step_results, learned=learned)
-
-    # ------------------------------------------------------------------
-    # run_with_partial_replan - Design document compliant execution
-    # ------------------------------------------------------------------
-
-    def _run_with_partial_replan(
-        self,
-        task: str,
-        user_id: str | None = None,
-        tools: dict[str, Callable[..., str]] | None = None,
-    ) -> RunResult:
-        """
-        Execute task with partial replan for failed steps only.
-
-        Design document implementation:
-        - Replan only the failed step's goal, not global goal
-        - Keep successful steps, replace only failed ones
-        - GlobalGuard prevents infinite loops via cycle detection
-
-        Steps:
-          1. Initial plan for the full task
-          2. Execute step by step
-          3. On failure: replan only that step with its goal
-          4. On success: mark step as done, continue to next
-          5. Repeat until all steps done or max attempts reached
-        """
-        # Retrieve context
-        # NOTE: planner context keeps the reranker ON (unlike chat/delete
-        # callers) — this MR only unified the search path and deliberately
-        # does not change run() behavior. Cost: with reranking on, each plan
-        # and replan pays the FETCH_TOP_K over-fetch + one rerank round trip
-        # to pick top_k=5. Switch to rerank=False if that latency is not
-        # justified.
-        results = self.search(task, user_id=user_id, kind=None)
-        context = (
-            "\n\n---\n\n".join(
-                f"### {r.procedure.title}\n{r.procedure.content}" for r in results
-            )
-            if results
-            else ""
-        )
-
-        # Initialize components
-        if self._planner is None:
-            self._planner = LLMPlanner(self.llm)
-        if self._executor is None:
-            self._executor = ToolRegistry(llm=self.llm)
-        if tools:
-            for name, fn in tools.items():
-                self._executor.register(name, fn)
-
-        # Guards are scoped to a single run() — reusing an instance-level guard
-        # would let goal_fingerprints from past runs trigger false cycle detection
-        # on the first failure of a new task.
-        global_guard = GlobalGuard(max_attempts=5)
-        attempt = 0
-
-        # Initial plan
-        plan = self._planner.plan(task, context=context, multi_stage=False)
-        all_step_results: list[StepResult] = []
-        executed_steps: list[Step] = []
-
-        # Execute with partial replan
-        step_index = 0
-        while step_index < len(plan.steps):
-            step = plan.steps[step_index]
-
-            # Skip already completed steps
-            if step.status == "done":
-                step_index += 1
-                continue
-
-            # Execute current step
-            step_result = self._execute_step_with_guard(step, tools)
-            self._attach_step_result(step, step_result)
-            all_step_results.append(step_result)
-            executed_steps.append(step)
-
-            if step_result.success:
-                step_index += 1
-            else:
-                # Step failed - replan only this step
-                attempt += 1
-                if not global_guard.can_attempt(attempt):
-                    break  # Max attempts reached
-
-                # Check for cycle (same goal + same failure)
-                if global_guard.is_cycle_detected(step.goal, step_result.error):
-                    break  # Cycle detected
-
-                # Replan the failed step's goal using REPLAN_PROMPT so the
-                # planner sees the failure history and produces an alternative
-                # approach rather than re-deriving the same steps.
-                new_plan = self._planner.plan(
-                    step.goal,  # Only this step's goal, not global task
-                    context=context,
-                    multi_stage=True,
-                    executed_steps=[step],
-                )
-
-                if new_plan.steps:
-                    # Replace failed step with new subplan
-                    # Insert new steps at current position
-                    plan.steps = (
-                        plan.steps[:step_index]
-                        + new_plan.steps
-                        + plan.steps[step_index + 1 :]
-                    )
-                    # Don't increment step_index - process new first step
-                else:
-                    # LLM couldn't find an alternative.
-                    step_index += 1
-
-        # Mark remaining steps as not executed
-        for i in range(step_index, len(plan.steps)):
-            if plan.steps[i].status == "pending":
-                plan.steps[i].status = "failed"
-
-        # Learn from successful execution
-        learned = None
-        successful_steps = [
-            step for step in executed_steps if step.result and step.result.success
-        ]
-        if successful_steps:
-            if self._learner is None:
-                self._learner = Learner(self.llm)
-
-            learned = self._learner.extract(
-                task, executed_steps, user_id=user_id or "default"
-            )
-            if learned is not None:
-                self.store.add(learned)
-
-        return RunResult(
-            plan=plan,
-            step_results=all_step_results,
-            learned=learned,
-        )
-
-    def _execute_step_with_guard(
-        self, step: Step, tools: dict | None = None
-    ) -> StepResult:
-        """Execute a single step with ToolGuard retry logic."""
-        tool_guard = ToolGuard(max_retry=3)
-        attempt = 0
-
-        while tool_guard.should_retry(attempt):
-            result = self._executor.execute_step(step)
-
-            if result.success:
-                return result
-
-            if not result.retryable:
-                return result  # Non-retryable error
-
-            attempt += 1
-
-        # All retries exhausted
-        return StepResult(
-            step_id=step.id,
-            success=False,
-            output="",
-            error=f"Failed after {attempt} retries",
-            retryable=False,
-        )
-
-    @staticmethod
-    def _attach_step_result(step: Step, result: StepResult) -> None:
-        step.result = result
-        step.status = "done" if result.success else "failed"
-
-    # ------------------------------------------------------------------
-    # internal helpers
-    # ------------------------------------------------------------------
-
-    def _classify_memory_type(self, content: str) -> str:
-        """Stage 1: LLM classification — returns procedural/semantic/episodic/none."""
-        messages = [
-            {"role": "system", "content": CLASSIFICATION_PROMPT},
-            {"role": "user", "content": content},
-        ]
-        try:
-            response = self.llm.generate(messages)
-            data = parse_json(response)
-            return data.get("type", "procedural")
-        except Exception:
-            return "none"  # fall back to none on error (safe default)
-
-    def _is_task_complete(self, task: str, steps: list[Step]) -> bool:
-        """
-        Use LLM to verify if the task has been actually completed.
-        Be conservative - only return True if clearly complete.
-        """
-        # First, check for obvious success patterns
-        successful_outputs = [
-            step.result.output
-            for step in steps
-            if step.result and step.result.success and step.result.output
-        ]
-
-        # For tasks with "and", check if multiple distinct things were accomplished
-        if " and " in task.lower():
-            parts = [p.strip() for p in task.lower().split(" and ")]
-            # Need at least one successful output per part
-            if len(parts) > len(successful_outputs):
-                return False  # Not enough outputs to cover all parts
-
-        # Summarize what was accomplished
-        summary_parts = []
-        for step in steps:
-            if step.result is None:
-                continue
-
-            desc = step.goal or f"Step {step.id[:8]}"
-            if step.result.success and step.result.output:
-                summary_parts.append(f"- {desc}: {step.result.output[:200]}")
-            elif not step.result.success:
-                summary_parts.append(f"- {desc}: FAILED ({step.result.error[:100]})")
-
-        summary = "\n".join(summary_parts) if summary_parts else "No results yet."
-
-        # Ask LLM to verify task completion with stricter criteria
-        verification_prompt = f"""
-Task: {task}
-
-Execution Summary:
-{summary}
-
-Has the task been completed successfully?
-Criteria:
-1. ALL parts of the task must be done (check for "and", commas, multiple requirements)
-2. Steps must produce meaningful output (not empty, not errors)
-3. File operations must have created actual files
-4. If the same output appears multiple times, count it only ONCE
-5. If ANY part is incomplete or failed, answer NO
-
-Respond ONLY with "YES" or "NO".
-"""
-        messages = [{"role": "user", "content": verification_prompt}]
-        try:
-            response = self.llm.generate(messages).strip().upper()
-            return "YES" in response
-        except Exception:
-            # On error, assume task is not complete (conservative)
-            return False

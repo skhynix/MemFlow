@@ -230,14 +230,12 @@ def main() -> None:
     if not args.seed_only:
         verify_data_file_checksum(args.queries_path, skip_verify=args.skip_verify)
 
-    backend = os.environ.get("MEMFLOW_BACKEND", "emulated")
-    llm_provider = os.environ.get("LLM_PROVIDER", "ollama")
-    llm_model = os.environ.get("LLM_MODEL", "llama3.2")
+    backend = os.environ.get("MEMFLOW_BACKEND", "qdrant").strip().lower()
 
     # Must run before MemFlow(): the store caches the instruction at init.
     _install_query_instruction()
 
-    memflow = MemFlow(sync_mode=args.sync)
+    memflow = MemFlow()
 
     print("\n=== Starting SkillReason-Bench Benchmark ===")
     print(f"Corpus path: {args.corpus_path}")
@@ -272,8 +270,6 @@ def main() -> None:
                 "user_id": args.user_id,
                 "corpus_size": corpus_size,
                 "embedding_model": os.environ.get("VECTOR_EMBEDDING_MODEL", ""),
-                "llm_provider": llm_provider,
-                "llm_model": llm_model,
             },
             "settings": {
                 "user_id": args.user_id,
@@ -301,8 +297,6 @@ def main() -> None:
             memflow=memflow,
             args=args,
             backend=backend,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
         )
     )
 
@@ -326,8 +320,6 @@ def main() -> None:
             "embedding_batch_size": args.embedding_batch_size,
             "backend": backend,
             "embedding_model": os.environ.get("VECTOR_EMBEDDING_MODEL", ""),
-            "llm_provider": llm_provider,
-            "llm_model": llm_model,
             "sync_mode": args.sync,
             "max_concurrency": args.max_concurrency,
         },

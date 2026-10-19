@@ -8,7 +8,7 @@ import hashlib
 import pytest
 
 from memflow.manager import MemFlow
-from memflow.models import Procedure
+from memflow.models import Procedure, SearchResult
 from memflow.skills import (
     build_resource_manifest,
     build_skill_metadata,
@@ -17,7 +17,7 @@ from memflow.skills import (
     parse_skill_frontmatter,
     skill_id,
 )
-from memflow.store import EmulatedStore
+from tests.fakes import FakeSkillStore
 
 
 def _write_skill(root, text: str) -> str:
@@ -245,7 +245,7 @@ def test_load_skill_from_direct_skill_md_path(tmp_path):
     assert proc.source_path == str((root / "SKILL.md").resolve())
 
 
-def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path, fake_llm):
+def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path):
     root = tmp_path / "commit-craft"
     root.mkdir()
     source = root / "SKILL.md"
@@ -260,7 +260,7 @@ def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path, fake_llm):
         "# Commit Craft\n\n"
         "Keep commits reviewable.\n",
     )
-    manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=False)
+    manager = MemFlow(store=FakeSkillStore(), use_env=False)
 
     added = manager.add_skill(root, user_id="alice", trust_state="trusted")
 
@@ -277,6 +277,7 @@ def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path, fake_llm):
     assert added["root_path"] == str(root.resolve())
     listed = manager.list_skills(user_id="alice", trust_state="trusted")
     assert [proc.id for proc in listed] == [added["id"]]
+    manager.store.search_results = [SearchResult(listed[0], 0.8)]
     assert (
         manager.search_skills("patch series", user_id="alice")[0].procedure.id
         == (added["id"])
@@ -310,7 +311,7 @@ def test_memflow_skill_api_add_search_get_list_and_sync(tmp_path, fake_llm):
     assert source.read_text(encoding="utf-8") == updated
 
 
-def test_sync_skill_missing_source_returns_stale_without_reindexing(tmp_path, fake_llm):
+def test_sync_skill_missing_source_returns_stale_without_reindexing(tmp_path):
     root = tmp_path / "missing-source"
     root.mkdir()
     source = root / "SKILL.md"
@@ -318,7 +319,7 @@ def test_sync_skill_missing_source_returns_stale_without_reindexing(tmp_path, fa
         root,
         "---\nname: missing-source\n---\n# Missing Source\n\nKeep snapshot.\n",
     )
-    manager = MemFlow(llm=fake_llm, store=EmulatedStore(), use_env=False)
+    manager = MemFlow(store=FakeSkillStore(), use_env=False)
     added = manager.add_skill(root, user_id="alice", trust_state="trusted")
     before = manager.get_skill(added["id"])
     source.unlink()

@@ -5,7 +5,8 @@ MemFlow finds relevant skills for your task in Claude Code. Register your
 and gives Claude a short list of matches to read through MCP.
 
 The current workflow uses Qdrant and an OpenAI-compatible embedding service.
-You do not need a separate generation LLM. MemFlow stores and serves the
+The default retrieval path needs no generation LLM. Optional LLM reranking
+uses a separate configured endpoint. MemFlow stores and serves the
 `SKILL.md` text; accompanying scripts and reference files are not included.
 
 ## Quick start
@@ -196,6 +197,31 @@ For retrieval tuning, edit `.memflow/claude-hook.json`:
 | `retrieval.min_score` | `0.2` | Minimum similarity score for a match. |
 | `retrieval.timeout_ms` | `2000` | Time allowed to initialize the store and find skills. |
 
+### Optional reranking
+
+Set `MEMFLOW_RERANKER_PIPELINE` in your environment file to `ce`, `llm`,
+`ce_llm`, or `llm_ce` to rerank skill candidates after dense or hybrid retrieval.
+The default is `none`. See [.env.example](.env.example) for endpoints, candidate
+depths, stage caps, and timeouts.
+
+For an LLM stage, install the matching provider extra from the MemFlow checkout:
+`uv tool install --force '.[openai]'` for an OpenAI-compatible endpoint, or
+`uv tool install --force '.[ollama]'` for Ollama. Source-checkout users can use
+`uv sync --extra openai` or `uv sync --extra ollama` instead. The CE stage uses
+the core HTTP client and needs no additional provider extra.
+
+Configure the LLM stage with `RERANKER_LLM_PROVIDER`, `RERANKER_LLM_MODEL`,
+`RERANKER_LLM_API_BASE`, and `RERANKER_LLM_API_KEY`. These retain `LLM_*` fallback
+settings for existing reranker deployments. Clients are created only when
+reranking runs; `MemFlow` itself requires no generation client. Invalid stage
+configuration or endpoint failures warn and fall back to retrieval order.
+
+Single-string searches, including `search_async`, use the pipeline. List-query
+batch searches bypass hybrid retrieval and reranking. `search(..., rerank=False)`
+also bypasses reranking. For SkillRet, the default async retrieval runner
+measures the configured pipeline; `--sync` uses the dense batch path and
+`--mode dense sparse hybrid` explicitly measures retrieval without reranking.
+
 <details>
 <summary>Optional: minimize Claude's native skill catalog</summary>
 
@@ -312,6 +338,69 @@ state failures remain best-effort and do not block the conversation.
 **NOTE:** Claude subagent events can carry the parent session ID, so a
 subagent compaction may reset shared state. See
 [Claude Code issue 91910](https://github.com/anthropics/claude-code/issues/91910).
+
+## Python API
+
+MemFlow is a skill retrieval and injection layer. The CLI supports skill
+`add`, `sync`, and `list`, and Claude `status` and `configure`. Running
+`memflow` prints help. The Python API also provides search, get, and delete:
+
+```python
+from memflow import MemFlow, Procedure
+
+memory = MemFlow()  # Qdrant, configured from the environment and CWD .env
+record = Procedure(title="Release checks", content="Check tests and release notes.")
+memory.add(record)
+hits = memory.search("prepare a release", user_id="default")
+stored = memory.get_skill(record.id)
+memory.delete(record.id)
+```
+
+`add` accepts a record or a list; `add_async` also accepts keyword-only
+`max_workers`. Records must have `kind="skill"`. `search` and `search_async`
+likewise accept only `kind="skill"`. File indexing uses `add_skill(path)` and
+`sync_skill(path_or_id)`. `get_skill` accepts an ID, title, or frontmatter name;
+MCP `read_skill` accepts an exact ID only.
+
+The constructor is keyword-only: `MemFlow(store=store, use_env=False)` supports
+an injected store without service initialization. Without an explicit store,
+`use_env=True` loads CWD `.env` with shell settings taking precedence and uses
+Qdrant. `MEMFLOW_BACKEND`, if supplied, must be `qdrant`. The default collection
+name is `procedures`; the setup example explicitly selects `memflow_skills`.
+
+## Optional MemMachine memory queries
+
+MemMachine is a separate source for existing episodic and semantic memory.
+Install its optional SDK with `uv sync --extra memmachine` and call the query
+module explicitly:
+
+```python
+from memflow.memmachine_memory import MemMachineMemoryClient
+
+client = MemMachineMemoryClient(
+    base_url="http://localhost:8080", org_id="default", project_id="memflow"
+)
+try:
+    response = client.search(
+        "What are my release preferences?",
+        user_id="alice",
+        set_metadata={"user_id": "alice"},
+    )
+finally:
+    client.close()
+```
+
+The project must already exist. Episodic memory uses the supplied `user_id`
+metadata filter; `set_metadata` must match the server's existing semantic set
+configuration for that user. The example mapping is valid only for a server
+configured that way. The SDK response retains both memory types without
+conversion to skill records. This module does not create projects, write or
+delete memory, or participate in skill search, hooks, MCP, or benchmarks.
+
+`MemMachineMemoryClient.from_env()` reads the optional `MEMMACHINE_*` process
+settings in [.env.example](.env.example). It does not load an env file. Import,
+construction, and `from_env()` do not load the SDK or connect; the first valid
+search does. Close the client when finished; a closed client cannot search.
 
 ## Benchmarks
 

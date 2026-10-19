@@ -8,44 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-class TestParseJson:
-    """Tests for JSON parsing utility."""
-
-    @pytest.mark.parametrize(
-        "text,expected",
-        [
-            (
-                '{"has_procedure": true, "title": "Test"}',
-                {"has_procedure": True, "title": "Test"},
-            ),
-            ('```json\n{"has_procedure": true}\n```', {"has_procedure": True}),
-            (
-                '"""{"has_procedure": true, "title": "Test"}"""',
-                {"has_procedure": True, "title": "Test"},
-            ),
-            (
-                'Here is the result: {"has_procedure": true, "title": "Test"} end.',
-                {"has_procedure": True, "title": "Test"},
-            ),
-            ('{"content": "line1\\nline2"}', {"content": "line1\nline2"}),
-        ],
-    )
-    def test_parse_json_valid(self, text, expected):
-        """Test parsing various valid JSON formats."""
-        from memflow.llm import parse_json
-
-        result = parse_json(text)
-        assert result == expected
-
-    def test_parse_invalid_json_returns_empty(self):
-        """Test that invalid JSON returns empty dict."""
-        from memflow.llm import parse_json
-
-        text = "not valid json at all"
-        result = parse_json(text)
-        assert result == {}
-
-
 class TestLLMFactory:
     """Tests for LLM factory."""
 
