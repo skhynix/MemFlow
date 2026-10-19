@@ -10,7 +10,7 @@ You do not need a separate generation LLM. MemFlow stores and serves the
 
 ## Quick start
 
-You need Python 3.10+, [uv](https://docs.astral.sh/uv/getting-started/installation/),
+You need Python 3.10+, [uv 0.12.24](https://docs.astral.sh/uv/getting-started/installation/),
 [Claude Code](https://code.claude.com/docs/en/setup), and Docker with Compose.
 You also need an existing OpenAI-compatible embedding service.
 The commands work in a Linux/macOS shell.
