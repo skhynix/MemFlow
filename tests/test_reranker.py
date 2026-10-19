@@ -437,6 +437,81 @@ class TestLLMTemperaturePlumbing:
         assert llm._temperature == 0.0
 
 
+class _RaisingLLM:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    def generate(self, messages: list[dict]) -> str:
+        raise self.exc
+
+
+class TestLLMRerankerPromptBudget:
+    """DOC_CAP bounds each candidate but the prompt total is
+    FETCH_TOP_K x DOC_CAP; raising FETCH_TOP_K alone can exceed the model
+    context and silently degrade rerank to retrieval order. The guard warns
+    with the cause."""
+
+    def test_default_budget_is_set(self, monkeypatch) -> None:
+        from memflow.reranker import get_reranker_prompt_budget
+
+        monkeypatch.delenv("RERANKER_LLM_MAX_PROMPT_CHARS", raising=False)
+        assert get_reranker_prompt_budget() == 300_000
+
+    def test_oversized_prompt_warns_once(self, monkeypatch, caplog) -> None:
+        import logging
+
+        monkeypatch.setenv("RERANKER_LLM_MAX_PROMPT_CHARS", "100")
+        llm = _FakeLLM("[]")
+        reranker = LLMReranker(llm=llm, doc_scope="meta")
+        cands = _results(*[f"candidate-{i}" for i in range(50)])
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            reranker.rerank("q", cands)
+            reranker.rerank("q", cands)
+        warnings = [r for r in caplog.records if "Listwise prompt" in r.message]
+        assert len(warnings) == 1
+        # The warning must name the cause and both knobs that shrink it.
+        assert "RERANKER_LLM_MAX_PROMPT_CHARS" in warnings[0].message
+        assert "MEMFLOW_RERANKER_FETCH_TOP_K" in warnings[0].message
+        assert "MEMFLOW_RERANKER_DOC_CAP" in warnings[0].message
+
+    def test_prompt_under_budget_is_silent(self, monkeypatch, caplog) -> None:
+        import logging
+
+        monkeypatch.setenv("RERANKER_LLM_MAX_PROMPT_CHARS", "1000000")
+        reranker = LLMReranker(llm=_FakeLLM("[]"), doc_scope="meta")
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            reranker.rerank("q", _results("a", "b"))
+        assert not [r for r in caplog.records if "Listwise prompt" in r.message]
+
+
+class TestLLMRerankerFailureAttribution:
+    """A context-overflow surfaces as a generate() call error (vLLM 400), not
+    a parse failure — the log labels must point at the right stage."""
+
+    def test_generate_failure_logs_call_failed(self, caplog) -> None:
+        import logging
+
+        reranker = LLMReranker(
+            llm=_RaisingLLM(RuntimeError("400 context")), doc_scope="meta"
+        )
+        cands = _results("a", "b", "c")
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            out = reranker.rerank("q", cands)
+        # Degrades to retrieval order, truncated to top_k as before.
+        assert [r.procedure.title for r in out] == ["a", "b", "c"]
+        assert any("call failed" in r.message for r in caplog.records)
+        assert not any("parse failed" in r.message for r in caplog.records)
+
+    def test_parse_failure_still_logs_parse_failed(self, caplog) -> None:
+        import logging
+
+        reranker = LLMReranker(llm=_FakeLLM("not json"), doc_scope="meta")
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            reranker.rerank("q", _results("a"))
+        assert any("parse failed" in r.message for r in caplog.records)
+        assert not any("call failed" in r.message for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # RerankPipeline
 # ---------------------------------------------------------------------------
@@ -520,6 +595,83 @@ class TestRerankPipeline:
         monkeypatch.setenv("MEMFLOW_RERANKER_LLM_TOP_K", "0")
         pipeline = RerankPipeline(pipeline="llm")
         assert pipeline._reranker_llm_top_k is None
+
+    def test_stage_cap_below_top_k_warns_once(self, caplog) -> None:
+        # Serving path guard (mirrors run_retrieval.py's benchmark warning):
+        # caller asks for 20 (hook candidate_k) but the stage cap is 10 —
+        # the caller silently receives 10 unless warned.
+        import logging
+
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or 0)]
+        pipeline = RerankPipeline(pipeline="llm", llm_reranker=llm, llm_top_k=10)
+        cands = _results(*[str(i) for i in range(30)])
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            out = pipeline.rerank("q", cands, top_k=20)
+        assert len(out) == 10
+        warnings = [r for r in caplog.records if "silently receives" in r.message]
+        assert len(warnings) == 1
+        assert "MEMFLOW_RERANKER_LLM_TOP_K" in warnings[0].message
+        # Repeat calls with the same cap must not spam the log.
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", cands, top_k=20)
+            pipeline.rerank("q", cands, top_k=20)
+        assert len([r for r in caplog.records if "silently receives" in r.message]) == 1
+
+    def test_no_warning_when_cap_covers_top_k(self, caplog) -> None:
+        import logging
+
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or 0)]
+        pipeline = RerankPipeline(pipeline="llm", llm_reranker=llm, llm_top_k=50)
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", _results("a", "b"), top_k=20)
+        assert not [r for r in caplog.records if "silently receives" in r.message]
+
+    def test_no_warning_when_cap_disabled_or_top_k_absent(
+        self, caplog, monkeypatch
+    ) -> None:
+        import logging
+
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or len(c))]
+        # cap 0 -> None (no stage cap): nothing to warn about. An explicit 0
+        # arg falls back to the env default, so clear the env for "disabled".
+        monkeypatch.setenv("MEMFLOW_RERANKER_LLM_TOP_K", "0")
+        pipeline = RerankPipeline(pipeline="llm", llm_reranker=llm)
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline.rerank("q", _results("a", "b"), top_k=20)
+        # top_k None: caller accepts full depth; cap is only an internal limit.
+        pipeline2 = RerankPipeline(pipeline="llm", llm_reranker=llm, llm_top_k=10)
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            pipeline2.rerank("q", _results("a", "b"))
+        assert not [r for r in caplog.records if "silently receives" in r.message]
+
+    def test_middle_stage_cap_also_warns(self, caplog) -> None:
+        # ce_llm: every sub-top_k stage cap bounds the final output (stages
+        # run serially), so each one gets the same warning.
+        import logging
+
+        ce = MagicMock(spec=BaseReranker)
+        ce.rerank.side_effect = lambda q, c, top_k=None: list(c)[: (top_k or 0)]
+        llm = MagicMock(spec=BaseReranker)
+        llm.rerank.side_effect = lambda q, c, top_k=None: list(c)
+        pipeline = RerankPipeline(
+            pipeline="ce_llm",
+            ce_reranker=ce,
+            llm_reranker=llm,
+            ce_top_k=5,
+            llm_top_k=15,
+        )
+        with caplog.at_level(logging.WARNING, logger="memflow.reranker"):
+            out = pipeline.rerank("q", _results(*[str(i) for i in range(30)]), top_k=20)
+        assert len(out) == 5
+        warnings = [r for r in caplog.records if "silently receives" in r.message]
+        # Distinct cap values are each reported; identical caps across
+        # stages dedupe to one line by design.
+        assert len(warnings) == 2
+        assert "MEMFLOW_RERANKER_CE_TOP_K" in warnings[0].message
+        assert "MEMFLOW_RERANKER_LLM_TOP_K" in warnings[1].message
 
     def test_unknown_stage_logs_warning(self) -> None:
         # An unknown stage name yields NoopReranker fallback (stages() empty ->

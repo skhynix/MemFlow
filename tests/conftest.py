@@ -102,6 +102,7 @@ def clean_env():
         "RERANKER_LLM_API_BASE",
         "RERANKER_LLM_API_KEY",
         "RERANKER_LLM_TEMPERATURE",
+        "RERANKER_LLM_MAX_PROMPT_CHARS",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:

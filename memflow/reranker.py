@@ -113,6 +113,19 @@ def get_ce_query_instruction() -> str:
     return os.getenv("RERANKER_CE_QUERY_INSTRUCTION", "")
 
 
+def get_reranker_prompt_budget() -> int:
+    """Char budget for the whole listwise prompt (system + query + all
+    candidates). Per-doc DOC_CAP bounds each candidate, but the total is
+    FETCH_TOP_K x DOC_CAP, and raising FETCH_TOP_K alone can push the prompt
+    past the model context — the request then fails and rerank silently
+    degrades to retrieval order. Default 300_000 chars (~75-200K tokens
+    depending on language, an estimate sized for 128K-token models); set
+    the env var to match the serving model. Exceeding it only warns — the
+    call is still attempted, since the char->token estimate is coarse and
+    pool-trimming policy belongs to the operator, not this guard."""
+    return _env_num("RERANKER_LLM_MAX_PROMPT_CHARS", 300_000, cast=int)
+
+
 def get_llm_reranker_temperature() -> float:
     """Sampling temperature for the LLM reranker's chat call. Default 0
     (greedy): listwise reranking is a deterministic ranking task, and
@@ -343,6 +356,10 @@ class LLMReranker(BaseReranker):
         # optimum — body text adds noise to the candidate block).
         self._reranker_scope = resolve_stage_scope("llm", doc_scope)
         self._reranker_llm = llm or self._default_llm()
+        # Prompt-budget warnings fire once per instance: the overflow is
+        # config-driven (FETCH_TOP_K/DOC_CAP), so repeating it on every
+        # served query would only bury other log lines.
+        self._prompt_budget_warned = False
 
     def _default_llm(self) -> Any:
         from memflow.llm import LLMFactory
@@ -408,8 +425,44 @@ class LLMReranker(BaseReranker):
         if not candidates:
             return []
         messages = self._build_prompt(query, candidates)
+        # No total-length guard existed before: DOC_CAP bounds each candidate,
+        # but the prompt total is FETCH_TOP_K x DOC_CAP, so raising
+        # FETCH_TOP_K alone can exceed the model context. The request then
+        # fails below and rerank degrades to retrieval order — warn with the
+        # cause (once per instance; the overflow is config-driven and
+        # re-warning per query would spam the serving log) so operators
+        # connect the degradation to their pool setting instead of treating
+        # it as a mysterious parse failure.
+        prompt_chars = sum(len(m["content"]) for m in messages)
+        budget = get_reranker_prompt_budget()
+        if prompt_chars > budget and not self._prompt_budget_warned:
+            self._prompt_budget_warned = True
+            logger.warning(
+                "Listwise prompt is %d chars for %d candidates, over "
+                "RERANKER_LLM_MAX_PROMPT_CHARS=%d — likely exceeding the "
+                "model context, and rerank may fall back to retrieval order "
+                "(rerank would be silently degraded, not disabled). Lower "
+                "MEMFLOW_RERANKER_FETCH_TOP_K or MEMFLOW_RERANKER_DOC_CAP.",
+                prompt_chars,
+                len(candidates),
+                budget,
+            )
+        # generate() and parsing get separate excepts: a context overflow
+        # surfaces as a call error (e.g. vLLM 400), not a parse failure, and
+        # one shared "parse failed" label sent operators hunting the wrong
+        # stage of the pipeline.
         try:
             raw = self._reranker_llm.generate(messages)
+        except Exception as exc:
+            logger.warning(
+                "LLM reranker call failed (%s: %s); rerank is effectively "
+                "disabled for this query, returning retrieval order.",
+                type(exc).__name__,
+                exc,
+            )
+            result = list(candidates)
+            return result[:top_k] if top_k is not None else result
+        try:
             # The LLM returns a JSON array; parse the raw string directly to a
             # list (memflow.llm.parse_json expects a dict, so it isn't usable).
             text = raw.strip()
@@ -522,6 +575,10 @@ class RerankPipeline:
         self._reranker_llm_top_k = (
             llm_top_k or _env_num("MEMFLOW_RERANKER_LLM_TOP_K", 10, cast=int) or None
         )
+        # Cap warnings fire once per pipeline instance (per cap value): the
+        # stage caps are config, so re-warning on every served query would
+        # spam the log with a message the operator already saw.
+        self._cap_warned: set[int] = set()
 
     @property
     def pipeline(self) -> str:
@@ -588,6 +645,32 @@ class RerankPipeline:
             return self._reranker_llm_top_k
         return None
 
+    def _warn_stage_cap_below_top_k(
+        self, stage_name: str, cap: int, top_k: int
+    ) -> None:
+        """Warn (once per cap value) that a stage cap silently truncates the
+        caller's request below ``top_k`` — e.g. the Claude Code hook asks for
+        candidate_k=20 skills but LLM_TOP_K=10 delivers 10 without any error."""
+        if cap in self._cap_warned:
+            return
+        self._cap_warned.add(cap)
+        stage_env = {
+            "ce": "MEMFLOW_RERANKER_CE_TOP_K",
+            "llm": "MEMFLOW_RERANKER_LLM_TOP_K",
+        }.get(stage_name, "stage Top-K")
+        logger.warning(
+            "Reranker stage %r outputs at most %d results but the caller "
+            "requested top_k=%d — serving silently receives %d. Raise "
+            "%s to >= %d, or set it to 0 (no stage cap), if the caller "
+            "needs the full depth.",
+            stage_name,
+            cap,
+            top_k,
+            cap,
+            stage_env,
+            top_k,
+        )
+
     def rerank(
         self,
         query: str,
@@ -596,7 +679,16 @@ class RerankPipeline:
     ) -> list[SearchResult]:
         """Run each stage in order, truncating to its own Top-K, then to ``top_k``."""
         result = list(candidates)
-        for stage_name, stage in self._stage_list():
+        stages = self._stage_list()
+        # Final output = min(caller top_k, every stage cap) — check the caps
+        # up front (same guard run_retrieval.py prints for benchmark runs)
+        # so the serving path also learns when a stage cap hides results.
+        if top_k is not None:
+            for stage_name, _ in stages:
+                cap = self._stage_top_k(stage_name)
+                if cap is not None and cap < top_k:
+                    self._warn_stage_cap_below_top_k(stage_name, cap, top_k)
+        for stage_name, stage in stages:
             result = stage.rerank(query, result, top_k=self._stage_top_k(stage_name))
         if top_k is not None:
             result = result[:top_k]
