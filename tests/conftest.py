@@ -83,6 +83,26 @@ def clean_env():
         "MEMFLOW_HYBRID_RRF_TOP_K",
         "MEMFLOW_HYBRID_RRF_WEIGHTS",
         "MEMFLOW_HYBRID_RRF_K",
+        # Reranker (order mirrors .env / .env.example)
+        "MEMFLOW_RERANKER_PIPELINE",
+        "MEMFLOW_RERANKER_FETCH_TOP_K",
+        "MEMFLOW_RERANKER_SCOPE",
+        "MEMFLOW_RERANKER_CE_SCOPE",
+        "MEMFLOW_RERANKER_LLM_SCOPE",
+        "MEMFLOW_RERANKER_DOC_CAP",
+        "MEMFLOW_RERANKER_TIMEOUT",
+        "MEMFLOW_RERANKER_CE_TOP_K",
+        "MEMFLOW_RERANKER_LLM_TOP_K",
+        "RERANKER_CE_MODEL",
+        "RERANKER_CE_API_BASE",
+        "RERANKER_CE_API_KEY",
+        "RERANKER_CE_QUERY_INSTRUCTION",
+        "RERANKER_LLM_PROVIDER",
+        "RERANKER_LLM_MODEL",
+        "RERANKER_LLM_API_BASE",
+        "RERANKER_LLM_API_KEY",
+        "RERANKER_LLM_TEMPERATURE",
+        "RERANKER_LLM_MAX_PROMPT_CHARS",
     ]
     original = {k: os.environ.get(k) for k in vars_to_clear}
     for k in vars_to_clear:

@@ -21,9 +21,10 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from memflow.executor import ToolRegistry
 from memflow.learner import Learner
@@ -440,9 +441,30 @@ class MemFlow:
         self._hybrid_rrf_k = _env_int("MEMFLOW_HYBRID_RRF_K", 60, minimum=1)
         # Parsed once; falls back with a warning on malformed input.
         self._hybrid_rrf_weights_parsed = self._parse_rrf_weights()
+        # Reranker config (search-method agnostic; reranks candidates from any path).
+        # Order mirrors .env / .env.example: PIPELINE → FETCH_TOP_K → SCOPE → DOC_CAP
+        # (SCOPE is optional — code defaults per stage; DOC_CAP and TIMEOUT live
+        # in reranker.py, read lazily) → CE_TOP_K → LLM_TOP_K.
+        self._reranker_pipeline = os.getenv("MEMFLOW_RERANKER_PIPELINE", "none")
+        self._reranker_fetch_top_k = _env_int(
+            "MEMFLOW_RERANKER_FETCH_TOP_K", 100, minimum=1
+        )
+        # "" = no global override; each rerank stage falls back to its own
+        # default scope (CE=full, LLM=meta — the per-stage SkillRet optima).
+        self._reranker_scope = os.getenv("MEMFLOW_RERANKER_SCOPE", "")
+        # 0 is valid and means "no stage cap" (passed through as None below).
+        self._reranker_ce_top_k = _env_int("MEMFLOW_RERANKER_CE_TOP_K", 10, minimum=0)
+        self._reranker_llm_top_k = _env_int("MEMFLOW_RERANKER_LLM_TOP_K", 10, minimum=0)
+        self._rerank_pipeline_obj: Any = None
+        # Guards lazy construction in _get_rerank_pipeline (search is called
+        # from multiple threads under concurrent serving/benchmark load).
+        self._rerank_pipeline_lock = threading.Lock()
         # Warn once per instance when hybrid degrades to dense (the store's
         # capability is fixed at init — per-query warnings would just spam).
         self._hybrid_fallback_warned = False
+        # Warn once when FETCH_TOP_K shrinks the hybrid candidate pool below
+        # RRF_TOP_K (config fixed at init — per-query warnings would spam).
+        self._fetch_cap_warned = False
 
     # ------------------------------------------------------------------
     # add
@@ -816,7 +838,13 @@ class MemFlow:
         self, message: str, user_id: str | None, history: list[dict] | None
     ) -> dict:
         """Handle SEARCH intent - retrieve and respond."""
-        results = self.search(message, user_id=user_id, top_k=3, kind=None)
+        # chat() answers bypass the reranker (top_k=2~3 against a personal
+        # store: the over-fetch + endpoint latency buys little) — the
+        # reranked path is search()/search_skills (hook catalog). See
+        # _rerank_if_enabled for the deliberate scope split.
+        results = self.search(
+            message, user_id=user_id, top_k=3, kind=None, rerank=False
+        )
 
         if results:
             procedures_text = "\n\n".join(
@@ -949,8 +977,10 @@ class MemFlow:
         self, message: str, user_id: str | None, history: list[dict] | None
     ) -> dict:
         """Handle CONVERSATION intent - respond naturally."""
-        # Search for relevant context
-        results = self.search(message, user_id=user_id, top_k=2, kind=None)
+        # Search for relevant context (cheap path — see _handle_search).
+        results = self.search(
+            message, user_id=user_id, top_k=2, kind=None, rerank=False
+        )
 
         response = self._generate_chat_response(message, results)
         return {"response": response, "intent": "CONVERSATION"}
@@ -1022,7 +1052,9 @@ class MemFlow:
 
         for proc in explicit_procs:
             add_candidate(proc)
-        for result in self.search(message, user_id=user_id, top_k=top_k, kind=None):
+        for result in self.search(
+            message, user_id=user_id, top_k=top_k, kind=None, rerank=False
+        ):
             add_candidate(result.procedure)
         if not candidates:
             procs = self.store.list(user_id=user_id)
@@ -1068,18 +1100,20 @@ class MemFlow:
         query: str,
         user_id: str | None,
         kind: str | None,
-        top_k: int,
+        rrf_top_k: int,
     ) -> list[SearchResult]:
         """Hybrid retrieval (sparse+dense RRF) for a single query.
+
+        ``rrf_top_k`` is the fusion depth requested by the caller — passed
+        through to Qdrant as-is so the caller's cap (e.g. the reranker
+        FETCH_TOP_K bound computed in ``search``) actually reduces the
+        server-side limit instead of being re-inflated here.
 
         The store must be hybrid-capable (``store.supports_hybrid``); routing
         is decided by ``search`` before calling, so errors from
         ``search_hybrid`` here are real failures and propagate.
         """
-        # HYBRID_RRF_TOP_K: candidate depth from fusion. Never smaller than the
-        # requested final top_k so the result pool isn't under-sized.
-        rrf_top_k = max(self._hybrid_rrf_top_k, top_k)
-        candidates = self.store.search_hybrid(
+        return self.store.search_hybrid(
             query=query,
             rrf_top_k=rrf_top_k,
             user_id=user_id,
@@ -1090,6 +1124,84 @@ class MemFlow:
             dense_top_k=self._hybrid_dense_search_top_k,
             rrf_k=self._hybrid_rrf_k,
         )
+
+    # ------------------------------------------------------------------
+    # Reranker helpers
+    # ------------------------------------------------------------------
+
+    def _get_rerank_pipeline(self) -> Any:
+        """Lazily build the RerankPipeline (stage clients are only
+        constructed when reranking actually runs).
+
+        A misconfigured reranker (e.g. PIPELINE=ce without
+        RERANKER_CE_API_BASE) must not take down every search — runtime
+        endpoint failures already degrade to retrieval order, so config
+        errors degrade the same way: warn once and fall back to a
+        truncate-only pipeline. The failed build is cached (both outcomes),
+        and the double-checked lock keeps concurrent callers from
+        constructing duplicate pipelines/clients.
+        """
+        if self._rerank_pipeline_obj is not None:
+            return self._rerank_pipeline_obj
+        from memflow.reranker import NoopReranker, RerankPipeline
+
+        with self._rerank_pipeline_lock:
+            if self._rerank_pipeline_obj is not None:
+                return self._rerank_pipeline_obj
+            try:
+                pipeline = RerankPipeline(
+                    pipeline=self._reranker_pipeline,
+                    ce_top_k=self._reranker_ce_top_k or None,
+                    llm_top_k=self._reranker_llm_top_k or None,
+                    doc_scope=self._reranker_scope,
+                )
+                # Force stage construction now so config errors surface here,
+                # not on the first rerank() call.
+                pipeline.stages()
+            except Exception as exc:
+                logger.warning(
+                    "Reranker pipeline %r failed to build (%s: %s); "
+                    "reranking disabled, keeping retrieval order.",
+                    self._reranker_pipeline,
+                    type(exc).__name__,
+                    exc,
+                )
+                # NoopReranker.rerank has the same call signature the
+                # consumer uses (truncate only) — cache it so the failed
+                # build is not retried on every query.
+                pipeline = NoopReranker()
+            self._rerank_pipeline_obj = pipeline
+        return self._rerank_pipeline_obj
+
+    def _reranker_enabled(self) -> bool:
+        """Single definition of "reranking is configured on" — shared by
+        search()'s candidate-depth decision and _rerank_if_enabled's routing
+        so the two can never drift."""
+        return bool(self._reranker_pipeline) and self._reranker_pipeline.lower() != (
+            "none"
+        )
+
+    def _rerank_if_enabled(
+        self,
+        query: str,
+        candidates: list[SearchResult],
+        top_k: int,
+        rerank: bool = True,
+    ) -> list[SearchResult]:
+        """Rerank candidates when MEMFLOW_RERANKER_PIPELINE is set; otherwise truncate.
+
+        ``rerank=False`` skips reranking even when it is globally enabled —
+        used by internal low-top_k callers (chat context, planner context,
+        delete candidates) that should not pay the reranker's over-fetch +
+        endpoint latency. Note this means chat() answers are NOT reranked
+        even under the adopted reranker config; the reranked path is
+        search()/search_skills (e.g. the Claude Code hook).
+        """
+        if not candidates:
+            return []
+        if rerank and self._reranker_enabled():
+            pipeline = self._get_rerank_pipeline()
+            return pipeline.rerank(query, candidates, top_k=top_k)
         return candidates[:top_k]
 
     # ------------------------------------------------------------------
@@ -1102,50 +1214,97 @@ class MemFlow:
         user_id: str | None = None,
         top_k: int = 5,
         kind: str | None = "skill",
+        rerank: bool = True,
     ) -> list[SearchResult] | list[list[SearchResult]]:
         """Retrieve relevant procedures by similarity.
 
-        When hybrid search is enabled (``MEMFLOW_HYBRID_SEARCH_ENABLED=on``)
-        and the store's ``supports_hybrid`` probe passes, single-string
-        queries go through sparse+dense RRF fusion; batch (list) queries
-        always use the plain dense path. An enabled-but-unsupported store
-        (e.g. a dense-only collection) degrades to dense with a one-time
-        warning. The Top-K env vars
-        (``MEMFLOW_HYBRID_SPARSE_SEARCH_TOP_K`` /
-        ``MEMFLOW_HYBRID_DENSE_SEARCH_TOP_K`` /
-        ``MEMFLOW_HYBRID_RRF_TOP_K``) control the depth at each stage;
-        ``top_k`` here truncates the final output.
+        Pipeline (single-string queries):
+        1. **Retrieval** — hybrid (sparse+dense RRF) when
+           ``MEMFLOW_HYBRID_SEARCH_ENABLED=on`` and the store's
+           ``supports_hybrid`` probe passes, otherwise dense-only. An
+           enabled-but-unsupported store (e.g. a dense-only collection)
+           degrades to dense with a one-time warning. Candidate depth is
+           ``max(configured pool, top_k)`` — FETCH_TOP_K/RRF_TOP_K size the
+           pool, but a caller asking for more than the pool always gets its
+           full request (the pool is a floor for retrieval, not a ceiling on
+           the caller's top_k); deep-top_k callers therefore feed more than
+           FETCH_TOP_K candidates to the reranker.
+        2. **Rerank** — when ``MEMFLOW_RERANKER_PIPELINE`` is set
+           (``ce`` | ``llm`` | ``ce_llm`` | ``llm_ce``), candidates are
+           reranked and truncated to ``top_k``. Without reranking the
+           retrieved candidates are truncated to ``top_k``.
+
+        Batch (list) queries always use the plain dense path and bypass
+        the reranker.
 
         Args:
             query: Single query string or list of queries
             user_id: User ID for filtering
             top_k: Number of results per query (final truncation)
             kind: Record kind filter. Use None to search all records.
+            rerank: Set False to bypass the reranker (and its candidate
+                over-fetch) even when ``MEMFLOW_RERANKER_PIPELINE`` is on —
+                for internal low-top_k callers (chat context, delete
+                candidates) that should not pay reranker latency.
 
         Returns:
             Single list for single query, list of lists for batch
         """
         if isinstance(query, list):
             return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
-        if self._hybrid_search_enabled:
-            if getattr(self.store, "supports_hybrid", False):
-                return self._search_hybrid(query, user_id, kind, top_k)
-            # Enabled but the store/collection can't serve hybrid (e.g. a
-            # dense-only collection). Degrade to dense — warn once, since the
-            # capability is fixed at store init and per-query warnings spam.
-            if not self._hybrid_fallback_warned:
-                self._hybrid_fallback_warned = True
-                logger.warning(
-                    "Hybrid search enabled but %s is attached to a collection "
-                    "without sparse vectors (created before hybrid support); "
-                    "using dense search. Existing collections keep their "
-                    "schema regardless of the switch — to enable hybrid, "
-                    "drop and re-seed the collection while "
-                    "MEMFLOW_HYBRID_SEARCH_ENABLED=on (e.g. run_seeding.py "
-                    "--clear-existing).",
-                    type(self.store).__name__,
-                )
-        return self.store.search(query, top_k=top_k, user_id=user_id, kind=kind)
+        rerank_on = rerank and self._reranker_enabled()
+        # Hybrid path: RRF_TOP_K sets the candidate depth; reranker truncates.
+        if self._hybrid_search_enabled and getattr(
+            self.store, "supports_hybrid", False
+        ):
+            if rerank_on:
+                # Shrink the pool to RERANKER_FETCH_TOP_K when it is the
+                # smaller of the two configured depths — not a hard ceiling
+                # on reranker input: max(..., top_k) below always honors a
+                # caller asking deeper than the pool (e.g. R@200 bench runs
+                # feed 200 candidates; the prompt-budget guard covers the
+                # context risk). Warn once when the shrink is active, since
+                # the pool silently evaluates fewer candidates than
+                # RRF_TOP_K configured (.env.example only documents this as
+                # a comment; every other silent degradation here warns).
+                pool_k = min(self._hybrid_rrf_top_k, self._reranker_fetch_top_k)
+                if (
+                    self._reranker_fetch_top_k < self._hybrid_rrf_top_k
+                    and not self._fetch_cap_warned
+                ):
+                    self._fetch_cap_warned = True
+                    logger.warning(
+                        "Reranker FETCH_TOP_K=%d < HYBRID_RRF_TOP_K=%d: the "
+                        "candidate pool is capped at FETCH_TOP_K (queries "
+                        "requesting more still get their full depth). Keep "
+                        "the two equal unless the shrink is intended.",
+                        self._reranker_fetch_top_k,
+                        self._hybrid_rrf_top_k,
+                    )
+                rrf_k = max(pool_k, top_k)
+            else:
+                rrf_k = max(self._hybrid_rrf_top_k, top_k)
+            candidates = self._search_hybrid(query, user_id, kind, rrf_k)
+            return self._rerank_if_enabled(query, candidates, top_k, rerank=rerank)
+        # Enabled but the store/collection can't serve hybrid (e.g. a
+        # dense-only collection). Degrade to dense — warn once, since the
+        # capability is fixed at store init and per-query warnings spam.
+        if self._hybrid_search_enabled and not self._hybrid_fallback_warned:
+            self._hybrid_fallback_warned = True
+            logger.warning(
+                "Hybrid search enabled but %s is attached to a collection "
+                "without sparse vectors (created before hybrid support); "
+                "using dense search. Existing collections keep their "
+                "schema regardless of the switch — to enable hybrid, "
+                "drop and re-seed the collection while "
+                "MEMFLOW_HYBRID_SEARCH_ENABLED=on (e.g. run_seeding.py "
+                "--clear-existing).",
+                type(self.store).__name__,
+            )
+        # Dense-only path: over-fetch to reranker candidate depth when reranking.
+        fetch_k = max(top_k, self._reranker_fetch_top_k) if rerank_on else top_k
+        candidates = self.store.search(query, top_k=fetch_k, user_id=user_id, kind=kind)
+        return self._rerank_if_enabled(query, candidates, top_k, rerank=rerank)
 
     # ------------------------------------------------------------------
     # search_async - Async search for single or multiple queries
@@ -1379,6 +1538,12 @@ class MemFlow:
         Returns:
             TaskPlan with steps to execute.
         """
+        # NOTE: planner context keeps the reranker ON (unlike chat/delete
+        # callers) — this MR only unified the search path and deliberately
+        # does not change run() behavior. Cost: with reranking on, each plan
+        # and replan pays the FETCH_TOP_K over-fetch + one rerank round trip
+        # to pick top_k=5. Switch to rerank=False if that latency is not
+        # justified.
         results = self.search(task, user_id=user_id, kind=None)
         context = (
             "\n\n---\n\n".join(
@@ -1527,6 +1692,12 @@ class MemFlow:
           5. Repeat until all steps done or max attempts reached
         """
         # Retrieve context
+        # NOTE: planner context keeps the reranker ON (unlike chat/delete
+        # callers) — this MR only unified the search path and deliberately
+        # does not change run() behavior. Cost: with reranking on, each plan
+        # and replan pays the FETCH_TOP_K over-fetch + one rerank round trip
+        # to pick top_k=5. Switch to rerank=False if that latency is not
+        # justified.
         results = self.search(task, user_id=user_id, kind=None)
         context = (
             "\n\n---\n\n".join(

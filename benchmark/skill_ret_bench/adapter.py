@@ -10,7 +10,7 @@ import os
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from memflow import MemFlow, Procedure
 
@@ -393,26 +393,55 @@ class MemFlowSkillRetAdapter:
         backend: str,
         llm_provider: str,
         llm_model: str,
+        search_fn: Callable[..., list[Any]] | None = None,
+        mode_label: str | None = None,
     ) -> None:
+        """
+        Args:
+            search_fn: Optional replacement for ``memflow.search`` taking
+                ``(query, user_id=, top_k=, kind=)`` and returning
+                ``SearchResult`` lists. Injected by retrieval evaluation when
+                the caller needs explicit search arguments (e.g. forcing
+                dense/sparse/hybrid mode on ``store.search_hybrid``) instead
+                of the env-routed ``MemFlow.search`` path. ``None`` (default)
+                keeps using ``memflow.search`` unchanged.
+            mode_label: Optional label for the search mode, recorded in
+                ``get_system_info()`` so results are self-describing.
+        """
         self.memflow = memflow
         self.user_id = user_id
         self.corpus_size = corpus_size
         self.backend = backend
         self.llm_provider = llm_provider
         self.llm_model = llm_model
+        self.search_fn = search_fn
+        self.mode_label = mode_label
+
+    def _search(self, query: Any, **kwargs: Any) -> Any:
+        """Route through the injected ``search_fn`` when present."""
+        if self.search_fn is not None:
+            return self.search_fn(query, **kwargs)
+        return self.memflow.search(query, **kwargs)
 
     def get_system_name(self) -> str:
         return "memflow_search_skill_ret"
 
     def get_system_info(self) -> dict[str, Any]:
-        return {
-            "method": "memflow.search",
+        info: dict[str, Any] = {
+            # Name the injected function's mode instead of hard-coding one
+            # implementation — an injected search_fn may call anything.
+            "method": (
+                f"search_fn:{self.mode_label}" if self.search_fn else "memflow.search"
+            ),
             "backend": self.backend,
             "user_id": self.user_id,
             "corpus_size": self.corpus_size,
             "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
         }
+        if self.mode_label:
+            info["mode"] = self.mode_label
+        return info
 
     def retrieve(
         self,
@@ -432,7 +461,7 @@ class MemFlowSkillRetAdapter:
         """
         excluded = exclude_procedure_ids or set()
         fetch_k = k + len(excluded)
-        search_results = self.memflow.search(
+        search_results = self._search(
             query, user_id=self.user_id, top_k=fetch_k, kind="skill"
         )
         retrieved: list[RetrievedSkill] = []
@@ -468,6 +497,14 @@ class MemFlowSkillRetAdapter:
         """
         query_strings = [q for q, _ in queries]
         exclude_map = {i: excl for i, (_, excl) in enumerate(queries)}
+
+        # An injected search_fn is single-query only, so fall back to
+        # per-query retrieve() instead of the list-batch path.
+        if self.search_fn is not None:
+            return [
+                self.retrieve(query, k=k, exclude_procedure_ids=excl)
+                for query, excl in queries
+            ]
 
         # Use search with list (auto-detects batch)
         max_exclude = max((len(excl) for excl in exclude_map.values()), default=0)
