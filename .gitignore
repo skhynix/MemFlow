@@ -1,5 +1,4 @@
 # Python
-.pyc
 *.pyc
 __pycache__/
 *.py[cod]
@@ -43,8 +42,10 @@ MANIFEST
 .DS_Store
 Thumbs.db
 
-# Project specific
-tags
+# Coding agents
+.claude/
+# Claude hook session activation state (written at runtime by claude_hook)
+/.memflow/claude-sessions/
 
 # Local environment files
 .env
@@ -52,24 +53,16 @@ tags
 !.env.example
 /.memflow/*.env
 
-# Coding agents
-.claude/
+# Project
+tags
+scripts/qdrant_data/
 
-# Local Claude hook session activation state
-/.memflow/claude-sessions/
-
-# Docker volumes
-postgres_data/
-
-# Benchmark results
-benchmark/results/
-results/
-
-# Local SkillReason-Bench corpus artifacts (downloaded from HuggingFace)
+# Benchmark datasets (downloaded/cloned inputs)
+benchmark/skill_ret_bench/data/
 benchmark/skill_reason_bench/data/
 
-# Generated SkillReason-Bench charts (regenerable from results JSON via
-# plot_recall_curves.py); kept on disk for docs/papers, not versioned
+# Benchmark results (every harness writes to the root results/ by default;
+# charts are regenerable from those JSONs via plot_recall_curves.py and stay
+# on disk for docs/papers, not versioned)
+results/
 benchmark/skill_reason_bench/plots/
-
-benchmark/skill_ret_bench/data/SKILLRET/
